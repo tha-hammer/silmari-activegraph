@@ -1,0 +1,75 @@
+"""Behavior 10: credential-gated real OpenRouter free-router smoke test."""
+
+from __future__ import annotations
+
+import json
+import os
+
+import pytest
+
+from activegraph.llm import LLMBehaviorError, LLMMessage
+from activegraph.llm.baml_provider import BamlLLMProvider
+
+
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+OPENROUTER_FREE_MODEL = "openrouter/free"
+
+
+def test_openrouter_live_generated_callable_exists() -> None:
+    """Keep a real Red/Green signal even when the live credential is absent."""
+    from activegraph.baml_client import baml_sdk
+
+    assert callable(getattr(baml_sdk, "complete_openrouter_live"))
+
+
+def test_openrouter_live_build_request_targets_stable_free_router(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    from activegraph.baml_client import baml_sdk
+
+    request = baml_sdk.complete_openrouter_live__build_request(
+        system="Say hi.",
+        messages_text="[]",
+        timeout_ms=1_000,
+    )
+    payload = json.loads(request["body"])
+
+    assert request["method"] == "POST"
+    assert request["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert request["headers"]["authorization"] == "Bearer test-key"
+    assert payload["model"] == OPENROUTER_FREE_MODEL
+
+
+@pytest.mark.live_llm
+@pytest.mark.skipif(
+    OPENROUTER_API_KEY is None,
+    reason="set OPENROUTER_API_KEY to run live OpenRouter tests",
+)
+def test_complete_live_against_openrouter_free_model() -> None:
+    provider = BamlLLMProvider(vendor="openrouter_live")
+
+    try:
+        response = provider.complete(
+            system="Return a friendly greeting in exactly five words.",
+            messages=[LLMMessage(role="user", content="Say hello.")],
+            model=OPENROUTER_FREE_MODEL,
+            max_tokens=32,
+            temperature=0.0,
+            top_p=1.0,
+            output_schema=None,
+            timeout_seconds=60,
+        )
+    except LLMBehaviorError as exc:
+        if exc.reason == "llm.rate_limited":
+            pytest.skip("OpenRouter free tier rate-limited this live request")
+        raise
+
+    assert response.raw_text.strip()
+    assert response.input_tokens > 0
+    assert response.output_tokens > 0
+    assert response.cost_usd >= 0
+    assert response.latency_seconds > 0
+    assert response.model == OPENROUTER_FREE_MODEL
+    assert response.finish_reason
+    assert response.provider_meta["baml_function"] == "complete_openrouter_live"

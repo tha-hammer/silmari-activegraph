@@ -1494,7 +1494,7 @@ client<llm> ActivegraphFallbackCascade {
 ## Behavior 10: baml_provider_completes_live_against_openrouter_free_model
 
 ### Test Specification
-**Given**: `OpenRouterLive` — a **distinct** `client<llm>` from the mock-routed `OpenRouterPrimitive` declared in Behavior 6 (`OpenRouterPrimitive`'s `base_url` points at the session-scoped mock server; reusing that name here for the real API would collide) — configured for a real OpenRouter free-tier (`:free`-suffixed) model, with a real `OPENROUTER_API_KEY` (**required** — this test is `skipif`-skipped, not faked, when the key is absent)
+**Given**: `OpenRouterLive` — a **distinct** `client<llm>` from the mock-routed `OpenRouterPrimitive` declared in Behavior 6 (`OpenRouterPrimitive`'s `base_url` points at the session-scoped mock server; reusing that name here for the real API would collide) — configured with OpenRouter's stable `openrouter/free` dynamic selector for currently available free models, with a real `OPENROUTER_API_KEY` (**required** — this test is `skipif`-skipped, not faked, when the key is absent)
 **When**: `BamlLLMProvider(vendor="openrouter_live").complete()` is called with a real, small `AssembledPrompt`
 **Then**: a real HTTPS request leaves the process, reaches the real OpenRouter API, and a real model-generated response comes back, parsed into a real `LLMResponse` with non-empty `raw_text`, `input_tokens > 0`, `output_tokens > 0`, and a real `finish_reason`
 
@@ -1528,7 +1528,7 @@ pytestmark = pytest.mark.skipif(
 def test_complete_live_against_openrouter_free_model():
     provider = BamlLLMProvider(vendor="openrouter_live")
     r = provider.complete(system="Say hi in five words.", messages=[...],
-                           model=os.environ.get("OPENROUTER_FREE_MODEL", "<pick a real :free model>"),
+                           model="openrouter/free",
                            max_tokens=32, temperature=0.0, top_p=1.0,
                            output_schema=None, timeout_seconds=30)
     assert r.raw_text
@@ -1546,7 +1546,7 @@ client<llm> OpenRouterLive {
   options {
     base_url "https://openrouter.ai/api/v1"
     api_key env.OPENROUTER_API_KEY
-    model env.OPENROUTER_FREE_MODEL  // set to a currently-live :free model id
+    model "openrouter/free"  // stable dynamic selector for currently available free models
   }
 }
 ```
@@ -1554,17 +1554,17 @@ client<llm> OpenRouterLive {
 #### 🔵 Refactor: Improve Code
 **File**: `activegraph/baml_src/clients.baml`
 - No duplication: `OpenRouterLive` is deliberately separate from the mock-routed `OpenRouterPrimitive` (Behavior 6) rather than sharing a declaration with two conflicting `base_url` values
-- Reveals intent: doc-comment notes the model id is env-driven specifically because OpenRouter's free-model catalog changes over time, and that `OpenRouterLive` is intentionally not reused by the mock-double behaviors
+- Reveals intent: doc-comment notes that `openrouter/free` dynamically absorbs free-model catalog churn, leaves `OPENROUTER_API_KEY` as the only required environment variable, and keeps `OpenRouterLive` separate from mock-double behaviors
 - Complexity: unchanged
 - No shallow wrappers: N/A
 - Fits existing patterns: OpenRouter is OpenAI-API-compatible, so `provider openai` + `base_url` override matches BAML's documented pattern for OpenAI-compatible aggregators
 
 ### Success Criteria
 **Automated:**
-- [ ] Test fails for right reason (Red): fails/skips before `OpenRouterLive` + a real key are configured
+- [x] Test fails for right reason (Red): the credential-independent check reaches the missing generated `complete_openrouter_live` callable, while the live call explicitly skips without a key
 - [ ] Test passes (Green) when `OPENROUTER_API_KEY` is set: `pytest tests/test_baml_provider_live_openrouter.py -x -m live_llm`
-- [ ] Test is explicitly `skipif`-skipped (not silently green, not faked) when the key is absent — the skip reason string names `OPENROUTER_API_KEY` by name, verified by asserting on `pytest --collect-only -q`'s skip report or by running with `-rs`
-- [ ] All tests pass after refactor: `pytest`
+- [x] Test is explicitly `skipif`-skipped (not silently green, not faked) when the key is absent — the skip reason string names `OPENROUTER_API_KEY` by name, verified by asserting on `pytest --collect-only -q`'s skip report or by running with `-rs`
+- [x] All tests pass after refactor: `pytest`
 
 **Manual:**
 - [ ] Real response text and real token/cost figures captured and reviewed once, with a real `OPENROUTER_API_KEY`

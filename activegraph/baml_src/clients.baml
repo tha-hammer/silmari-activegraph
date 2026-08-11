@@ -58,6 +58,19 @@ client<llm> ActivegraphOpenRouter {
     },
 }
 
+/// Real OpenRouter client, deliberately separate from the mock-routed
+/// ActivegraphOpenRouter. `openrouter/free` is OpenRouter's stable dynamic
+/// selector for currently available free models, avoiding individual model
+/// slug churn while keeping OPENROUTER_API_KEY as the only required env var.
+client<llm> ActivegraphOpenRouterLive {
+    provider: openai,
+    options: {
+        model: "openrouter/free",
+        api_key: env.OPENROUTER_API_KEY,
+        base_url: "https://openrouter.ai/api/v1",
+    },
+}
+
 /// The vendor priority is intentional: prefer Anthropic, then OpenAI, then
 /// the OpenRouter-compatible route. Each primitive remains independently
 /// mockable and retains its own wire protocol. BAML 0.15 compiler2 currently
@@ -191,6 +204,24 @@ function complete_fallback_cascade(
     timeout_ms: int,
 ) -> BamlCompletionEnvelope {
     client: ActivegraphFallbackCascade
+    prompt: `
+        System instructions:
+        ${system}
+
+        Conversation (JSON):
+        ${messages_text}
+
+        Return the completion and usage in this exact typed shape:
+        ${ctx.output_format}
+    `
+}
+
+function complete_openrouter_live(
+    system: string,
+    messages_text: string,
+    timeout_ms: int,
+) -> BamlCompletionEnvelope {
+    client: ActivegraphOpenRouterLive
     prompt: `
         System instructions:
         ${system}
