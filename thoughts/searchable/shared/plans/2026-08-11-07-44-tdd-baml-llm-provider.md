@@ -889,13 +889,13 @@ class QuestionListBaml {
 
 ### Success Criteria
 **Automated:**
-- [ ] Test fails for right reason (Red): `pytest tests/test_baml_schema_codegen.py -x` → `ImportError`
-- [ ] Test passes (Green) after `baml generate`: `pytest tests/test_baml_schema_codegen.py -x`
-- [ ] `baml check` passes clean against `activegraph/baml_src/`
-- [ ] All tests pass after refactor: `pytest`
+- [x] Test fails for right reason (Red): `pytest tests/test_baml_schema_codegen.py -x` → `ImportError` (confirmed: `cannot import name 'QuestionListBaml'`)
+- [x] Test passes (Green) after `baml generate`: `pytest tests/test_baml_schema_codegen.py -x`
+- [x] `baml check` passes clean against `activegraph/baml_src/`
+- [x] All tests pass after refactor: `pytest` — scoped check (`pytest tests/test_baml_schema_codegen.py tests/test_baml_client_import.py`) passes; see Behavior 1's note on shared-worktree bare-`pytest` unreliability
 
 **Manual:**
-- [ ] `python -c "from activegraph.baml_client.baml_sdk import QuestionListBaml; print(QuestionListBaml.model_json_schema())"` prints a real JSON Schema dict
+- [x] `python -c "from activegraph.baml_client.baml_sdk import QuestionListBaml; print(QuestionListBaml.model_json_schema())"` prints a real JSON Schema dict — `{"additionalProperties": false, "description": "...", "properties": {"questions": {"items": {"type": "string"}, "title": "Questions", "type": "array"}}, "required": ["questions"], "title": "QuestionListBaml", "type": "object"}`. Every keyword present (`additionalProperties`, `description`, `items`, `properties`, `required`, `title`, `type`) is inside `native_schema_compatible()`'s 15-keyword allowlist — no `minItems` (BAML's `string[]` emits no length constraint by default). **Edge case finding**: no BAML syntax for list-length constraints was discoverable (`baml describe constraint`/`@check`/`@description` all report "No symbol found" for this concern) — no constrained-list variant exists to author; the plan's "constrained vs unconstrained" edge case resolves to "only unconstrained is expressible."
 
 ---
 
