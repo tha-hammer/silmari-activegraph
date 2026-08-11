@@ -353,5 +353,244 @@ BATCH2_FINDINGS = [
 ]
 
 
+# BATCH3 (9 more findings): same low-risk profile as batches 1-2. One
+# entry (12.1) is a genuine one-line functional change rather than a
+# docstring/comment reword — still single-file, single-line, and the
+# correct output is unambiguous (match the ensure_ascii convention
+# every other canonical-hash function in the package already uses).
+BATCH3_FINDINGS = [
+    {
+        "finding_id": "01.5",
+        "category": "stale_comment",
+        "file": "activegraph/core/graph.py",
+        "summary": (
+            "Graph.emit's comment says 'Fail-fast serialization check at "
+            "emit time so bad payloads never land in the in-memory log "
+            "either (CONTRACT v0.5 #4)', but the check that follows only "
+            "runs `if self._store is not None:` — a store-less graph accepts "
+            "unserializable payloads despite the comment's unconditional "
+            "framing. Reword the comment to note the check is conditional on "
+            "a store being attached, not remove the CONTRACT v0.5 #4 "
+            "citation."
+        ),
+        "hint_old_text": (
+            "            # Fail-fast serialization check at emit time so bad payloads never\n"
+            "            # land in the in-memory log either (CONTRACT v0.5 #4).\n"
+            "            if self._store is not None:\n"
+        ),
+        "hint_lines": "570-572",
+        "spec_source": "specs/01-core.md",
+    },
+    {
+        "finding_id": "01.7",
+        "category": "stale_docstring",
+        "file": "activegraph/core/view.py",
+        "summary": (
+            "View's class docstring says 'nothing done to it mutates the "
+            "graph', but View.objects()/.relations() only copy the outer "
+            "list — the contained Object/Relation instances returned are the "
+            "live, non-copied projection objects, so e.g. "
+            "`view.objects()[0].data['x'] = 1` mutates graph state directly, "
+            "bypassing the event log. Reword only the clause 'but nothing "
+            "done to it mutates the graph' to note that filtering the view "
+            "doesn't mutate the graph, but mutating an object/relation "
+            "returned from it does (since they're the live instances, not "
+            "copies). Do not change the rest of the docstring or any code."
+        ),
+        "hint_old_text": (
+            "    (CONTRACT #11). A View is a point-in-time snapshot — filter it\n"
+            "    with :meth:`objects` / :meth:`relations` / :meth:`events`, but\n"
+            "    nothing done to it mutates the graph; mutations go through the\n"
+            "    context's propose/patch surface and land as events.\n"
+        ),
+        "hint_lines": "21-25",
+        "spec_source": "specs/01-core.md",
+    },
+    {
+        "finding_id": "05.4",
+        "category": "missing_export",
+        "file": "activegraph/__init__.py",
+        "summary": (
+            "DeliveryMode is exported from activegraph.sinks.__init__ but "
+            "missing from this top-level package's sinks re-export block, "
+            "unlike every sibling sink type (DeliveryContext, EventSink, "
+            "JSONLEventSink, OverflowPolicy, RecordedDelivery, RecordingSink, "
+            "SinkConfig, SinkHandle, SinkState, SinkStatus are all here; "
+            "DeliveryMode alone is missing). Add `DeliveryMode,` to this "
+            "import block, keeping alphabetical order (it goes right after "
+            "the opening paren, before DeliveryContext). You will also need "
+            "to add \"DeliveryMode\" to this module's `__all__` list further "
+            "down the file (use read_source on a wider range if you need to "
+            "find it) — call apply_patch twice, once for each edit."
+        ),
+        "hint_old_text": (
+            "from activegraph.sinks import (\n"
+            "    DeliveryContext,\n"
+            "    EventSink,\n"
+        ),
+        "hint_lines": "69-71",
+        "spec_source": "specs/05-sinks.md",
+    },
+    {
+        "finding_id": "08.1",
+        "category": "stale_docstring",
+        "file": "activegraph/llm/prompt.py",
+        "summary": (
+            "The module docstring describes AssembledPrompt.hash() as 'the "
+            "cache key used by the replay layer', but the runtime's actual "
+            "cache key (built by _hash_turn_prompt in runtime.py) always "
+            "includes a 'tools' field that AssembledPrompt.hash()'s payload "
+            "never has, so the two can never agree — hash()/canonical_json() "
+            "have no non-test call sites anywhere in the repo (confirmed by "
+            "grep). Reword only the sentence 'This is the cache key used by "
+            "the replay layer.' to say hash() is a stable content-identity "
+            "helper that is NOT the runtime's actual LLM-cache key (that's "
+            "built separately, per-turn, in runtime.py). Keep the rest of "
+            "the bullet (the SHA-256/canonical JSON description, 'Hash "
+            "stability matters; tests snapshot it.') unchanged."
+        ),
+        "hint_old_text": (
+            "  * `AssembledPrompt.hash()` returns a stable SHA-256 over the\n"
+            "    canonical JSON of {model, system, messages, output_schema_name,\n"
+            "    temperature, max_tokens, top_p, deterministic}. This is the cache\n"
+            "    key used by the replay layer. Hash stability matters; tests\n"
+            "    snapshot it.\n"
+        ),
+        "hint_lines": "20-24",
+        "spec_source": "specs/08-llm.md",
+    },
+    {
+        "finding_id": "08.8",
+        "category": "missing_export",
+        "file": "activegraph/llm/__init__.py",
+        "summary": (
+            "This package's __all__ omits sanitize_tool_name and "
+            "native_schema_compatible even though runtime.py imports and "
+            "uses both (via activegraph.llm.wire and activegraph.llm.native "
+            "directly, not through this package). This file currently does "
+            "not import either function at module level at all — you need "
+            "TWO edits, each via apply_patch: (1) add a new import line "
+            "`from activegraph.llm.native import native_schema_compatible` "
+            "and `from activegraph.llm.wire import sanitize_tool_name` near "
+            "the other `from activegraph.llm.*` import lines (alphabetical "
+            "order: native then provider then recorded then types then "
+            "wire — wire's import doesn't exist yet so add it after types); "
+            "(2) add \"native_schema_compatible\" and \"sanitize_tool_name\" "
+            "to the __all__ list (alphabetical order). Read the whole file "
+            "with read_source first (it's short) so both edits are precise."
+        ),
+        "hint_old_text": (
+            "from activegraph.llm.provider import LLMProvider\n"
+            "from activegraph.llm.recorded import RecordedLLMProvider, RecordingLLMProvider\n"
+            "from activegraph.llm.types import LLMMessage, LLMResponse, ToolCall\n"
+        ),
+        "hint_lines": "43-45",
+        "spec_source": "specs/08-llm.md",
+    },
+    {
+        "finding_id": "09.2",
+        "category": "stale_docstring",
+        "file": "activegraph/observability/metrics.py",
+        "summary": (
+            "activegraph_tools_failed_total's MetricSpec description says "
+            "'Tool calls that produced a tool.failed event.', but no "
+            "tool.failed event type exists anywhere in the codebase "
+            "(confirmed by grep — only this docstring and one unrelated code "
+            "comment mention the string 'tool.failed'). Reword the "
+            "description to not claim a specific event name that doesn't "
+            "exist — e.g. describe it as counting failed tool calls, without "
+            "naming a 'tool.failed' event."
+        ),
+        "hint_old_text": (
+            "    MetricSpec(\n"
+            "        \"activegraph_tools_failed_total\",\n"
+            "        \"counter\",\n"
+            "        (\"tool\", \"reason\"),\n"
+            "        \"Tool calls that produced a tool.failed event.\",\n"
+            "    ),\n"
+        ),
+        "hint_lines": "152-157",
+        "spec_source": "specs/09-tools-behaviors.md",
+    },
+    {
+        "finding_id": "09.3",
+        "category": "stale_docstring",
+        "file": "activegraph/tools/errors.py",
+        "summary": (
+            "ToolError's class docstring enumerates nine legal reason codes, "
+            "but tool.max_turns_exhausted (raised in runtime.py) and "
+            "tool.unrecorded_external_io (used in tools/web_fetch.py) are "
+            "both actually used in the code and are missing from this "
+            "enumerated list. Add both to the list, in the same style as the "
+            "existing entries. This is a documentation-only, additive fix — "
+            "do NOT touch the _TOOL_REASON_PROSE dict elsewhere in the file, "
+            "that's a separate, larger change out of scope here."
+        ),
+        "hint_old_text": (
+            "      tool.timeout, tool.network_error, tool.invalid_input,\n"
+            "      tool.invalid_output, tool.execution_error,\n"
+            "      tool.unknown_tool, tool.fixture_missing,\n"
+            "      budget.tool_calls_exhausted, budget.cost_exhausted.\n"
+        ),
+        "hint_lines": "282-285",
+        "spec_source": "specs/09-tools-behaviors.md",
+    },
+    {
+        "finding_id": "10.3",
+        "category": "stale_docstring",
+        "file": "activegraph/cli/main.py",
+        "summary": (
+            "The 'no such run' error message printed by cmd_promote tells "
+            "the operator to run `activegraph inspect <url> --runs` to list "
+            "runs, but cmd_inspect has no --runs option at all (confirmed by "
+            "reading its full @click.option list) and no other CLI command "
+            "lists runs either. Remove the false parenthetical hint "
+            "'(activegraph inspect {url} --runs lists them)' — do not invent "
+            "a replacement suggestion or add a new flag, just remove the "
+            "false claim so the message states only the fact (no such run) "
+            "without a misleading pointer."
+        ),
+        "hint_old_text": (
+            "            click.echo(\n"
+            "                f\"{label_} {rid!r}: no such run in {url} \"\n"
+            "                f\"(activegraph inspect {url} --runs lists them)\",\n"
+            "                err=True,\n"
+            "            )\n"
+        ),
+        "hint_lines": "913-917",
+        "spec_source": "specs/10-observability-trace-cli.md",
+    },
+    {
+        "finding_id": "12.1",
+        "category": "functional_consistency",
+        "file": "activegraph/llm/embedding_cache.py",
+        "summary": (
+            "hash_embedding_request uses json.dumps(..., ensure_ascii=False, "
+            "sort_keys=True, separators=(',', ':')), while every other "
+            "canonical-hash implementation in the package "
+            "(AssembledPrompt.canonical_json in llm/prompt.py, "
+            "_hash_turn_prompt in runtime.py, _canonical_prompt_payload in "
+            "llm/recorded.py) omits ensure_ascii entirely and so gets "
+            "json.dumps's default of True — a non-ASCII input text "
+            "canonicalizes differently under this one hashing scheme than "
+            "every other hash in the codebase. Remove the `ensure_ascii=False,` "
+            "line entirely so this function falls back to the same default "
+            "(True) every other canonical-hash function in the package uses. "
+            "Do not change sort_keys or separators."
+        ),
+        "hint_old_text": (
+            "    canonical = json.dumps(\n"
+            "        {\"model\": model, \"texts\": texts},\n"
+            "        ensure_ascii=False,\n"
+            "        sort_keys=True,\n"
+            "        separators=(\",\", \":\"),\n"
+            "    )\n"
+        ),
+        "hint_lines": "23-28",
+        "spec_source": "specs/12-data-flow.md",
+    },
+]
+
+
 # Active batch: finding_loader seeds whatever this currently points at.
-PILOT_FINDINGS = BATCH2_FINDINGS
+PILOT_FINDINGS = BATCH3_FINDINGS

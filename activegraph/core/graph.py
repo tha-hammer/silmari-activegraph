@@ -567,8 +567,8 @@ class Graph:
     def emit(self, event: Event) -> Event:
         """Append, project, persist, offer sinks, then notify listeners."""
         with self._emit_lock:
-            # Fail-fast serialization check at emit time so bad payloads never
-            # land in the in-memory log either (CONTRACT v0.5 #4).
+            # Fail-fast serialization check at emit time if a store is attached,
+            # so bad payloads never reach durable storage (CONTRACT v0.5 #4).
             if self._store is not None:
                 from activegraph.store.serde import validate_event
 

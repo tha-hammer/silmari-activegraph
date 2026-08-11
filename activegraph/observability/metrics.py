@@ -153,7 +153,7 @@ METRIC_NAMES: tuple[MetricSpec, ...] = (
         "activegraph_tools_failed_total",
         "counter",
         ("tool", "reason"),
-        "Tool calls that produced a tool.failed event.",
+        "Tool calls that failed.",
     ),
     MetricSpec(
         "activegraph_tools_duration_seconds",

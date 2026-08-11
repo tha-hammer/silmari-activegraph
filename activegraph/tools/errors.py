@@ -282,6 +282,7 @@ class ToolError(ExecutionError, Exception):
       tool.timeout, tool.network_error, tool.invalid_input,
       tool.invalid_output, tool.execution_error,
       tool.unknown_tool, tool.fixture_missing,
+      tool.max_turns_exhausted, tool.unrecorded_external_io,
       budget.tool_calls_exhausted, budget.cost_exhausted.
 
     Constructor signature ``(reason, message, *, payload_extras=)`` is

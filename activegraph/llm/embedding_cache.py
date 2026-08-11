@@ -22,7 +22,6 @@ def hash_embedding_request(*, texts: list[str], model: str) -> str:
 
     canonical = json.dumps(
         {"model": model, "texts": texts},
-        ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )

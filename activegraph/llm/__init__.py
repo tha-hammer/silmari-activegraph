@@ -33,6 +33,7 @@ from activegraph.llm.cache import LLMCache
 from activegraph.llm.embedding import EmbeddingProvider, HashEmbeddingProvider
 from activegraph.llm.embedding_cache import EmbeddingCache
 from activegraph.llm.errors import LLMBehaviorError, MissingProviderError
+from activegraph.llm.native import native_schema_compatible
 from activegraph.llm.openai import OpenAIProvider
 from activegraph.llm.parsing import parse_structured_response
 from activegraph.llm.prompt import (
@@ -44,6 +45,7 @@ from activegraph.llm.prompt import (
 from activegraph.llm.provider import LLMProvider
 from activegraph.llm.recorded import RecordedLLMProvider, RecordingLLMProvider
 from activegraph.llm.types import LLMMessage, LLMResponse, ToolCall
+from activegraph.llm.wire import sanitize_tool_name
 
 
 __all__ = [
@@ -63,7 +65,9 @@ __all__ = [
     "RecordingLLMProvider",
     "ToolCall",
     "assemble_prompt",
+    "native_schema_compatible",
     "parse_structured_response",
+    "sanitize_tool_name",
     "schema_to_json",
     "serialize_view",
 ]

@@ -68,6 +68,7 @@ from activegraph.runtime.patterns import UnsupportedPatternError
 from activegraph.runtime.runtime import BehaviorFailure, RunQuantumResult, Runtime
 from activegraph.sinks import (
     DeliveryContext,
+    DeliveryMode,
     EventSink,
     JSONLEventSink,
     OverflowPolicy,
@@ -160,6 +161,7 @@ __all__ = [
     "CorruptedEventPayloadError",
     "Diff",
     "DeliveryContext",
+    "DeliveryMode",
     "DevOverride",
     "DiscoveredPack",
     "DivergentObject",

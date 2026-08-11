@@ -911,8 +911,7 @@ def cmd_promote(
     for label_, rid in (("--run-id", run_id), ("--from-run", from_run)):
         if rid not in known_runs:
             click.echo(
-                f"{label_} {rid!r}: no such run in {url} "
-                f"(activegraph inspect {url} --runs lists them)",
+                f"{label_} {rid!r}: no such run in {url}",
                 err=True,
             )
             raise SystemExit(EXIT_NOT_FOUND)

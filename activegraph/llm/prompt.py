@@ -19,9 +19,10 @@ CONTRACT v0.6 #6, #13, #20. This is the load-bearing module of v0.6:
 
   * `AssembledPrompt.hash()` returns a stable SHA-256 over the
     canonical JSON of {model, system, messages, output_schema_name,
-    temperature, max_tokens, top_p, deterministic}. This is the cache
-    key used by the replay layer. Hash stability matters; tests
-    snapshot it.
+    temperature, max_tokens, top_p, deterministic}. This is a stable
+    content-identity helper, NOT the runtime's actual LLM-cache key
+    (that's built separately, per-turn, in runtime.py). Hash stability
+    matters; tests snapshot it.
 
   * `behavior.build_prompt(event, graph)` is public for debugging
     (decision #20). A developer should be able to inspect the exact

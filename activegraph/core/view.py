@@ -21,8 +21,9 @@ class View:
     ``around``) and the runtime builds the View before invocation
     (CONTRACT #11). A View is a point-in-time snapshot — filter it
     with :meth:`objects` / :meth:`relations` / :meth:`events`, but
-    nothing done to it mutates the graph; mutations go through the
-    context's propose/patch surface and land as events.
+    filtering the view doesn't mutate the graph (though mutating an
+    object/relation returned from it does, since they're live instances);
+    mutations go through the context's propose/patch surface and land as events.
     """
 
     def __init__(
