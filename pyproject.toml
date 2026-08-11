@@ -36,6 +36,13 @@ dependencies = ["click>=8,<9", "pydantic>=2"]
 llm = ["anthropic>=0.40", "openai>=1.0", "tiktoken>=0.7", "pydantic>=2"]
 anthropic = ["anthropic>=0.40", "pydantic>=2"]
 openai = ["openai>=1.0", "tiktoken>=0.7", "pydantic>=2"]
+# Runtime bridge for activegraph/baml_src's generated Python client
+# (activegraph.baml_client, output_type = "python/pydantic" in
+# activegraph/baml.toml). Backs BamlLLMProvider (activegraph/llm/) as
+# of the llm/ integration landing (TDD BAML LLMProvider plan, Behavior
+# 0) — folded into [dev]/[all] below, same as the other shipped
+# providers' SDKs, rather than kept opt-in like falkordb.
+baml = ["baml_bridge"]
 sqlite = []     # SQLite is stdlib — no extra deps needed for the v0.5 store
 postgres = ["psycopg[binary]>=3.1,<4"]
 # v1.2: FalkorDBGraphStore backs the materialized graph state with FalkorDB.
@@ -57,6 +64,7 @@ all = [
     "prometheus_client>=0.20",
     "opentelemetry-api>=1.25",
     "opentelemetry-sdk>=1.25",
+    "baml_bridge",
 ]
 dev = [
     "build>=1.2",
@@ -66,6 +74,11 @@ dev = [
     "psycopg[binary]>=3.1,<4",
     "opentelemetry-api>=1.25",
     "opentelemetry-sdk>=1.25",
+    "baml_bridge",
+    # Property-based tests for BamlLLMProvider (native_schema_compatible
+    # round-trips, error-mapping coverage, token/cost monotonicity) —
+    # TDD BAML LLMProvider plan, Behaviors 3/5/5b/7.
+    "hypothesis>=6.100",
 ]
 # Doc-site build deps. The docs workflow installs from this extra so
 # the install line and the mkdocs config can't drift the way they did
@@ -135,6 +148,7 @@ exclude = ["tests*", "examples*"]
 markers = [
     "postgres: tests that require a running Postgres (skipped unless ACTIVEGRAPH_TEST_POSTGRES_URL is set)",
     "slow: long-running tests opt-in by name in CI (e.g. wheel-completeness gate; builds + installs into a fresh venv)",
+    "live_llm: tests that make a real network call to a live LLM vendor (skipped unless the relevant API key is set)",
 ]
 
 # ---------------------------------------------------------------------------

@@ -17,3 +17,13 @@ dist/
 
 # mkdocs build output
 site/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+
+# BAML-generated client — regenerate with `baml generate` (run from
+# activegraph/, driven by activegraph/baml.toml + baml_src/).
+activegraph/baml_client/
