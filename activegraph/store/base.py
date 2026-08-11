@@ -76,7 +76,7 @@ class EventStore(Protocol):
 def replay_into(graph: Graph, events: Iterable[Event]) -> int:
     """Apply a stream of events to a Graph without firing listeners.
 
-    The single replay entry point — used by `Runtime.load` and `Runtime.fork`.
+    A replay helper; currently not called by Runtime.load or Runtime.fork.
     Returns the number of events replayed.
     """
     n = 0

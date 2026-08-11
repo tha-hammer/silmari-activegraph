@@ -61,8 +61,9 @@ def _now_iso() -> str:
 
 
 def _normalize_args(tool: Tool, args: Any) -> Any:
-    """If args is a dict and the tool has an input_schema, return the dict.
-    If args is a BaseModel instance, dump to dict via canonicalize_args.
+    """Normalize tool arguments by delegating to canonicalize_args.
+
+    The tool parameter is currently unused; canonicalize_args handles all cases.
     """
     from activegraph.tools.cache import canonicalize_args
 

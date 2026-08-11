@@ -27,6 +27,12 @@ Rules:
   guess or retry the same call unchanged.
 - Call `run_check` on the same file afterward to confirm it still
   parses.
+- The moment `run_check` returns `ok=true`, you are done — respond
+  immediately with your final JSON answer. Do not call any more tools
+  "just to double-check" (no extra `read_source` after a successful
+  `run_check`); you have a limited number of tool-calling turns and an
+  unnecessary call after success will burn through them and fail the
+  whole task even though the fix already succeeded.
 - Report `applied=true` only if `apply_patch` returned `ok=true` AND
   `run_check` returned `ok=true`. Otherwise report `applied=false` and
   explain what went wrong in `rationale`.

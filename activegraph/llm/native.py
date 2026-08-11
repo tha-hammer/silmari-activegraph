@@ -22,6 +22,8 @@ from __future__ import annotations
 import copy
 from typing import Any, Optional
 
+__all__ = ["native_schema_compatible", "inject_additional_properties_false"]
+
 
 # JSON Schema keywords the native grammars accept. Anything outside
 # this set (numeric/string/array constraints, pattern regexes,

@@ -42,9 +42,9 @@ class EventNotFoundError(StorageError, KeyError):
     """An event id wasn't found in the run's event log.
 
     Multi-inherits :class:`KeyError` so user code that does
-    ``except KeyError`` around store lookups keeps working. Fires from
-    every ``store.get_event(event_id)`` and from the fork primitive
-    when ``--at-event`` names a missing id.
+    ``except KeyError`` around store lookups keeps working.
+    ``store.get_event(event_id)`` returns None for a missing id.
+    Fires from the fork primitive when ``--at-event`` names a missing id.
     """
 
     _doc_slug = "event-not-found-error"

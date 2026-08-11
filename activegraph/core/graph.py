@@ -380,7 +380,10 @@ class Graph:
         The returned handle owns a bounded FIFO and daemon worker.  A class
         name is used when ``name`` is omitted; names must be unique within
         the graph because they key both status and metrics.  Historical
-        events already present in the graph are never delivered.
+        events already present in the graph are never delivered.  A sink
+        attached here (as opposed to via ``Runtime.add_sink``) gets a
+        ``NoOpMetrics`` backend when ``metrics`` is omitted; only
+        ``Runtime.add_sink`` injects the runtime's real metrics backend.
         """
 
         from activegraph.observability.metrics import NoOpMetrics

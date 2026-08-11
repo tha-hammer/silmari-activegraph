@@ -1,11 +1,17 @@
-"""Pilot batch: 8 of the 78 findings confirmed in
+"""Repair batches: findings confirmed in
 thoughts/searchable/shared/research/2026-08-11-10-21-specs-diagrams-code-problems.md,
-chosen to span categories (dead code, stale docstring, cosmetic,
-resource leak) while staying low-risk and mechanically scoped for a
-first automated pass. `hint_old_text` is ground-truth text read
-directly from the file at research time — `patch_author` is instructed
-to re-confirm it with `read_source` before patching, since the file
-may have moved since.
+chosen to stay low-risk and mechanically scoped for automated repair —
+single-file, no design decisions (unenforced-feature and
+diverged-duplicate findings that require choosing which copy is
+authoritative are deliberately excluded; those need human judgment).
+`hint_old_text` is ground-truth text read directly from the file at
+research/fixture-authoring time — `patch_author` is instructed to
+re-confirm it with `read_source` before patching, since the file may
+have moved since.
+
+BATCH1 (8 findings) shipped in the first pilot run — kept here as a
+historical record, no longer seeded by finding_loader. See the
+research doc's "Follow-up Research" section for the full run log.
 
 Note on 14.1: the original spec (specs/14-pack-anatomy-diligence.md)
 cited this as `behaviors.py:15`; re-reading the file directly during
@@ -18,7 +24,7 @@ here.
 from __future__ import annotations
 
 
-PILOT_FINDINGS = [
+BATCH1_FINDINGS = [
     {
         "finding_id": "03.1",
         "category": "dead_code",
@@ -161,3 +167,191 @@ PILOT_FINDINGS = [
         "spec_source": "specs/04-store.md",
     },
 ]
+
+
+# BATCH2 (8 more findings): same low-risk profile as batch 1 — every
+# entry here is a single-file stale-docstring/comment correction or a
+# dead-code deletion with no other readers in the file. Findings that
+# require a design decision (unenforced-feature) or picking which of
+# several diverged implementations is authoritative are still excluded.
+BATCH2_FINDINGS = [
+    {
+        "finding_id": "00.1",
+        "category": "stale_docstring",
+        "file": "activegraph/behaviors/__init__.py",
+        "summary": (
+            "The module docstring claims 'Imports core only (CONTRACT #14)', "
+            "but behaviors/decorators.py makes function-local imports of "
+            "runtime.patterns.parse, runtime.scheduler.parse_activate_after, "
+            "and runtime._live.validate_behavior_against_live_runtimes, and "
+            "behaviors/base.py imports llm.prompt.assemble_prompt and "
+            "runtime.view_builder.build_view inside LLMBehavior.build_prompt. "
+            "The real edge set is behaviors -> {core (types only), llm, "
+            "runtime}. Reword the docstring to say that instead of "
+            "'Imports core only'."
+        ),
+        "hint_old_text": (
+            '"""Behavior decorators and base classes. Imports core only (CONTRACT #14)."""\n'
+        ),
+        "hint_lines": "1",
+        "spec_source": "specs/00-overview.md",
+    },
+    {
+        "finding_id": "04.3",
+        "category": "stale_docstring",
+        "file": "activegraph/store/errors.py",
+        "summary": (
+            "EventNotFoundError's docstring says it 'Fires from every "
+            "store.get_event(event_id)', but all three backends "
+            "(InMemoryEventStore, SQLiteEventStore, PostgresEventStore) "
+            "return None for an unknown id instead of raising, and the "
+            "conformance suite asserts exactly that "
+            "(assert store.get_event('evt_missing') is None). Reword only "
+            "the 'Fires from every store.get_event(event_id)' clause to say "
+            "get_event returns None for a missing id instead. Leave the rest "
+            "of the docstring (the fork-primitive / --at-event sentence) "
+            "untouched — that part was not part of this finding."
+        ),
+        "hint_old_text": (
+            "    Multi-inherits :class:`KeyError` so user code that does\n"
+            "    ``except KeyError`` around store lookups keeps working. Fires from\n"
+            "    every ``store.get_event(event_id)`` and from the fork primitive\n"
+            "    when ``--at-event`` names a missing id.\n"
+        ),
+        "hint_lines": "44-48",
+        "spec_source": "specs/04-store.md",
+    },
+    {
+        "finding_id": "04.1",
+        "category": "stale_docstring",
+        "file": "activegraph/store/base.py",
+        "summary": (
+            "replay_into's docstring says 'The single replay entry point — "
+            "used by Runtime.load and Runtime.fork', but it has zero "
+            "in-package callers — both Runtime.load (runtime.py:3316-3317) "
+            "and Runtime.fork (runtime.py:3487-3492) inline their own replay "
+            "loop (graph._replay_event(ev) in a for loop) instead of calling "
+            "this function. Reword the docstring to not claim it's used by "
+            "them, since it currently is not."
+        ),
+        "hint_old_text": (
+            "    The single replay entry point — used by `Runtime.load` and `Runtime.fork`.\n"
+            "    Returns the number of events replayed.\n"
+        ),
+        "hint_lines": "79-80",
+        "spec_source": "specs/04-store.md",
+    },
+    {
+        "finding_id": "05.2",
+        "category": "stale_docstring",
+        "file": "activegraph/core/graph.py",
+        "summary": (
+            "Graph.add_sink's docstring never mentions that a sink attached "
+            "this way (as opposed to via Runtime.add_sink) gets a "
+            "NoOpMetrics backend by default — only Runtime.add_sink injects "
+            "the real metrics backend. Add one sentence to the docstring "
+            "documenting this default. This is an ADDITIVE fix — add a "
+            "sentence, do not remove or reword the existing three sentences."
+        ),
+        "hint_old_text": (
+            "        The returned handle owns a bounded FIFO and daemon worker.  A class\n"
+            "        name is used when ``name`` is omitted; names must be unique within\n"
+            "        the graph because they key both status and metrics.  Historical\n"
+            "        events already present in the graph are never delivered.\n"
+            "        \"\"\"\n"
+        ),
+        "hint_lines": "380-384",
+        "spec_source": "specs/05-sinks.md",
+    },
+    {
+        "finding_id": "08.7",
+        "category": "missing_export",
+        "file": "activegraph/llm/native.py",
+        "summary": (
+            "native.py defines no __all__, unlike its sibling "
+            "embedding_cache.py which does. It's reachable only via lazy "
+            "imports from anthropic.py, openai.py, and runtime.py. Add "
+            "`__all__ = [\"native_schema_compatible\", "
+            "\"inject_additional_properties_false\"]` right after the module's "
+            "imports (before the _ALLOWED_KEYWORDS constant) — those are the "
+            "two public functions the rest of the codebase actually imports; "
+            "leave the underscore-prefixed helpers (_node_compatible, "
+            "_inject) out of it."
+        ),
+        "hint_old_text": (
+            "from __future__ import annotations\n\nimport copy\nfrom typing import Any, Optional\n"
+        ),
+        "hint_lines": "20-23",
+        "spec_source": "specs/08-llm.md",
+    },
+    {
+        "finding_id": "09.10",
+        "category": "stale_docstring",
+        "file": "activegraph/tools/recorded.py",
+        "summary": (
+            "_normalize_args(tool, args)'s docstring describes a two-branch "
+            "behavior ('If args is a dict... If args is a BaseModel "
+            "instance...') but the body ignores the `tool` parameter "
+            "entirely and just delegates unconditionally to "
+            "canonicalize_args(args). Reword the docstring to describe what "
+            "the function actually does (delegates to canonicalize_args "
+            "regardless of tool or args' type). Do NOT change the function "
+            "signature or behavior — docstring only."
+        ),
+        "hint_old_text": (
+            "    \"\"\"If args is a dict and the tool has an input_schema, return the dict.\n"
+            "    If args is a BaseModel instance, dump to dict via canonicalize_args.\n"
+            "    \"\"\"\n"
+        ),
+        "hint_lines": "64-66",
+        "spec_source": "specs/09-tools-behaviors.md",
+    },
+    {
+        "finding_id": "02.2",
+        "category": "stale_docstring",
+        "file": "activegraph/runtime/scheduler.py",
+        "summary": (
+            "ScheduledEntry.where_recheck_path's inline comment says "
+            "\"behavior's `where=` payload path is kept\", but the only "
+            "construction site (runtime.py:1325) always passes None, and "
+            "the actual re-check at fire time reads behavior.where directly "
+            "(runtime.py:1344) — the field is never read anywhere. Reword "
+            "the comment to say it's currently unused/always None instead of "
+            "claiming the path is 'kept'. Do NOT remove the field or change "
+            "the dataclass shape — comment only."
+        ),
+        "hint_old_text": (
+            "    where_recheck_path: Optional[str]  # behavior's `where=` payload path is kept\n"
+        ),
+        "hint_lines": "50",
+        "spec_source": "specs/02-runtime-core.md",
+    },
+    {
+        "finding_id": "07.3b",
+        "category": "dead_code",
+        "file": "activegraph/packs/loader.py",
+        "summary": (
+            "pre_ambiguous_behaviors and pre_ambiguous_tools are each "
+            "computed via _compute_new_ambiguous_shorts(...) and never read "
+            "again anywhere in the file (confirmed by grep — only their own "
+            "assignment lines mention them). Remove both assignments. Keep "
+            "the comment above them if it still makes sense standalone, or "
+            "remove it too if it only makes sense next to the removed code — "
+            "use your judgment, but do not change anything below this block."
+        ),
+        "hint_old_text": (
+            "    pre_ambiguous_behaviors = _compute_new_ambiguous_shorts(\n"
+            "        state.behavior_short_to_canonical, new_canonical_behaviors\n"
+            "    )\n"
+            "    pre_ambiguous_tools = _compute_new_ambiguous_shorts(\n"
+            "        state.tool_short_to_canonical, new_canonical_tools\n"
+            "    )\n"
+        ),
+        "hint_lines": "209-214",
+        "spec_source": "specs/07-packs.md",
+    },
+]
+
+
+# Active batch: finding_loader seeds whatever this currently points at.
+PILOT_FINDINGS = BATCH2_FINDINGS

@@ -202,17 +202,6 @@ def load_pack_into_runtime(
                 f"pack {owner!r}; pack {pack.name!r} also declares it"
             )
 
-    # Detect short-name ambiguity AGAINST other packs' short names.
-    # Same short name across two packs is allowed structurally — the
-    # canonical names differ. But the short-name lookup table needs to
-    # mark this short name as ambiguous so unqualified lookups raise.
-    pre_ambiguous_behaviors = _compute_new_ambiguous_shorts(
-        state.behavior_short_to_canonical, new_canonical_behaviors
-    )
-    pre_ambiguous_tools = _compute_new_ambiguous_shorts(
-        state.tool_short_to_canonical, new_canonical_tools
-    )
-
     # Verify globally-exported tool short names don't collide with
     # existing global tools or other packs' globally-exported tools.
     # The runtime's `tool_registry` is rebuilt on every `_ensure_registry`

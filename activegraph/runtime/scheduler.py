@@ -47,7 +47,7 @@ class ScheduledEntry:
     behavior_index: int  # registry index — preserves CONTRACT #10 order
     triggering_event_id: str
     fire_at_event_count: int
-    where_recheck_path: Optional[str]  # behavior's `where=` payload path is kept
+    where_recheck_path: Optional[str]  # currently unused; always None
     scheduled_event_id: str  # the behavior.scheduled event id
 
 
