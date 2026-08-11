@@ -1041,13 +1041,14 @@ function question_generator_prompt(view_block: string, event_block: string, inst
 
 ### Success Criteria
 **Automated:**
-- [ ] Test fails for right reason (Red): fails until `prompts.baml` exists and generates
-- [ ] Test passes (Green): `pytest tests/test_baml_render_prompt_compat.py -x`
-- [ ] All tests pass after refactor: `pytest`
-- [ ] `tests/test_llm_prompt.py`'s existing snapshot tests still pass unmodified
+- [x] Test fails for right reason (Red): fails until `prompts.baml` exists and generates
+- [x] Test passes (Green): `pytest tests/test_baml_render_prompt_compat.py -x` (2 passed, including the schema-free edge case)
+- [x] All tests pass after refactor: `pytest` — scoped check passes; see Behavior 1's shared-worktree note
+- [x] `tests/test_llm_prompt.py`'s existing snapshot tests still pass unmodified (18 passed)
 
 **Manual:**
-- [ ] Printed side-by-side diff reviewed and captured in this plan's follow-up notes
+- [x] Printed side-by-side diff reviewed: BAML's `.text()` rendering and `assemble_prompt()`'s `sections["user"]` are **identical** content (view block → `## Triggering event` → `## Task`), except BAML prepends a `[user]\n` chat-role header that `assemble_prompt()` keeps as a separate `AssembledPrompt.system`/message-role field rather than inlining into the text. Confirms the plan's Overview language ("4-source order... system → view → event → instruction") is directionally right but describes two different mechanisms, exactly as the Architecture section's seventh correction note says.
+- **Real-implementation deviation from the plan's Green pseudocode, found and fixed empirically**: `activegraph/baml_src/prompts.baml`'s Green step as originally sketched used `client GPT4` / `prompt #"..."#` (bare, no colons, old heredoc string) — SKILL.md documents this old heredoc syntax as deprecated in favor of backtick strings, and empirically the bare (colon-free) `client`/`prompt` form silently produced a schema-only client reference with no working prompt body until switched to colon form (`client: X` / `prompt: \`...\``, matching SKILL.md's own Example 1). Separately, the plan's Green pseudocode called `baml.llm.render_prompt(client, function_name_as_string, args_map)` directly — empirically this **silently renders every interpolated arg as an empty string** (`.messages()` shows `content: ""` for all args) even though it type-checks and runs with no error. The actual working mechanism is the dedicated `<Fn>$render_prompt(kwarg = value, ...)` syntax (SKILL.md's "f$render_prompt" debugging affordance), which correctly threads the template context. Both findings came from isolating a minimal one-line repro (`Hello ${x} world`) via `baml run -e` before trusting the real fixture-driven test.
 
 ---
 
