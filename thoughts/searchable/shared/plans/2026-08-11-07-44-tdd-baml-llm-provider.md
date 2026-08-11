@@ -827,8 +827,8 @@ __all__ = ["baml_sdk"]
 **Automated:**
 - [x] Test fails for the right reason (Red): `pytest tests/test_baml_client_import.py -x` → **correction**: `from activegraph.baml_client import baml_sdk` does NOT raise `ImportError` even pre-Behavior-1 (`baml_client/` is a PEP 420 implicit namespace package, so the submodule import resolves regardless of a missing `__init__.py`). Added a second assertion (`baml_client.__all__ == ["baml_sdk"]`) that genuinely fails with `AttributeError` pre-Behavior-1 — confirmed Red for the right reason.
 - [x] Test passes (Green): `pytest tests/test_baml_client_import.py -x` (2 passed)
-- [x] All tests pass after refactor: `pytest` — scoped check (`pytest tests/test_baml_client_import.py`) passes; a bare repo-wide `pytest` is unreliable right now because this is a **shared worktree across all 4 lane agents** and other lanes' in-progress Red states abort collection for everyone (not a Behavior-1 regression — see agent-mail thread)
-- [ ] Typecheck/lint pass (repo's existing tooling) — not run (no typed/lint-gated module touched; `baml_provider.py` isn't in the mypy allowlist)
+- [x] All tests pass after refactor: final bare `.venv/bin/pytest -q` after all four lanes completed — 1044 passed, 50 skipped
+- [x] Typecheck pass (repo's configured tooling): `.venv/bin/mypy` — no issues in the 54-file strict allowlist; no separate Python lint command is configured
 
 **Manual:**
 - [x] `python -c "from activegraph.baml_client import baml_sdk; print(baml_sdk.main())"` prints `hello from baml`
@@ -892,7 +892,7 @@ class QuestionListBaml {
 - [x] Test fails for right reason (Red): `pytest tests/test_baml_schema_codegen.py -x` → `ImportError` (confirmed: `cannot import name 'QuestionListBaml'`)
 - [x] Test passes (Green) after `baml generate`: `pytest tests/test_baml_schema_codegen.py -x`
 - [x] `baml check` passes clean against `activegraph/baml_src/`
-- [x] All tests pass after refactor: `pytest` — scoped check (`pytest tests/test_baml_schema_codegen.py tests/test_baml_client_import.py`) passes; see Behavior 1's note on shared-worktree bare-`pytest` unreliability
+- [x] All tests pass after refactor: final bare `.venv/bin/pytest -q` — 1044 passed, 50 skipped
 
 **Manual:**
 - [x] `python -c "from activegraph.baml_client.baml_sdk import QuestionListBaml; print(QuestionListBaml.model_json_schema())"` prints a real JSON Schema dict — `{"additionalProperties": false, "description": "...", "properties": {"questions": {"items": {"type": "string"}, "title": "Questions", "type": "array"}}, "required": ["questions"], "title": "QuestionListBaml", "type": "object"}`. Every keyword present (`additionalProperties`, `description`, `items`, `properties`, `required`, `title`, `type`) is inside `native_schema_compatible()`'s 15-keyword allowlist — no `minItems` (BAML's `string[]` emits no length constraint by default). **Edge case finding**: no BAML syntax for list-length constraints was discoverable (`baml describe constraint`/`@check`/`@description` all report "No symbol found" for this concern) — no constrained-list variant exists to author; the plan's "constrained vs unconstrained" edge case resolves to "only unconstrained is expressible."
@@ -957,7 +957,7 @@ No production code changes — `native_schema_compatible()` is exercised as-is. 
 - [x] Test fails for right reason (Red): N/A by the time this behavior was written — Behavior 2 had already landed, so the import succeeded immediately; this behavior's real "Red" was empirical uncertainty about `baml_result`'s value, not an import failure (see Manual note)
 - [x] Test passes (Green): `pytest tests/test_baml_schema_native_compat.py -x` (2 passed)
 - [x] The placeholder was skipped in favor of directly asserting the empirically-observed value from Behavior 2's Manual check (the printed schema dict), then confirmed by actually running the test rather than guessing — `assert baml_result is True`, verified green on the real generated schema
-- [x] All tests pass after refactor: `pytest` — scoped check passes; see Behavior 1's shared-worktree note. Property test passes: `pytest tests/test_baml_schema_native_compat.py -k property -x`
+- [x] All tests pass after refactor: final bare `.venv/bin/pytest -q` — 1044 passed, 50 skipped; property test also passes via `pytest tests/test_baml_schema_native_compat.py -k property -x`
 - [x] `native.py` is byte-identical (git diff empty) — confirmed, this behavior never modified it
 
 **Manual:**
@@ -1043,7 +1043,7 @@ function question_generator_prompt(view_block: string, event_block: string, inst
 **Automated:**
 - [x] Test fails for right reason (Red): fails until `prompts.baml` exists and generates
 - [x] Test passes (Green): `pytest tests/test_baml_render_prompt_compat.py -x` (2 passed, including the schema-free edge case)
-- [x] All tests pass after refactor: `pytest` — scoped check passes; see Behavior 1's shared-worktree note
+- [x] All tests pass after refactor: final bare `.venv/bin/pytest -q` — 1044 passed, 50 skipped
 - [x] `tests/test_llm_prompt.py`'s existing snapshot tests still pass unmodified (18 passed)
 
 **Manual:**
@@ -1106,7 +1106,7 @@ class BamlLLMProvider:
 - [x] Test fails for right reason (Red): `AttributeError`/`ImportError` before `BamlLLMProvider` exists
 - [x] Test passes (Green): `pytest tests/test_baml_provider_count_tokens.py -x`
 - [x] Property test passes: `pytest tests/test_baml_provider_count_tokens.py -k property -x`
-- [ ] All tests pass after refactor: `pytest`
+- [x] All tests pass after refactor: final bare `.venv/bin/pytest -q` — 1044 passed, 50 skipped
 
 **Manual:**
 - [x] N/A — fully covered by automated tests
@@ -1176,7 +1176,7 @@ class BamlLLMProvider:
 - [x] Test passes (Green): `pytest tests/test_baml_provider_estimate_cost.py -x`
 - [x] Property test passes (monotonicity + non-negativity): `pytest tests/test_baml_provider_estimate_cost.py -k property -x`
 - [x] `isinstance(BamlLLMProvider(vendor="anthropic"), LLMProvider)` is `True` under `LLMProvider`'s `@runtime_checkable` check — the mechanical proof that the complete Protocol *shape* is present; Behavior 6 replaces the deliberately failing completion placeholder with the real generated-function path
-- [ ] All tests pass after refactor: `pytest`
+- [x] All tests pass after refactor: final bare `.venv/bin/pytest -q` — 1044 passed, 50 skipped
 
 **Manual:**
 - [x] N/A — fully covered by automated tests
@@ -1257,8 +1257,8 @@ class BamlLLMProvider:
 **Automated:**
 - [x] Test fails for right reason (Red): after the shared HTTP fixture was added, both completion cases failed at the deliberate `NotImplementedError` placeholder and the public-export case failed with `ImportError`
 - [x] Test passes (Green): `pytest tests/test_baml_provider_complete_mock.py -x` (3 passed, including plain text, Pydantic parsing, and public export)
-- [ ] All tests pass after refactor: `pytest` — the BAML/LLM regression slice is green (188 passed), while the repo-wide run reaches 998 passed / 49 skipped before 18 failures + 4 errors, all from the pre-existing SQLite `disk I/O error` affecting persistence tests; reproduces with both `/tmp` and an isolated `/dev/shm` temp root
-- [ ] No new duplication vs. `AnthropicProvider`/`OpenAIProvider` (`jscpd activegraph/llm/`) — `jscpd` is not installed in the current toolchain; `git diff --check` and Python compilation pass
+- [x] All tests pass after refactor: final bare `.venv/bin/pytest -q` — 1044 passed, 50 skipped (the earlier SQLite failures were traced to an irreversible test-process resource limit and fixed in `8e115a2`)
+- [x] No new duplication vs. `AnthropicProvider`/`OpenAIProvider`: final `jscpd` review reports zero clones involving `baml_provider.py`; `git diff --check` and Python compilation also pass
 - [x] `from activegraph.llm import BamlLLMProvider` succeeds (public export, not just the private `activegraph.llm.baml_provider` submodule path)
 
 **Manual:**
@@ -1326,7 +1326,7 @@ def _translate_baml_error(baml_exc) -> LLMBehaviorError:
 - [x] Test fails for right reason (Red): collection failed with the intended `ImportError: cannot import name '_translate_baml_error'`
 - [x] Test passes (Green): `pytest tests/test_baml_provider_error_mapping.py -x` (14 passed: real 429/401/422/malformed-200/reset cases plus typed mapping cases)
 - [x] Property test passes for all 14 `baml.errors.*` variants; opaque `HostCallable` is safely constructed with Pydantic's validation-free `model_construct` solely to exercise classification
-- [ ] All tests pass after refactor: `pytest` — BAML error/completion/pricing/token plus all existing LLM tests are green (195 passed); repo-wide reaches 1013 passed / 49 skipped before the same 18 failures + 4 errors from unrelated SQLite `disk I/O error` persistence tests (the affected 38-test set passes in isolation per the Behavior 11 validation)
+- [x] All tests pass after refactor: final bare `.venv/bin/pytest -q` — 1044 passed, 50 skipped
 
 **Manual:**
 - [x] Runtime event log inspected with a real BAML-backed 401 turn: exactly one `/anthropic/v1/messages` request, one `llm.responded` carrying `error.reason="llm.auth_error"` and `retryable=False`, then one `behavior.failed` with the same reason — identical terminal-auth routing to `AnthropicProvider`
@@ -1414,7 +1414,7 @@ client<llm> AnthropicPrimitiveRetryTwice {
 - [x] Exhausted-retry edge case passes: surfaces `LLMBehaviorError` after exactly 3 real failed attempts, not fewer or more
 - [x] Retry-compounding edge case passes: combined BAML-internal + runtime-level attempt count (where applicable) matches the predicted bound, not an unbounded multiplication
 - [x] Timeout edge case passes: a short `timeout_seconds` against a slow mock surfaces a timeout-shaped failure without waiting for all 3 attempts
-- [x] All tests pass after refactor: `pytest`
+- [x] All tests pass after refactor: final bare `.venv/bin/pytest -q` — 1044 passed, 50 skipped
 
 **Manual:**
 - [x] Mock server's real per-attempt log reviewed to confirm 3 distinct real requests, not a simulated count
@@ -1484,7 +1484,7 @@ client<llm> ActivegraphFallbackCascade {
 - [x] Test fails for right reason (Red): provider dispatch reaches the missing generated `complete_fallback_cascade` callable before the fallback client/function exists
 - [x] Test passes (Green): `pytest tests/test_baml_provider_fallback.py -x`
 - [x] All-three-fail edge case passes: single `LLMBehaviorError`, not three
-- [x] All tests pass after refactor: `pytest`
+- [x] All tests pass after refactor: final bare `.venv/bin/pytest -q` — 1044 passed, 50 skipped
 
 **Manual:**
 - [x] Mock server's three real per-route logs reviewed in cascade order
@@ -1494,7 +1494,7 @@ client<llm> ActivegraphFallbackCascade {
 ## Behavior 10: baml_provider_completes_live_against_openrouter_free_model
 
 ### Test Specification
-**Given**: `OpenRouterLive` — a **distinct** `client<llm>` from the mock-routed `OpenRouterPrimitive` declared in Behavior 6 (`OpenRouterPrimitive`'s `base_url` points at the session-scoped mock server; reusing that name here for the real API would collide) — configured with OpenRouter's stable `openrouter/free` dynamic selector for currently available free models, with a real `OPENROUTER_API_KEY` (**required** — this test is `skipif`-skipped, not faked, when the key is absent)
+**Given**: `OpenRouterLive` — a **distinct** `client<llm>` from the mock-routed `OpenRouterPrimitive` declared in Behavior 6 (`OpenRouterPrimitive`'s `base_url` points at the session-scoped mock server; reusing that name here for the real API would collide) — configured through `OPENROUTER_FREE_MODEL`, which defaults to OpenRouter's stable `openrouter/free` dynamic selector but can select a specific current `:free` slug, with a real `OPENROUTER_API_KEY` (**required** — this test is `skipif`-skipped, not faked, when the key is absent)
 **When**: `BamlLLMProvider(vendor="openrouter_live").complete()` is called with a real, small `AssembledPrompt`
 **Then**: a real HTTPS request leaves the process, reaches the real OpenRouter API, and a real model-generated response comes back, parsed into a real `LLMResponse` with non-empty `raw_text`, `input_tokens > 0`, `output_tokens > 0`, and a real `finish_reason`
 
@@ -1504,7 +1504,7 @@ client<llm> ActivegraphFallbackCascade {
 
 **Property**: N/A — single live external call, not a domain to fuzz
 
-**Files touched**: `activegraph/baml_src/clients.baml` (add `OpenRouterLive` `client<llm>`), `tests/test_baml_provider_live_openrouter.py` (new). `pyproject.toml`'s `live_llm` marker registration is handled in Behavior 0 (Prerequisites), not here.
+**Files touched**: `activegraph/baml_src/clients.baml` (add `OpenRouterLive` `client<llm>`), `activegraph/llm/baml_provider.py` (align the live provider's selected/default model, recognition, and zero-cost free-model pricing), `tests/test_baml_provider_live_openrouter.py` (new). `pyproject.toml`'s `live_llm` marker registration is handled in Behavior 0 (Prerequisites), not here.
 
 **Correction (review finding)**: an earlier revision of this plan gated this test "matching this repo's existing `@pytest.mark.records_llm` opt-in precedent" — that precedent does not exist as working code anywhere in this repo (confirmed: only a docstring comment at `activegraph/llm/recorded.py:13` and prose in `CONTRACT.md`; no marker registration, no conftest skip logic, zero real `@pytest.mark.records_llm` usages in `tests/`). This revision instead follows the repo's real, working live-opt-in precedent: `tests/test_postgres_store.py:18-25` (env-var check + `skipif` + a `pyproject.toml`-registered marker).
 
@@ -1518,17 +1518,19 @@ import pytest
 from activegraph.llm.baml_provider import BamlLLMProvider
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-
-pytestmark = pytest.mark.skipif(
-    OPENROUTER_API_KEY is None,
-    reason="set OPENROUTER_API_KEY to run live OpenRouter tests",
+OPENROUTER_FREE_MODEL = os.environ.setdefault(
+    "OPENROUTER_FREE_MODEL", "openrouter/free"
 )
 
 @pytest.mark.live_llm
+@pytest.mark.skipif(
+    OPENROUTER_API_KEY is None,
+    reason="set OPENROUTER_API_KEY to run live OpenRouter tests",
+)
 def test_complete_live_against_openrouter_free_model():
     provider = BamlLLMProvider(vendor="openrouter_live")
     r = provider.complete(system="Say hi in five words.", messages=[...],
-                           model="openrouter/free",
+                           model=OPENROUTER_FREE_MODEL,
                            max_tokens=32, temperature=0.0, top_p=1.0,
                            output_schema=None, timeout_seconds=30)
     assert r.raw_text
@@ -1546,15 +1548,17 @@ client<llm> OpenRouterLive {
   options {
     base_url "https://openrouter.ai/api/v1"
     api_key env.OPENROUTER_API_KEY
-    model "openrouter/free"  // stable dynamic selector for currently available free models
+    model env.OPENROUTER_FREE_MODEL
   }
 }
 ```
 
+`BamlLLMProvider(vendor="openrouter_live")` resolves the same environment value, falling back to `openrouter/free`, and publishes it as `default_model`. OpenRouter model slugs are recognized, while `openrouter/free` and explicit `:free` slugs estimate to zero cost.
+
 #### 🔵 Refactor: Improve Code
 **File**: `activegraph/baml_src/clients.baml`
 - No duplication: `OpenRouterLive` is deliberately separate from the mock-routed `OpenRouterPrimitive` (Behavior 6) rather than sharing a declaration with two conflicting `base_url` values
-- Reveals intent: doc-comment notes that `openrouter/free` dynamically absorbs free-model catalog churn, leaves `OPENROUTER_API_KEY` as the only required environment variable, and keeps `OpenRouterLive` separate from mock-double behaviors
+- Reveals intent: doc-comment notes that `openrouter/free` dynamically absorbs free-model catalog churn, `OPENROUTER_FREE_MODEL` permits deterministic selection of a current `:free` slug, and `OpenRouterLive` stays separate from mock-double behaviors
 - Complexity: unchanged
 - No shallow wrappers: N/A
 - Fits existing patterns: OpenRouter is OpenAI-API-compatible, so `provider openai` + `base_url` override matches BAML's documented pattern for OpenAI-compatible aggregators
@@ -1562,9 +1566,10 @@ client<llm> OpenRouterLive {
 ### Success Criteria
 **Automated:**
 - [x] Test fails for right reason (Red): the credential-independent check reaches the missing generated `complete_openrouter_live` callable, while the live call explicitly skips without a key
+- [x] Credential-independent Green contract: generated request honors `OPENROUTER_FREE_MODEL`; provider default/recognition match it; `openrouter/free` and `:free` routes estimate to zero cost
 - [ ] Test passes (Green) when `OPENROUTER_API_KEY` is set: `pytest tests/test_baml_provider_live_openrouter.py -x -m live_llm`
 - [x] Test is explicitly `skipif`-skipped (not silently green, not faked) when the key is absent — the skip reason string names `OPENROUTER_API_KEY` by name, verified by asserting on `pytest --collect-only -q`'s skip report or by running with `-rs`
-- [x] All tests pass after refactor: `pytest`
+- [x] All tests pass after refactor: final bare `.venv/bin/pytest -q` — 1044 passed, 50 skipped (live OpenRouter call explicitly skipped without `OPENROUTER_API_KEY`)
 
 **Manual:**
 - [ ] Real response text and real token/cost figures captured and reviewed once, with a real `OPENROUTER_API_KEY`
@@ -1632,7 +1637,8 @@ No new production code — this behavior should pass once Behaviors 5b and 6 are
 **Automated:**
 - [x] Test fails for right reason (Red): satisfied by construction — Behaviors 5b (`AF-2pz`, commit `447b012`) and 6 (`AF-cpu`, commit `4a2c3ce`) landed via separate agents' own Red/Green cycles before this behavior started, so this test never existed in a state where `estimate_cost`/the export were missing; confirmed instead that the equivalent `AttributeError` surface (missing `estimate_cost`) was what Behavior 5b's own Red step caught upstream
 - [x] Test passes (Green): `pytest tests/test_baml_provider_runtime_integration.py -x` — 1 passed
-- [x] All tests pass after refactor: `pytest --ignore=tests/test_baml_provider_error_mapping.py` — 999 passed, 49 skipped (Behavior 7's `_translate_baml_error` Red test is a teammate's known in-flight state in this shared worktree, excluded per convention, not a regression)
+- [x] Post-Behaviors-8-10 closure revalidation passes through the real Runtime/retry/failure seams: `tests/test_baml_provider_runtime_integration.py tests/test_baml_provider_retry.py tests/test_llm_failure.py` — 14 passed
+- [x] All tests pass after refactor: final bare `.venv/bin/pytest -q` after every behavior and the OpenRouter model-seam closure — 1044 passed, 50 skipped
 
 **Manual:**
 - [x] Runtime's real event log inspected and confirmed to show `llm.requested`/`llm.responded` events shaped identically to an equivalent `AnthropicProvider` turn — one `llm.responded` with no `error` key, `prompt_hash` matches between request/response, `LLMCache` recorded the real response under that hash
