@@ -46,9 +46,7 @@ def _pricing_for(model: str, pricing: Mapping[str, Mapping[str, str]]) -> tuple[
     """Lookup by longest matching family prefix.
 
     `claude-sonnet-4-6` resolves to the `claude-sonnet-4` family entry.
-    Unknown models fall back to sonnet-4 pricing and emit a warning
-    via the returned `Decimal` (caller can detect by comparing to
-    family default).
+    Unknown models fall back to sonnet-4 pricing.
     """
 
     best_key: Optional[str] = None
@@ -252,7 +250,13 @@ class AnthropicProvider(LLMProvider):
         client = self._client()
         kwargs: dict[str, Any] = {
             "model": model,
-            "messages": [m.to_dict() for m in messages],
+            # Must match complete()'s wire translation, not the generic
+            # to_dict(): a role="tool" message (present from turn 2 of any
+            # multi-turn tool-calling loop) sent as a literal {"role": "tool"}
+            # is rejected by Anthropic's count_tokens endpoint the same way
+            # messages.create rejects it — count_tokens needs the same
+            # {"role": "user", "content": [tool_result...]} translation.
+            "messages": [_message_to_anthropic(m) for m in messages],
         }
         if system:
             kwargs["system"] = system
