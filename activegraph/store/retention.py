@@ -219,7 +219,7 @@ def pins(path: str, run_id: str) -> list[str]:
                 f"at {record.forked_at_event_id!r} and is not retired"
             )
 
-    # Pin 4: pending machinery — unresolved approvals, proposed patches.
+    # Pin 3: pending machinery — unresolved approvals, proposed patches.
     proposed_approvals: set[str] = set()
     granted: set[str] = set()
     proposed_patches: dict[str, str] = {}
@@ -331,7 +331,10 @@ def retire(path: str, run_id: str) -> int:
             run_id=run_id, operation="retire", reasons=reasons
         )
     store = SQLiteEventStore(path, run_id=run_id)
-    return store.archive_run(archived_at=_now_iso())
+    try:
+        return store.archive_run(archived_at=_now_iso())
+    finally:
+        store.close()
 
 
 def verify_snapshot(path: str, run_id: str) -> bool:

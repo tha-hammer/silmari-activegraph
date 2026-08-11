@@ -58,9 +58,10 @@ class RecordedDiligenceProvider:
     object. Implements `LLMProvider` per CONTRACT v0.6 #3.
 
     The provider inspects:
-      - the system prompt (contains the behavior_name on the
-        '## Behavior:' line)
-      - the user message (contains the triggering event payload)
+      - the system prompt (extracts behavior_name from the
+        'behavior named "..."' pattern)
+      - the user message (splits on '## Triggering event' marker to
+        isolate the triggering event payload)
       - the output_schema (selects which response shape to return)
 
     For the document_researcher, the provider returns:

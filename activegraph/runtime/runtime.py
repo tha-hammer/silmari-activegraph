@@ -468,7 +468,6 @@ class Runtime:
         # Stash for tool result message between _invoke_tool and the
         # turn-loop caller. Always cleared after consumption.
         self._last_tool_result_message: Optional[LLMMessage] = None
-        self._inside_dispatch = False
         graph.add_listener(self._on_event)
         self._idle_emitted = False
 

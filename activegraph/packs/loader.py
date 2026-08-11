@@ -24,7 +24,6 @@ runtime unchanged (CONTRACT v0.9 #6).
 
 from __future__ import annotations
 
-import copy
 import inspect
 import json
 import logging

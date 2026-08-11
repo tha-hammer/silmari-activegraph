@@ -34,7 +34,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from activegraph.core.event import Event
 from activegraph.core.graph import Graph, Object, Relation
 from activegraph.core.ids import IDGen
 

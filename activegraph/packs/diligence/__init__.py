@@ -12,7 +12,7 @@ What it provides:
   - 7 behaviors: company_planner, question_generator,
     document_researcher (LLM + tools), evidence_linker (deterministic
     safety net), contradiction_detector (pattern subscription),
-    risk_identifier (LLM, activate_after=8), memo_synthesizer (LLM).
+    risk_identifier (LLM, idempotent graph-scan), memo_synthesizer (LLM).
   - 3 pack-scoped tools: fetch_company_docs, search_filings,
     summarize_document. v0.9 backs these with recorded fixtures; a
     production user would swap real implementations.
