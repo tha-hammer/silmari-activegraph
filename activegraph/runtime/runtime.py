@@ -2299,18 +2299,10 @@ class Runtime:
         )
 
         # Echo the tool result back into the message stream so the
-        # next LLM turn can see it.
+        # next LLM turn can see it. The caller reads this back via
+        # self._last_tool_result_message and appends it to its local
+        # running_messages list.
         import json as _json
-        running_messages_append = getattr(self, "_current_running_messages", None)
-        # NOTE: we use the caller's local running_messages via closure;
-        # to avoid threading it through, the caller appends after this.
-        # Stash the tool-result content on the request event payload
-        # for now so the caller can fetch it. Simpler: return a payload.
-
-        # We append in the caller — but we need to return the content
-        # too. Refactor: pass running_messages by reference via mutating
-        # method. Cleanest: do it here using a passed list.
-        # (Inlined below by storing in self._last_tool_result_message.)
         self._last_tool_result_message = LLMMessage(
             role="tool",
             content=_json.dumps(validated_output, sort_keys=True, default=str),
