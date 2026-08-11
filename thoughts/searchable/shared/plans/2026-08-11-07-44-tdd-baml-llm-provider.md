@@ -1062,9 +1062,9 @@ function question_generator_prompt(view_block: string, event_block: string, inst
 - Empty message list
 - A very long system prompt spanning multiple tokenizer chunks
 
-**Property**: for ANY non-empty text, `count_tokens(text) > 0`; for any text `A` that is a real prefix of text `B`, `count_tokens(A) <= count_tokens(B)` (monotonicity) — Hypothesis-generated strings
+**Property**: for ANY non-empty text, `count_tokens(text) > 0`. **Implementation correction:** literal-prefix monotonicity is false for BPE tokenizers (`cl100k_base` encodes `"jw"` as 2 tokens but `"jwt"` as 1), so the implemented monotonic property asserts that adding a separately-delimited message cannot reduce the total instead — Hypothesis-generated strings still exercise the same provider boundary without asserting a false tokenizer invariant.
 
-**Files touched**: `activegraph/llm/baml_provider.py` (new — `BamlLLMProvider` class + `count_tokens`), `tests/test_baml_provider_count_tokens.py` (new)
+**Files touched**: `activegraph/llm/baml_provider.py` (new — `BamlLLMProvider` class + `count_tokens`), `tests/test_baml_provider_count_tokens.py` (new), `pyproject.toml` (`tiktoken` added to `[baml]`/`dev`; Behavior 0's fresh dev environment exposed that the planned implementation dependency was otherwise absent)
 
 ### TDD Cycle
 
@@ -1102,13 +1102,13 @@ class BamlLLMProvider:
 
 ### Success Criteria
 **Automated:**
-- [ ] Test fails for right reason (Red): `AttributeError`/`ImportError` before `BamlLLMProvider` exists
-- [ ] Test passes (Green): `pytest tests/test_baml_provider_count_tokens.py -x`
-- [ ] Property test passes: `pytest tests/test_baml_provider_count_tokens.py -k property -x`
+- [x] Test fails for right reason (Red): `AttributeError`/`ImportError` before `BamlLLMProvider` exists
+- [x] Test passes (Green): `pytest tests/test_baml_provider_count_tokens.py -x`
+- [x] Property test passes: `pytest tests/test_baml_provider_count_tokens.py -k property -x`
 - [ ] All tests pass after refactor: `pytest`
 
 **Manual:**
-- [ ] N/A — fully covered by automated tests
+- [x] N/A — fully covered by automated tests
 
 ---
 
