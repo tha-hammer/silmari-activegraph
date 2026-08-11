@@ -954,14 +954,14 @@ No production code changes — `native_schema_compatible()` is exercised as-is. 
 
 ### Success Criteria
 **Automated:**
-- [ ] Test fails for right reason (Red): fails on `ImportError` until Behavior 2 lands
-- [ ] Test passes (Green): `pytest tests/test_baml_schema_native_compat.py -x`
-- [ ] The placeholder `print(...)` line has been replaced with a hard `assert baml_result is <empirically observed value>` before this behavior is marked Green
-- [ ] All tests pass after refactor: `pytest`
-- [ ] `native.py` is byte-identical (git diff empty) — this behavior must never modify it
+- [x] Test fails for right reason (Red): N/A by the time this behavior was written — Behavior 2 had already landed, so the import succeeded immediately; this behavior's real "Red" was empirical uncertainty about `baml_result`'s value, not an import failure (see Manual note)
+- [x] Test passes (Green): `pytest tests/test_baml_schema_native_compat.py -x` (2 passed)
+- [x] The placeholder was skipped in favor of directly asserting the empirically-observed value from Behavior 2's Manual check (the printed schema dict), then confirmed by actually running the test rather than guessing — `assert baml_result is True`, verified green on the real generated schema
+- [x] All tests pass after refactor: `pytest` — scoped check passes; see Behavior 1's shared-worktree note. Property test passes: `pytest tests/test_baml_schema_native_compat.py -k property -x`
+- [x] `native.py` is byte-identical (git diff empty) — confirmed, this behavior never modified it
 
 **Manual:**
-- [ ] Printed verdict documented in this plan's follow-up notes (True/False + which keyword, if any, caused rejection)
+- [x] Printed verdict documented: **True** — every keyword BAML's `QuestionListBaml.model_json_schema()` emits (`additionalProperties`, `description`, `items`, `properties`, `required`, `title`, `type`) is in the 15-keyword allowlist, `questions` is listed `required`, `additionalProperties` is already `false`. Diverges from hand-written `QuestionList`'s known **False** (its `Field(min_length=1)` adds `minItems`, outside the allowlist) — BAML's codegen for `string[]` carries no length constraint by default, so the two schemas genuinely diverge on native-mode eligibility.
 
 ---
 
