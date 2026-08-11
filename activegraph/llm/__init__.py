@@ -29,6 +29,7 @@ Public surface:
 """
 
 from activegraph.llm.anthropic import AnthropicProvider
+from activegraph.llm.baml_provider import BamlLLMProvider
 from activegraph.llm.cache import LLMCache
 from activegraph.llm.embedding import EmbeddingProvider, HashEmbeddingProvider
 from activegraph.llm.embedding_cache import EmbeddingCache
@@ -49,6 +50,7 @@ from activegraph.llm.types import LLMMessage, LLMResponse, ToolCall
 __all__ = [
     "AnthropicProvider",
     "AssembledPrompt",
+    "BamlLLMProvider",
     "EmbeddingCache",
     "EmbeddingProvider",
     "HashEmbeddingProvider",

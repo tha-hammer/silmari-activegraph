@@ -1255,15 +1255,17 @@ class BamlLLMProvider:
 
 ### Success Criteria
 **Automated:**
-- [ ] Test fails for right reason (Red): fails before `complete()` exists
-- [ ] Test passes (Green): `pytest tests/test_baml_provider_complete_mock.py -x`
-- [ ] All tests pass after refactor: `pytest`
-- [ ] No new duplication vs. `AnthropicProvider`/`OpenAIProvider` (`jscpd activegraph/llm/`)
-- [ ] `from activegraph.llm import BamlLLMProvider` succeeds (public export, not just the private `activegraph.llm.baml_provider` submodule path)
+- [x] Test fails for right reason (Red): after the shared HTTP fixture was added, both completion cases failed at the deliberate `NotImplementedError` placeholder and the public-export case failed with `ImportError`
+- [x] Test passes (Green): `pytest tests/test_baml_provider_complete_mock.py -x` (3 passed, including plain text, Pydantic parsing, and public export)
+- [ ] All tests pass after refactor: `pytest` — the BAML/LLM regression slice is green (188 passed), while the repo-wide run reaches 998 passed / 49 skipped before 18 failures + 4 errors, all from the pre-existing SQLite `disk I/O error` affecting persistence tests; reproduces with both `/tmp` and an isolated `/dev/shm` temp root
+- [ ] No new duplication vs. `AnthropicProvider`/`OpenAIProvider` (`jscpd activegraph/llm/`) — `jscpd` is not installed in the current toolchain; `git diff --check` and Python compilation pass
+- [x] `from activegraph.llm import BamlLLMProvider` succeeds (public export, not just the private `activegraph.llm.baml_provider` submodule path)
 
 **Manual:**
-- [ ] Mock server's access log inspected and confirmed to show exactly one real request on the `/anthropic` route
-- [ ] The scripted response body's shape (field names for text/usage/finish-reason) verified against a real Anthropic-compatible error/response example (per the Testing Strategy's "vendor-shaped response bodies" note) before being relied on across Behaviors 6-9 — not invented
+- [x] Mock server's access log inspected and asserted: exactly one real request, at `/anthropic/v1/messages`; prefix-route accounting reports exactly one `/anthropic` hit
+- [x] The scripted outer response uses Anthropic's real Messages shape (`content[].text`, `usage.input_tokens`, `usage.output_tokens`, `stop_reason`), matching the existing source-verified `AnthropicProvider` extraction path; the inner typed completion envelope is parsed successfully by the real generated BAML function
+
+- **Real-implementation deviation from the plan's Green pseudocode, found and fixed empirically**: BAML 0.15 generated top-level `<fn>()`/`<fn>_async()` calls return only the function's declared value; the one-shot runtime consumes the HTTP body and does not expose transport usage/finish metadata or collector call options to Python. Streaming has accumulators for those fields but is explicitly out of scope. `BamlCompletionEnvelope` therefore makes `text`, `input_tokens`, `output_tokens`, and `finish_reason` an explicit typed function-result contract, carried in the assistant content and validated by BAML. The provider uses a named generated-function dispatch table (`complete_anthropic`, `complete_openai`, `complete_openrouter`, plus the future Behavior 8-10 names) and passes `timeout_ms`; it does not use the nonexistent `call_llm_function` API shown in the old pseudocode. BAML 0.15 also currently materializes generated class results as a plain `dict` despite the generated `.pyi` promising a Pydantic class, so `_result_field` isolates compatibility with both bridge shapes at one seam.
 
 ---
 

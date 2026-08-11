@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import math
+import time
 from decimal import Decimal
 from functools import lru_cache
 from typing import Any, Mapping
 
+from activegraph.llm.errors import LLMBehaviorError
+from activegraph.llm.parsing import parse_structured_response
 from activegraph.llm.types import LLMMessage, LLMResponse
 
 
@@ -33,6 +38,15 @@ _FALLBACK_FAMILY_BY_VENDOR = {
     "openai": "gpt-4o",
     "openrouter": "gpt-4o",
     "openrouter_live": "gpt-4o",
+}
+
+_FUNCTION_BY_VENDOR = {
+    "anthropic": "complete_anthropic",
+    "anthropic_with_retry": "complete_anthropic_with_retry",
+    "fallback_cascade": "complete_fallback_cascade",
+    "openai": "complete_openai",
+    "openrouter": "complete_openrouter",
+    "openrouter_live": "complete_openrouter_live",
 }
 
 
@@ -76,8 +90,67 @@ class BamlLLMProvider:
         tools: list[dict[str, Any]] | None = None,
         structured_output_mode: str = "prompt",
     ) -> LLMResponse:
-        """Complete through BAML (implemented by Behavior 6)."""
-        raise NotImplementedError("BAML completion is implemented in Behavior 6")
+        """Call the generated sync BAML function and adapt its typed result."""
+        if tools:
+            raise LLMBehaviorError(
+                "llm.request_error",
+                "BAML providers do not support activegraph tool calls",
+            )
+
+        # Import lazily: pytest_configure must install local mock URLs before
+        # the generated runtime reads environment-backed client options.
+        from activegraph.baml_client import baml_sdk
+
+        function_name = _FUNCTION_BY_VENDOR[self._vendor]
+        generated_function = getattr(baml_sdk, function_name)
+        messages_text = json.dumps(
+            [message.to_dict() for message in messages],
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+        started = time.monotonic()
+        result = generated_function(
+            system=system,
+            messages_text=messages_text,
+            timeout_ms=max(1, math.ceil(timeout_seconds * 1000)),
+        )
+        latency_seconds = time.monotonic() - started
+
+        # BAML 0.15's generated stub advertises the generated Pydantic class,
+        # while the bridge currently materializes this class result as a
+        # plain dict. Accept both shapes at this single compatibility seam.
+        text = _result_field(result, "text")
+        input_tokens = _result_field(result, "input_tokens")
+        output_tokens = _result_field(result, "output_tokens")
+        finish_reason = _result_field(result, "finish_reason")
+
+        parsed = (
+            parse_structured_response(text, output_schema)
+            if output_schema is not None
+            else None
+        )
+        return LLMResponse(
+            raw_text=text,
+            parsed=parsed,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=self.estimate_cost(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                model=model,
+            ),
+            latency_seconds=latency_seconds,
+            model=model,
+            finish_reason=finish_reason,
+            provider_meta={
+                "baml_function": function_name,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
+                "structured_output_mode": structured_output_mode,
+            },
+        )
 
     def estimate_cost(
         self,
@@ -132,3 +205,9 @@ class BamlLLMProvider:
             best_key = _FALLBACK_FAMILY_BY_VENDOR[self._vendor]
         entry = self._pricing[best_key]
         return Decimal(str(entry["input"])), Decimal(str(entry["output"]))
+
+
+def _result_field(result: Any, name: str) -> Any:
+    if isinstance(result, Mapping):
+        return result[name]
+    return getattr(result, name)
