@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from activegraph import Graph, Runtime, behavior, llm_behavior
 from activegraph.llm import LLMBehaviorError, LLMMessage
 from activegraph.llm.baml_provider import BamlLLMProvider
 
@@ -143,16 +144,56 @@ def test_retry_compounding_is_bounded_by_outer_attempts_times_baml_attempts(
         body=_anthropic_failure(),
     )
 
-    outer_attempts = 2
-    baml_attempts_per_call = 3
-    for _ in range(outer_attempts):
-        with pytest.raises(LLMBehaviorError) as caught:
-            _complete()
-        assert caught.value.reason in {"llm.network_error", "llm.rate_limited"}
+    @behavior(name="retry_compounding_seed", on=["goal.created"])
+    def retry_compounding_seed(event, graph, ctx):
+        graph.add_object("document", {"title": "T", "body": "B"})
 
-    assert mock_llm_http_server.hits(_RETRY_ROUTE) == (
-        outer_attempts * baml_attempts_per_call
+    @llm_behavior(
+        name="retry_compounding_extractor",
+        on=["object.created"],
+        where={"object.type": "document"},
+        description="Exercise the real Runtime retry boundary.",
+        view={"around": "event.payload.object.id", "depth": 1},
     )
+    def retry_compounding_extractor(event, graph, ctx, llm_output):
+        raise AssertionError("an exhausted provider must not run its handler")
+
+    graph = Graph()
+    Runtime(
+        graph,
+        llm_provider=BamlLLMProvider(vendor="anthropic_with_retry"),
+        llm_retry_max_attempts=2,
+        llm_retry_initial_delay_seconds=0,
+    ).run_goal("Run the retry compounding extractor")
+
+    assert mock_llm_http_server.hits(_RETRY_ROUTE) == 2 * 3
+
+    requested = [event for event in graph.events if event.type == "llm.requested"]
+    errored = [
+        event
+        for event in graph.events
+        if event.type == "llm.responded" and event.payload.get("error")
+    ]
+    assert len(requested) == 2
+    assert len(errored) == 2
+    assert [event.payload["error"]["reason"] for event in errored] == [
+        "llm.network_error",
+        "llm.network_error",
+    ]
+    assert all(event.payload["retryable"] is True for event in errored)
+    assert requested[1].payload["retry_of"] == requested[0].id
+
+    failures = [
+        event
+        for event in graph.events
+        if event.type == "behavior.failed"
+        and event.payload["behavior"] == "retry_compounding_extractor"
+    ]
+    assert len(failures) == 1
+    assert failures[0].payload["reason"] == "llm.network_error"
+    assert failures[0].payload["attempts"] == 2
+    assert failures[0].payload["max_attempts"] == 2
+    assert failures[0].payload["retry_exhausted"] is True
 
 
 def test_timeout_bounds_the_entire_internal_retry_sequence(
