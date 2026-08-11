@@ -1114,7 +1114,7 @@ class BamlLLMProvider:
 
 ## Behavior 5b: baml_provider_estimate_cost_matches_pricing_table
 
-**Added in this revision** — `estimate_cost` is the third *required* `LLMProvider` Protocol method (`activegraph/llm/provider.py:70-77`, alongside `complete`/`count_tokens`), called unconditionally on every real completion turn (`runtime.py:1673`, not gated the way `count_tokens` is). An earlier revision of this plan built and tested `complete()`/`count_tokens()` but never `estimate_cost()` — without it, `BamlLLMProvider` does not actually satisfy the Protocol it claims to, and the first real turn through `Runtime` would raise `AttributeError`.
+**Added in this revision** — `estimate_cost` is the third *required* `LLMProvider` Protocol method (`activegraph/llm/provider.py:70-77`, alongside `complete`/`count_tokens`), called with `count_tokens()` on cache misses when `budget.has_cost_limit()` is true (`runtime.py:1657-1677`). An earlier revision of this plan built and tested `complete()`/`count_tokens()` but never `estimate_cost()` — without it, a cost-limited real turn through `Runtime` would raise `AttributeError`.
 
 ### Test Specification
 **Given**: known `input_tokens`, `output_tokens`, and `model` values for a real (or plausibly real) vendor model name
@@ -1171,14 +1171,14 @@ class BamlLLMProvider:
 
 ### Success Criteria
 **Automated:**
-- [ ] Test fails for right reason (Red): `AttributeError` before `estimate_cost` exists
-- [ ] Test passes (Green): `pytest tests/test_baml_provider_estimate_cost.py -x`
-- [ ] Property test passes (monotonicity + non-negativity): `pytest tests/test_baml_provider_estimate_cost.py -k property -x`
-- [ ] `isinstance(BamlLLMProvider(vendor="anthropic"), LLMProvider)` is `True` under `LLMProvider`'s `@runtime_checkable` check — the concrete, mechanical proof that full Protocol conformance is now real, not just claimed
+- [x] Test fails for right reason (Red): `AttributeError` before `estimate_cost` exists
+- [x] Test passes (Green): `pytest tests/test_baml_provider_estimate_cost.py -x`
+- [x] Property test passes (monotonicity + non-negativity): `pytest tests/test_baml_provider_estimate_cost.py -k property -x`
+- [x] `isinstance(BamlLLMProvider(vendor="anthropic"), LLMProvider)` is `True` under `LLMProvider`'s `@runtime_checkable` check — the mechanical proof that the complete Protocol *shape* is present; Behavior 6 replaces the deliberately failing completion placeholder with the real generated-function path
 - [ ] All tests pass after refactor: `pytest`
 
 **Manual:**
-- [ ] N/A — fully covered by automated tests
+- [x] N/A — fully covered by automated tests
 
 ---
 
