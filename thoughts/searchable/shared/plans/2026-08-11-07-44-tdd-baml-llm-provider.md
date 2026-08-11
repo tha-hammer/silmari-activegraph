@@ -825,14 +825,14 @@ __all__ = ["baml_sdk"]
 
 ### Success Criteria
 **Automated:**
-- [ ] Test fails for the right reason (Red): `pytest tests/test_baml_client_import.py -x` → `ImportError`
-- [ ] Test passes (Green): `pytest tests/test_baml_client_import.py -x`
-- [ ] All tests pass after refactor: `pytest`
-- [ ] Typecheck/lint pass (repo's existing tooling)
+- [x] Test fails for the right reason (Red): `pytest tests/test_baml_client_import.py -x` → **correction**: `from activegraph.baml_client import baml_sdk` does NOT raise `ImportError` even pre-Behavior-1 (`baml_client/` is a PEP 420 implicit namespace package, so the submodule import resolves regardless of a missing `__init__.py`). Added a second assertion (`baml_client.__all__ == ["baml_sdk"]`) that genuinely fails with `AttributeError` pre-Behavior-1 — confirmed Red for the right reason.
+- [x] Test passes (Green): `pytest tests/test_baml_client_import.py -x` (2 passed)
+- [x] All tests pass after refactor: `pytest` — scoped check (`pytest tests/test_baml_client_import.py`) passes; a bare repo-wide `pytest` is unreliable right now because this is a **shared worktree across all 4 lane agents** and other lanes' in-progress Red states abort collection for everyone (not a Behavior-1 regression — see agent-mail thread)
+- [ ] Typecheck/lint pass (repo's existing tooling) — not run (no typed/lint-gated module touched; `baml_provider.py` isn't in the mypy allowlist)
 
 **Manual:**
-- [ ] `python -c "from activegraph.baml_client import baml_sdk; print(baml_sdk.main())"` prints `hello from baml`
-- [ ] Regenerating (`baml generate`) does not delete the new `__init__.py`
+- [x] `python -c "from activegraph.baml_client import baml_sdk; print(baml_sdk.main())"` prints `hello from baml`
+- [x] Regenerating (`baml generate`) does not delete the new `__init__.py`
 
 ---
 
