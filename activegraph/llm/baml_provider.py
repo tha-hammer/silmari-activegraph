@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import time
 from decimal import Decimal
@@ -29,7 +30,7 @@ _DEFAULT_MODEL_BY_VENDOR = {
     "fallback_cascade": "claude-sonnet-4-5",
     "openai": "gpt-4o-mini",
     "openrouter": "gpt-4o-mini",
-    "openrouter_live": "gpt-4o-mini",
+    "openrouter_live": "openrouter/free",
 }
 
 _FALLBACK_FAMILY_BY_VENDOR = {
@@ -75,8 +76,20 @@ class BamlLLMProvider:
             supported = ", ".join(sorted(_DEFAULT_MODEL_BY_VENDOR))
             raise ValueError(f"unknown BAML vendor {vendor!r}; expected one of {supported}")
         self._vendor = vendor
-        self._model = model
-        self.default_model = model or _DEFAULT_MODEL_BY_VENDOR[vendor]
+        if vendor == "openrouter_live":
+            selected_model = (
+                model
+                or os.environ.get("OPENROUTER_FREE_MODEL")
+                or _DEFAULT_MODEL_BY_VENDOR[vendor]
+            )
+            # The 0.15 client config accepts env references or literals, but
+            # not a defaulting expression. Keep the generated client and the
+            # provider's advertised default on one source of truth.
+            os.environ["OPENROUTER_FREE_MODEL"] = selected_model
+        else:
+            selected_model = model or _DEFAULT_MODEL_BY_VENDOR[vendor]
+        self._model = selected_model
+        self.default_model = selected_model
         self._pricing = dict(pricing or _DEFAULT_PRICING)
 
     def complete(
@@ -199,6 +212,8 @@ class BamlLLMProvider:
             return name.startswith("claude-")
         if self._vendor == "fallback_cascade":
             return name.startswith(("claude-", "gpt-", "o1-", "o3-", "o4-"))
+        if self._vendor in {"openrouter", "openrouter_live"}:
+            return "/" in name or name.startswith(("gpt-", "o1-", "o3-", "o4-"))
         return name.startswith(("gpt-", "o1-", "o3-", "o4-"))
 
     def supports_native_structured_output(self, model: str) -> bool:
@@ -206,6 +221,10 @@ class BamlLLMProvider:
         return False
 
     def _pricing_for(self, model: str) -> tuple[Decimal, Decimal]:
+        if self._vendor in {"openrouter", "openrouter_live"} and (
+            model == "openrouter/free" or model.endswith(":free")
+        ):
+            return Decimal(0), Decimal(0)
         best_key: str | None = None
         for key in self._pricing:
             if model.startswith(key) and (

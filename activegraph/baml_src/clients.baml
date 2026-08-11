@@ -61,11 +61,12 @@ client<llm> ActivegraphOpenRouter {
 /// Real OpenRouter client, deliberately separate from the mock-routed
 /// ActivegraphOpenRouter. `openrouter/free` is OpenRouter's stable dynamic
 /// selector for currently available free models, avoiding individual model
-/// slug churn while keeping OPENROUTER_API_KEY as the only required env var.
+/// slug churn; OPENROUTER_FREE_MODEL can select a specific current `:free`
+/// slug when callers need deterministic routing.
 client<llm> ActivegraphOpenRouterLive {
     provider: openai,
     options: {
-        model: "openrouter/free",
+        model: env.OPENROUTER_FREE_MODEL,
         api_key: env.OPENROUTER_API_KEY,
         base_url: "https://openrouter.ai/api/v1",
     },

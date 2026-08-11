@@ -12,7 +12,10 @@ from activegraph.llm.baml_provider import BamlLLMProvider
 
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-OPENROUTER_FREE_MODEL = "openrouter/free"
+OPENROUTER_FREE_MODEL = os.environ.setdefault(
+    "OPENROUTER_FREE_MODEL",
+    "openrouter/free",
+)
 
 
 def test_openrouter_live_generated_callable_exists() -> None:
@@ -26,6 +29,8 @@ def test_openrouter_live_build_request_targets_stable_free_router(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    selected_model = "meta-llama/test-model:free"
+    monkeypatch.setenv("OPENROUTER_FREE_MODEL", selected_model)
     from activegraph.baml_client import baml_sdk
 
     request = baml_sdk.complete_openrouter_live__build_request(
@@ -38,7 +43,24 @@ def test_openrouter_live_build_request_targets_stable_free_router(
     assert request["method"] == "POST"
     assert request["url"] == "https://openrouter.ai/api/v1/chat/completions"
     assert request["headers"]["authorization"] == "Bearer test-key"
-    assert payload["model"] == OPENROUTER_FREE_MODEL
+    assert payload["model"] == selected_model
+
+
+def test_openrouter_live_provider_model_contract_tracks_selected_free_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_model = "meta-llama/test-model:free"
+    monkeypatch.setenv("OPENROUTER_FREE_MODEL", selected_model)
+
+    provider = BamlLLMProvider(vendor="openrouter_live")
+
+    assert provider.default_model == selected_model
+    assert provider.recognizes_model(selected_model) is True
+    assert provider.estimate_cost(
+        input_tokens=1_000,
+        output_tokens=500,
+        model=selected_model,
+    ) == 0
 
 
 @pytest.mark.live_llm
