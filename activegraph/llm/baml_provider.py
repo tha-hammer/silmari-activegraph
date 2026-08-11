@@ -171,10 +171,11 @@ class BamlLLMProvider:
     ) -> Decimal:
         """Price actual or worst-case usage with per-million token rates."""
         in_price, out_price = self._pricing_for(model)
-        million = Decimal("1000000")
-        return (Decimal(input_tokens) * in_price / million) + (
-            Decimal(output_tokens) * out_price / million
+        weighted_tokens = (
+            Decimal(input_tokens) * in_price
+            + Decimal(output_tokens) * out_price
         )
+        return weighted_tokens / Decimal(1_000_000)
 
     def count_tokens(
         self,
