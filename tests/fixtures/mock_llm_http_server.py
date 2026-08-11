@@ -56,11 +56,17 @@ class MockLLMHTTPServer:
                 else:
                     payload = json.dumps(response.body).encode("utf-8")
 
-                self.send_response(response.status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
+                try:
+                    self.send_response(response.status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                except (BrokenPipeError, ConnectionResetError):
+                    # A timeout test deliberately cancels the in-flight BAML
+                    # future while this handler is sleeping. The closed peer
+                    # is the expected cancellation signal, not server noise.
+                    return
 
             def log_message(self, format: str, *args: object) -> None:
                 return

@@ -1409,15 +1409,15 @@ client<llm> AnthropicPrimitiveRetryTwice {
 
 ### Success Criteria
 **Automated:**
-- [ ] Test fails for right reason (Red): mock shows 1 attempt, not 3, before `retry_policy` is wired
-- [ ] Test passes (Green): `pytest tests/test_baml_provider_retry.py -x`
-- [ ] Exhausted-retry edge case passes: surfaces `LLMBehaviorError` after exactly 3 real failed attempts, not fewer or more
-- [ ] Retry-compounding edge case passes: combined BAML-internal + runtime-level attempt count (where applicable) matches the predicted bound, not an unbounded multiplication
-- [ ] Timeout edge case passes: a short `timeout_seconds` against a slow mock surfaces a timeout-shaped failure without waiting for all 3 attempts
-- [ ] All tests pass after refactor: `pytest`
+- [x] Test fails for right reason (Red): provider dispatch reaches the missing generated `complete_anthropic_with_retry` callable before the retry client/function is wired
+- [x] Test passes (Green): `pytest tests/test_baml_provider_retry.py -x`
+- [x] Exhausted-retry edge case passes: surfaces `LLMBehaviorError` after exactly 3 real failed attempts, not fewer or more
+- [x] Retry-compounding edge case passes: combined BAML-internal + runtime-level attempt count (where applicable) matches the predicted bound, not an unbounded multiplication
+- [x] Timeout edge case passes: a short `timeout_seconds` against a slow mock surfaces a timeout-shaped failure without waiting for all 3 attempts
+- [x] All tests pass after refactor: `pytest`
 
 **Manual:**
-- [ ] Mock server's real per-attempt log reviewed to confirm 3 distinct real requests, not a simulated count
+- [x] Mock server's real per-attempt log reviewed to confirm 3 distinct real requests, not a simulated count
 
 ---
 
