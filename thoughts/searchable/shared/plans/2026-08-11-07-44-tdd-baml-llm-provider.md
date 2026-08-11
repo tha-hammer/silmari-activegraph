@@ -1461,10 +1461,12 @@ def test_fallback_cascades_across_vendors(mock_llm_http_server):
 #### 🟢 Green: Minimal Implementation
 **File**: `activegraph/baml_src/clients.baml`
 ```baml
-client<llm> FallbackCascade {
+client<llm> ActivegraphFallbackCascade {
   provider fallback
   options {
-    strategy [AnthropicPrimitive, OpenAiPrimitive, OpenRouterPrimitive]
+    // BAML 0.15 compiler2 currently requires quoted names here; bare
+    // identifiers silently lower to an empty sub_clients list (AF-c0n).
+    strategy ["ActivegraphAnthropic", "ActivegraphOpenAI", "ActivegraphOpenRouter"]
   }
 }
 ```
@@ -1475,17 +1477,17 @@ client<llm> FallbackCascade {
 - Reveals intent: doc-comment states the cascade order matches this plan's vendor priority (Anthropic → OpenAI → OpenRouter)
 - Complexity: unchanged
 - No shallow wrappers: N/A
-- Fits existing patterns: matches BAML's documented `ClientType.Fallback` + `sub_clients` shape (verified via `baml describe baml.llm.Client`)
+- Fits existing patterns: matches BAML's `ClientType.Fallback` + `sub_clients` shape (verified via `baml describe baml.llm.Client`), with the BAML 0.15 compiler2 string-literal workaround tracked as AF-c0n
 
 ### Success Criteria
 **Automated:**
-- [ ] Test fails for right reason (Red): fails before the `Fallback` client exists
-- [ ] Test passes (Green): `pytest tests/test_baml_provider_fallback.py -x`
-- [ ] All-three-fail edge case passes: single `LLMBehaviorError`, not three
-- [ ] All tests pass after refactor: `pytest`
+- [x] Test fails for right reason (Red): provider dispatch reaches the missing generated `complete_fallback_cascade` callable before the fallback client/function exists
+- [x] Test passes (Green): `pytest tests/test_baml_provider_fallback.py -x`
+- [x] All-three-fail edge case passes: single `LLMBehaviorError`, not three
+- [x] All tests pass after refactor: `pytest`
 
 **Manual:**
-- [ ] Mock server's three real per-route logs reviewed in cascade order
+- [x] Mock server's three real per-route logs reviewed in cascade order
 
 ---
 

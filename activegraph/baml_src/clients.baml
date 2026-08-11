@@ -58,6 +58,18 @@ client<llm> ActivegraphOpenRouter {
     },
 }
 
+/// The vendor priority is intentional: prefer Anthropic, then OpenAI, then
+/// the OpenRouter-compatible route. Each primitive remains independently
+/// mockable and retains its own wire protocol. BAML 0.15 compiler2 currently
+/// lowers composite strategy entries only from string literals; bare client
+/// identifiers silently produce an empty sub_clients list.
+client<llm> ActivegraphFallbackCascade {
+    provider: fallback,
+    options: {
+        strategy: ["ActivegraphAnthropic", "ActivegraphOpenAI", "ActivegraphOpenRouter"],
+    },
+}
+
 function complete_anthropic(
     system: string,
     messages_text: string,
@@ -161,6 +173,24 @@ function complete_openrouter(
     timeout_ms: int,
 ) -> BamlCompletionEnvelope {
     client: ActivegraphOpenRouter
+    prompt: `
+        System instructions:
+        ${system}
+
+        Conversation (JSON):
+        ${messages_text}
+
+        Return the completion and usage in this exact typed shape:
+        ${ctx.output_format}
+    `
+}
+
+function complete_fallback_cascade(
+    system: string,
+    messages_text: string,
+    timeout_ms: int,
+) -> BamlCompletionEnvelope {
+    client: ActivegraphFallbackCascade
     prompt: `
         System instructions:
         ${system}
