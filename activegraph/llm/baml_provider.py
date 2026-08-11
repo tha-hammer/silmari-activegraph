@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from decimal import Decimal
 from functools import lru_cache
@@ -48,6 +49,8 @@ _FUNCTION_BY_VENDOR = {
     "openrouter": "complete_openrouter",
     "openrouter_live": "complete_openrouter_live",
 }
+
+_HTTP_4XX_RE = re.compile(r"\b(4\d{2})\b")
 
 
 @lru_cache(maxsize=1)
@@ -110,11 +113,18 @@ class BamlLLMProvider:
         )
 
         started = time.monotonic()
-        result = generated_function(
-            system=system,
-            messages_text=messages_text,
-            timeout_ms=max(1, math.ceil(timeout_seconds * 1000)),
-        )
+        try:
+            result = generated_function(
+                system=system,
+                messages_text=messages_text,
+                timeout_ms=max(1, math.ceil(timeout_seconds * 1000)),
+            )
+        except Exception as exc:
+            from baml_bridge import BamlError
+
+            if isinstance(exc, BamlError):
+                raise _translate_baml_error(exc) from exc
+            raise
         latency_seconds = time.monotonic() - started
 
         # BAML 0.15's generated stub advertises the generated Pydantic class,
@@ -211,3 +221,81 @@ def _result_field(result: Any, name: str) -> Any:
     if isinstance(result, Mapping):
         return result[name]
     return getattr(result, name)
+
+
+def _translate_baml_error(baml_exc: Any) -> LLMBehaviorError:
+    """Translate BAML's typed error union to ActiveGraph's seven reasons.
+
+    Unlike ``wire.classify_provider_exception``, this boundary also owns
+    typed BAML parse/schema failures because the BAML runtime surfaces HTTP,
+    prompt, and result parsing failures through the same error union.
+    Unknown variants deliberately retain the transient network fallback.
+    """
+    from baml_bridge import BamlError
+
+    from activegraph.baml_client.baml_sdk.baml import errors as baml_errors
+
+    wrapper = baml_exc if isinstance(baml_exc, BamlError) else None
+    value = wrapper.value if wrapper is not None else baml_exc
+    variant_name = type(value).__name__
+    if wrapper is not None and wrapper.class_name:
+        variant_name = wrapper.class_name.rsplit(".", 1)[-1]
+
+    if isinstance(value, Mapping):
+        message = str(value.get("message", value))
+    else:
+        message = str(getattr(value, "message", value))
+    lower_message = message.lower()
+    status_match = _HTTP_4XX_RE.search(message)
+    status = int(status_match.group(1)) if status_match else None
+
+    # BAML 0.15 currently wraps real provider HTTP failures as DevOther and
+    # carries only the vendor body (and sometimes the status) in ``message``.
+    # Preserve wire.py's fixed classification precedence before considering
+    # the typed variant name.
+    if status == 429 or any(
+        marker in lower_message
+        for marker in ("rate_limit", "ratelimit", "rate limit")
+    ):
+        reason = "llm.rate_limited"
+    elif status in (401, 403) or any(
+        marker in lower_message
+        for marker in ("authentication", "permission_denied", "permission denied")
+    ):
+        reason = "llm.auth_error"
+    elif status is not None or any(
+        marker in lower_message
+        for marker in ("invalid_request", "badrequest", "unprocessable")
+    ):
+        reason = "llm.request_error"
+    elif variant_name == baml_errors.ParseError.__name__:
+        reason = "llm.parse_error"
+    elif variant_name == baml_errors.TypeMismatch.__name__:
+        reason = "llm.schema_violation"
+    elif variant_name == baml_errors.AccessError.__name__:
+        reason = "llm.auth_error"
+    elif variant_name == baml_errors.LlmClient.__name__:
+        if any(word in lower_message for word in ("parse", "json", "decode")):
+            reason = "llm.parse_error"
+        else:
+            reason = "llm.network_error"
+    elif variant_name in {
+        baml_errors.InvalidArgument.__name__,
+        baml_errors.Unsupported.__name__,
+        baml_errors.RenderPrompt.__name__,
+        baml_errors.NotImplemented.__name__,
+        baml_errors.CompilationError.__name__,
+    }:
+        reason = "llm.request_error"
+    else:
+        reason = "llm.network_error"
+
+    payload_extras: dict[str, Any] = {
+        "exception_type": variant_name,
+        "message": message,
+    }
+    if status is not None:
+        payload_extras["status_code"] = status
+    if wrapper is not None and wrapper.baml_trace:
+        payload_extras["baml_trace"] = list(wrapper.baml_trace)
+    return LLMBehaviorError(reason, message, payload_extras=payload_extras)

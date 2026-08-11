@@ -1277,9 +1277,9 @@ class BamlLLMProvider:
 **Then**: each real HTTP failure surfaces as a real `LLMBehaviorError` with the matching reason code (`llm.rate_limited` / `llm.auth_error` / `llm.parse_error` / `llm.network_error`)
 
 **Edge Cases**:
-- A `baml.errors.*` variant with no obvious activegraph reason-code equivalent — must resolve to the documented `llm.network_error` fallback, matching `wire.py`'s `classify_provider_exception` precedent. **Correction**: `classify_provider_exception`'s real fixed order (`wire.py:113-140`) is rate-limit → auth → generic-4xx-by-status → 4xx-by-type-name-heuristic → fallback (`llm.network_error`) — it has **no "parse" step**; parse failures are raised by a structurally separate module (`parsing.py:67,76`) on response *text*, not on an HTTP/SDK exception. `_translate_baml_error()` legitimately handles both concerns (exception classification AND `baml.errors.ParseError`-driven parse failures) in one function because BAML surfaces both as typed members of the same 13-variant `baml.errors.*` hierarchy — this is a deliberate, structural difference from `wire.py`'s narrower scope, not a mirroring of it, and should be described that way rather than as matching `wire.py`'s order exactly.
+- A `baml.errors.*` variant with no obvious activegraph reason-code equivalent — must resolve to the documented `llm.network_error` fallback, matching `wire.py`'s `classify_provider_exception` precedent. **Correction**: `classify_provider_exception`'s real fixed order (`wire.py:113-140`) is rate-limit → auth → generic-4xx-by-status → 4xx-by-type-name-heuristic → fallback (`llm.network_error`) — it has **no "parse" step**; parse failures are raised by a structurally separate module (`parsing.py:67,76`) on response *text*, not on an HTTP/SDK exception. `_translate_baml_error()` legitimately handles both concerns (exception classification AND `baml.errors.ParseError`-driven parse failures) in one function because BAML surfaces both as typed members of the same 14-variant `baml.errors.*` hierarchy — this is a deliberate, structural difference from `wire.py`'s narrower scope, not a mirroring of it, and should be described that way rather than as matching `wire.py`'s order exactly.
 
-**Property**: for ALL 13 `baml.errors.*` variants (`InvalidArgument`, `ParseError`, `Io`, `Timeout`, `Unsupported`, `AccessError`, `RenderPrompt`, `NotImplemented`, `LlmClient`, `DevOther`, `HostCallable`, `GenericSdkError`, `CompilationError`, `TypeMismatch`), `_translate_baml_error()` always returns one of the 7 existing `LLMBehaviorError` reason codes — never raises, never returns an unmapped string (Hypothesis: `sampled_from` the 13 variants)
+**Property**: for ALL 14 `baml.errors.*` variants (`InvalidArgument`, `ParseError`, `Io`, `Timeout`, `Unsupported`, `AccessError`, `RenderPrompt`, `NotImplemented`, `LlmClient`, `DevOther`, `HostCallable`, `GenericSdkError`, `CompilationError`, `TypeMismatch`), `_translate_baml_error()` always returns one of the 7 existing `LLMBehaviorError` reason codes — never raises, never returns an unmapped string (Hypothesis: `sampled_from` the 14 variants)
 
 **Files touched**: `activegraph/llm/baml_provider.py` (`_translate_baml_error`), `tests/test_baml_provider_error_mapping.py` (new)
 
@@ -1323,13 +1323,15 @@ def _translate_baml_error(baml_exc) -> LLMBehaviorError:
 
 ### Success Criteria
 **Automated:**
-- [ ] Test fails for right reason (Red): fails before `_translate_baml_error` exists
-- [ ] Test passes (Green): `pytest tests/test_baml_provider_error_mapping.py -x`
-- [ ] Property test passes for all 13 `baml.errors.*` variants
-- [ ] All tests pass after refactor: `pytest`
+- [x] Test fails for right reason (Red): collection failed with the intended `ImportError: cannot import name '_translate_baml_error'`
+- [x] Test passes (Green): `pytest tests/test_baml_provider_error_mapping.py -x` (14 passed: real 429/401/422/malformed-200/reset cases plus typed mapping cases)
+- [x] Property test passes for all 14 `baml.errors.*` variants; opaque `HostCallable` is safely constructed with Pydantic's validation-free `model_construct` solely to exercise classification
+- [ ] All tests pass after refactor: `pytest` — BAML error/completion/pricing/token plus all existing LLM tests are green (195 passed); repo-wide reaches 1013 passed / 49 skipped before the same 18 failures + 4 errors from unrelated SQLite `disk I/O error` persistence tests (the affected 38-test set passes in isolation per the Behavior 11 validation)
 
 **Manual:**
-- [ ] `activegraph_runtime`'s event log inspected to confirm the failure lands identically to an `AnthropicProvider` failure
+- [x] Runtime event log inspected with a real BAML-backed 401 turn: exactly one `/anthropic/v1/messages` request, one `llm.responded` carrying `error.reason="llm.auth_error"` and `retryable=False`, then one `behavior.failed` with the same reason — identical terminal-auth routing to `AnthropicProvider`
+
+- **Real-implementation deviation from the plan's Green pseudocode, found and fixed empirically**: generated `baml.errors.LlmClient` has only `message` (no `.status` field), and BAML 0.15's real Anthropic HTTP failures currently cross the bridge as `BamlError.value == dict` with `class_name="baml.errors.DevOther"`; the outer HTTP status may be discarded while the vendor-shaped error type remains embedded in the message JSON. Translation therefore unwraps `BamlError`, accepts generated-model and dict bridge shapes, and applies the source-verified precedence to both numeric status markers and vendor markers (`rate_limit_error`, `authentication_error`, `invalid_request_error`) before typed parse/schema/request mappings and the network fallback. This is why the real HTTP tests deliberately omit status numbers from their response messages: they prove classification is not accidentally passing on test-invented text.
 
 ---
 
