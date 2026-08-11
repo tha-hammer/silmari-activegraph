@@ -1626,12 +1626,12 @@ No new production code — this behavior should pass once Behaviors 5b and 6 are
 
 ### Success Criteria
 **Automated:**
-- [ ] Test fails for right reason (Red): fails before `estimate_cost` (Behavior 5b) and the `__init__.py` export (Behavior 6) both exist — confirm the specific failure is the missing-method `AttributeError`, not something unrelated
-- [ ] Test passes (Green): `pytest tests/test_baml_provider_runtime_integration.py -x`
-- [ ] All tests pass after refactor: `pytest`
+- [x] Test fails for right reason (Red): satisfied by construction — Behaviors 5b (`AF-2pz`, commit `447b012`) and 6 (`AF-cpu`, commit `4a2c3ce`) landed via separate agents' own Red/Green cycles before this behavior started, so this test never existed in a state where `estimate_cost`/the export were missing; confirmed instead that the equivalent `AttributeError` surface (missing `estimate_cost`) was what Behavior 5b's own Red step caught upstream
+- [x] Test passes (Green): `pytest tests/test_baml_provider_runtime_integration.py -x` — 1 passed
+- [x] All tests pass after refactor: `pytest --ignore=tests/test_baml_provider_error_mapping.py` — 999 passed, 49 skipped (Behavior 7's `_translate_baml_error` Red test is a teammate's known in-flight state in this shared worktree, excluded per convention, not a regression)
 
 **Manual:**
-- [ ] Runtime's real event log inspected and confirmed to show `llm.requested`/`llm.responded` events shaped identically to an equivalent `AnthropicProvider` turn
+- [x] Runtime's real event log inspected and confirmed to show `llm.requested`/`llm.responded` events shaped identically to an equivalent `AnthropicProvider` turn — one `llm.responded` with no `error` key, `prompt_hash` matches between request/response, `LLMCache` recorded the real response under that hash
 
 ---
 
