@@ -23,6 +23,7 @@ from activegraph import (
     behavior,
     clear_registry,
     llm_behavior,
+    relation_behavior,
 )
 from activegraph.llm import LLMBehaviorError, LLMResponse, ToolCall
 from activegraph.observability.metrics import (
@@ -36,6 +37,7 @@ from activegraph.observability.metrics import (
     NoOpMetrics,
     TOOL_METRIC_REASONS,
     normalize_llm_metric_reason,
+    normalize_behavior_metric_reason,
     normalize_metric_model,
     normalize_metric_tool,
     normalize_tool_metric_reason,
@@ -197,6 +199,19 @@ class TestStandardMetricTable:
         assert normalize_tool_metric_reason(7) == "unknown_reason"
         assert normalize_tool_metric_reason("tool.user-controlled") == "tool.other"
 
+    def test_behavior_metric_reason_normalizer_is_closed(self):
+        assert normalize_behavior_metric_reason("llm.parse_error") == "llm.parse_error"
+        assert normalize_behavior_metric_reason("llm.user-controlled") == "llm.other"
+        assert normalize_behavior_metric_reason("tool.invalid_input") == "tool.invalid_input"
+        assert normalize_behavior_metric_reason("tool.user-controlled") == "tool.other"
+        assert normalize_behavior_metric_reason("budget.events_exhausted") == (
+            "budget.events_exhausted"
+        )
+        assert normalize_behavior_metric_reason("budget.user-controlled") == "budget.other"
+        assert normalize_behavior_metric_reason("exception.ValueError") == "exception.other"
+        assert normalize_behavior_metric_reason("user-controlled") == "other"
+        assert normalize_behavior_metric_reason(None) == "unknown_reason"
+
 
 class TestRuntimeEmitsExpectedMetrics:
     def test_events_emitted_total_fires(self):
@@ -247,7 +262,7 @@ class TestRuntimeEmitsExpectedMetrics:
         assert len(failed) == 1
         tags, _ = failed[0]
         assert tags["behavior"] == "bad"
-        assert "ValueError" in tags["reason"]
+        assert tags["reason"] == "exception.other"
 
     def test_behaviors_duration_histogram_fires(self):
         clear_registry()
@@ -275,6 +290,124 @@ class TestRuntimeEmitsExpectedMetrics:
         rt = Runtime(g, metrics=m)
         rt.run_goal("x")
         assert any(n == "activegraph_queue_depth" for n, _, _ in m.gauges)
+
+
+def test_llm_handler_behavior_metrics_cover_success_and_failure() -> None:
+    def run_case(*, fails: bool) -> tuple[RecordingMetrics, Graph]:
+        name = "metric_llm_handler_failure" if fails else "metric_llm_handler_success"
+
+        @llm_behavior(name=name, on=["goal.created"], output_schema=ClaimList)
+        def handler(event, graph, ctx, output):
+            if fails:
+                raise ValueError("developer handler failed")
+
+        metrics = RecordingMetrics()
+        graph = Graph()
+        provider = ScriptedProvider(
+            respond_fn=lambda messages, schema: ClaimList(claims=[]),
+            default_model="metric-model",
+        )
+        Runtime(
+            graph,
+            behaviors=[handler],
+            llm_provider=provider,
+            metrics=metrics,
+        ).run_goal("metrics")
+        return metrics, graph
+
+    success, _success_graph = run_case(fails=False)
+    failure, failure_graph = run_case(fails=True)
+
+    for metrics, name in (
+        (success, "metric_llm_handler_success"),
+        (failure, "metric_llm_handler_failure"),
+    ):
+        tags = {"behavior": name}
+        assert metrics.values(
+            "counter", "activegraph_behaviors_invoked_total", tags
+        ) == [1.0]
+        durations = metrics.values(
+            "histogram", "activegraph_behaviors_duration_seconds", tags
+        )
+        assert len(durations) == 1 and durations[0] >= 0.0
+
+    assert failure.values(
+        "counter",
+        "activegraph_behaviors_failed_total",
+        {"behavior": "metric_llm_handler_failure", "reason": "exception.other"},
+    ) == [1.0]
+    failed_event = next(
+        event for event in failure_graph.events if event.type == "behavior.failed"
+    )
+    assert failed_event.payload["exception_type"] == "ValueError"
+    assert failed_event.payload.get("reason") is None
+
+
+def _relation_metric_graph() -> tuple[Graph, str]:
+    graph = Graph()
+    source = graph.add_object("task", {"name": "source"})
+    first = graph.add_object("task", {"name": "first"})
+    second = graph.add_object("task", {"name": "second"})
+    graph.add_relation(source.id, first.id, "depends_on")
+    graph.add_relation(source.id, second.id, "depends_on")
+    return graph, source.id
+
+
+def test_relation_behavior_metrics_count_each_fanout_success_and_failure() -> None:
+    def run_case(*, fails: bool) -> tuple[RecordingMetrics, Graph]:
+        name = "metric_relation_failure" if fails else "metric_relation_success"
+
+        @relation_behavior(
+            name=name,
+            relation_type="depends_on",
+            on=["task.completed"],
+        )
+        def handler(relation, event, graph, ctx):
+            if fails:
+                raise LookupError("relation handler failed")
+
+        graph, source_id = _relation_metric_graph()
+        metrics = RecordingMetrics()
+        runtime = Runtime(graph, behaviors=[handler], metrics=metrics)
+        _emit_public_metric_event(
+            graph,
+            "task.completed",
+            {"task_id": source_id},
+        )
+        runtime.run_until_idle()
+        return metrics, graph
+
+    success, _success_graph = run_case(fails=False)
+    failure, failure_graph = run_case(fails=True)
+
+    for metrics, name in (
+        (success, "metric_relation_success"),
+        (failure, "metric_relation_failure"),
+    ):
+        tags = {"behavior": name}
+        assert metrics.values(
+            "counter", "activegraph_behaviors_invoked_total", tags
+        ) == [1.0, 1.0]
+        durations = metrics.values(
+            "histogram", "activegraph_behaviors_duration_seconds", tags
+        )
+        assert len(durations) == 2
+        assert all(value >= 0.0 for value in durations)
+
+    failed_tags = {
+        "behavior": "metric_relation_failure",
+        "reason": "exception.other",
+    }
+    assert failure.values(
+        "counter", "activegraph_behaviors_failed_total", failed_tags
+    ) == [1.0, 1.0]
+    failed_events = [
+        event for event in failure_graph.events if event.type == "behavior.failed"
+    ]
+    assert len(failed_events) == 2
+    assert {event.payload["exception_type"] for event in failed_events} == {
+        "LookupError"
+    }
 
 
 @dataclass(frozen=True)
@@ -316,7 +449,7 @@ def _check_plain_failure(metrics: RecordingMetrics) -> None:
     assert metrics.values(
         "counter",
         "activegraph_behaviors_failed_total",
-        {"behavior": "metric_failure", "reason": "exception.ValueError"},
+        {"behavior": "metric_failure", "reason": "exception.other"},
     ) == [1.0]
 
 

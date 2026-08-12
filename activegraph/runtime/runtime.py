@@ -148,6 +148,7 @@ from activegraph.observability.logging import get_logger, runtime_log_extra
 from activegraph.observability.metrics import (
     Metrics,
     NoOpMetrics,
+    normalize_behavior_metric_reason,
     normalize_llm_metric_reason,
     normalize_metric_model,
     normalize_metric_tool,
@@ -1588,10 +1589,6 @@ class Runtime:
                 {"behavior": b.name},
                 _monotonic() - _t0,
             )
-            self.metrics.counter(
-                "activegraph_behaviors_failed_total",
-                {"behavior": b.name, "reason": f"exception.{type(e).__name__}"},
-            )
             # v1.0.3 #3: route through _emit_behavior_failed so the
             # WARNING log line and the event emission stay in one
             # place. The previous ERROR log is removed — the
@@ -1651,6 +1648,9 @@ class Runtime:
 
         self.budget.consume("max_behavior_calls")
         self.budget.consume("max_llm_calls")
+        self.metrics.counter(
+            "activegraph_behaviors_invoked_total", {"behavior": b.name}
+        )
 
         # v1.10 #1: one recorder per execution when tracing is on.
         # `plain_view` stays unwrapped so recording the prompt's object
@@ -2211,6 +2211,7 @@ class Runtime:
         # ---- Invoke developer handler with provenance stamping -----------
         bgraph._llm_request_event_id = successful_llm_request_id  # noqa: SLF001
         bgraph._tool_request_event_ids = list(tool_request_event_ids)  # noqa: SLF001
+        handler_t0 = _monotonic()
         try:
             cast("Callable[..., None]", b.handler)(event, bgraph, ctx, response.parsed)
         except ReplayDivergenceError:
@@ -2224,6 +2225,12 @@ class Runtime:
         except Exception as e:
             self._emit_behavior_failed(b.name, event.id, e)
             return
+        finally:
+            self.metrics.histogram(
+                "activegraph_behaviors_duration_seconds",
+                {"behavior": b.name},
+                _monotonic() - handler_t0,
+            )
 
         self._emit_lifecycle(
             "behavior.completed",
@@ -2638,6 +2645,13 @@ class Runtime:
         # tool.*, ConfigurationError for budget.*, else the generic
         # execution-error page.
         log_reason = reason or f"exception.{type(exc).__name__}"
+        self.metrics.counter(
+            "activegraph_behaviors_failed_total",
+            {
+                "behavior": behavior_name,
+                "reason": normalize_behavior_metric_reason(log_reason),
+            },
+        )
         self._log.warning(
             f"behavior failed: {behavior_name} (reason={log_reason})",
             extra=runtime_log_extra(
@@ -2660,6 +2674,9 @@ class Runtime:
         matches: Optional[list[Any]] = None,
     ) -> None:
         self.budget.consume("max_behavior_calls")
+        self.metrics.counter(
+            "activegraph_behaviors_invoked_total", {"behavior": b.name}
+        )
         # v1.10 #1: one recorder per execution when tracing is on. The
         # `relation` argument itself is pushed to the behavior, not read
         # by it, so it never enters the read set.
@@ -2697,6 +2714,7 @@ class Runtime:
                 "relation_id": relation.id,
             },
         )
+        handler_t0 = _monotonic()
         try:
             b.run(relation, event, bgraph, ctx)
         except ReplayDivergenceError:
@@ -2709,6 +2727,12 @@ class Runtime:
             # v1.10 #1: a failed frame still commits its read trace.
             self._emit_context_read(b.name, event.id, started_evt.id, recorder)
             return
+        finally:
+            self.metrics.histogram(
+                "activegraph_behaviors_duration_seconds",
+                {"behavior": b.name},
+                _monotonic() - handler_t0,
+            )
 
         self._emit_lifecycle(
             "behavior.completed",

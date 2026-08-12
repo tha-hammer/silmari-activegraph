@@ -31,6 +31,9 @@ METRIC_UNKNOWN_TOOL = "unknown_tool"
 METRIC_UNKNOWN_REASON = "unknown_reason"
 METRIC_LLM_OTHER_REASON = "llm.other"
 METRIC_TOOL_OTHER_REASON = "tool.other"
+METRIC_BUDGET_OTHER_REASON = "budget.other"
+METRIC_EXCEPTION_OTHER_REASON = "exception.other"
+METRIC_OTHER_REASON = "other"
 
 LLM_METRIC_REASONS = frozenset(
     {
@@ -56,6 +59,23 @@ TOOL_METRIC_REASONS = frozenset(
         "tool.max_turns_exhausted",
         "tool.unrecorded_external_io",
         "budget.tool_calls_exhausted",
+        "budget.cost_exhausted",
+    }
+)
+
+BEHAVIOR_METRIC_REASONS = frozenset(
+    {
+        *LLM_METRIC_REASONS,
+        *TOOL_METRIC_REASONS,
+        "llm.prompt_assembly_error",
+        "budget.exhausted",
+        "budget.events_exhausted",
+        "budget.behavior_calls_exhausted",
+        "budget.llm_calls_exhausted",
+        "budget.tool_calls_exhausted",
+        "budget.patches_exhausted",
+        "budget.depth_exhausted",
+        "budget.seconds_exhausted",
         "budget.cost_exhausted",
     }
 )
@@ -87,6 +107,24 @@ def normalize_tool_metric_reason(value: object) -> str:
     if not isinstance(value, str):
         return METRIC_UNKNOWN_REASON
     return value if value in TOOL_METRIC_REASONS else METRIC_TOOL_OTHER_REASON
+
+
+def normalize_behavior_metric_reason(value: object) -> str:
+    """Bound behavior failure reasons without changing diagnostic payloads."""
+
+    if not isinstance(value, str):
+        return METRIC_UNKNOWN_REASON
+    if value in BEHAVIOR_METRIC_REASONS:
+        return value
+    if value.startswith("llm."):
+        return METRIC_LLM_OTHER_REASON
+    if value.startswith("tool."):
+        return METRIC_TOOL_OTHER_REASON
+    if value.startswith("budget."):
+        return METRIC_BUDGET_OTHER_REASON
+    if value.startswith("exception."):
+        return METRIC_EXCEPTION_OTHER_REASON
+    return METRIC_OTHER_REASON
 
 
 # ---- the protocol --------------------------------------------------------
