@@ -59,6 +59,11 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
   distribution slug at 64 characters. This is an intentional 1.x constructor
   narrowing: third-party names longer than 64 characters must choose a shorter
   stable identity before upgrading.
+- **Pack versions now require PEP 440 at construction and manifest parse.**
+  Valid strings retain their exact spelling and identity; surrounding
+  whitespace, non-strings, and labels such as `nightly` now fail early. This is
+  an intentional 1.x narrowing. Migrate free-form labels to a valid version
+  such as `0+nightly`; the framework does not normalize them automatically.
 
 ## [1.10.0] — 2026-07-12
 

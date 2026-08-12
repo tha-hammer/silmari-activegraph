@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from packaging.version import InvalidVersion, Version
+
 
 _PACK_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
@@ -20,4 +22,17 @@ def validate_pack_name(value: Any, *, field: str) -> str:
     return value
 
 
-__all__ = ["validate_pack_name"]
+def validate_pack_version(value: Any, *, field: str) -> str:
+    """Return an unchanged, non-whitespace-padded PEP 440 version."""
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    if value != value.strip():
+        raise ValueError(f"{field} must not contain surrounding whitespace")
+    try:
+        Version(value)
+    except InvalidVersion as exc:
+        raise ValueError(f"{field} {value!r} is not PEP 440") from exc
+    return value
+
+
+__all__ = ["validate_pack_name", "validate_pack_version"]

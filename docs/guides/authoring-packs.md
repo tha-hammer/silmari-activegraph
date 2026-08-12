@@ -183,7 +183,8 @@ convenience.
 `Pack.__post_init__` validates:
   - `name` is a 1–64 character lowercase ASCII identifier (matches
     `^[a-z][a-z0-9_]{0,63}$`)
-  - `version` is non-empty
+  - `version` is a non-whitespace-padded PEP 440 string; its exact spelling is
+    preserved as part of Pack identity
   - object types have unique names within the pack
   - relation types have unique names within the pack
   - behavior names are unique within the pack

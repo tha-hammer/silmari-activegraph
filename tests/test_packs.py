@@ -131,6 +131,34 @@ def test_pack_name_rejects_noncanonical_identity(name):
         Pack(name=name, version="0.1.0", settings_schema=EmptySettings)
 
 
+@pytest.mark.parametrize(
+    "version",
+    ["0.1", "1.0.0rc1", "1!2.0", "1.0.post1", "1.0.dev2", "1.0+local.1"],
+)
+def test_pack_version_accepts_pep440_without_rewriting(version):
+    assert Pack(name="demo", version=version).version == version
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "",
+        " 1.0",
+        "1.0 ",
+        "nightly",
+        "1..0",
+        "release-1",
+        "1.0+local..1",
+        None,
+        1,
+        True,
+    ],
+)
+def test_pack_version_rejects_non_pep440_values(version):
+    with pytest.raises(PackValidationError, match="Pack.version"):
+        Pack(name="demo", version=version)
+
+
 def test_pack_duplicate_behavior_name_rejected():
     @behavior(name="ping", on=["goal.created"])
     def ping1(event, graph, ctx):

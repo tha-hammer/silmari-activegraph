@@ -56,15 +56,9 @@ from pathlib import Path
 from typing import Any
 
 from activegraph.errors import PackError
-from activegraph.packs.validation import validate_pack_name
+from activegraph.packs.validation import validate_pack_name, validate_pack_version
 
 
-# PEP 440 core grammar (syntactic check only; semantic range
-# resolution is load-time enforcement, not this cycle).
-_VERSION_RE = re.compile(
-    r"^v?\d+(\.\d+)*((a|b|rc)\d+)?(\.post\d+)?(\.dev\d+)?"
-    r"(\+[a-z0-9]+(\.[a-z0-9]+)*)?$"
-)
 _SPECIFIER_RE = re.compile(
     r"^\s*(~=|==|!=|<=|>=|<|>|===)\s*[\w.*+!-]+\s*(,\s*(~=|==|!=|<=|>=|<|>|===)\s*[\w.*+!-]+\s*)*$"
 )
@@ -179,10 +173,10 @@ def load_manifest(path: str | Path) -> PackManifest:
 
     ``path`` is the manifest file or the pack root containing it.
     Raises :class:`PackManifestError` carrying EVERY violation found;
-    returns the parsed :class:`PackManifest` when clean. Version and
-    range fields are checked syntactically (PEP 440 shape); semantic
-    range resolution against a running runtime is load-time
-    enforcement and deliberately not part of this cycle.
+    returns the parsed :class:`PackManifest` when clean. Pack versions
+    use the complete PEP 440 grammar; dependency ranges are checked
+    syntactically, while semantic resolution against a running runtime
+    is load-time enforcement and deliberately not part of this cycle.
     """
     p = Path(path)
     if p.is_dir():
@@ -227,9 +221,12 @@ def load_manifest(path: str | Path) -> PackManifest:
     except ValueError as exc:
         violations.append(str(exc))
         name = raw_name if isinstance(raw_name, str) else ""
-    version = str(pack.get("version", ""))
-    if not _VERSION_RE.match(version):
-        violations.append(f"pack.version {version!r} is not PEP 440")
+    raw_version = pack.get("version", "")
+    try:
+        version = validate_pack_version(raw_version, field="pack.version")
+    except ValueError as exc:
+        violations.append(str(exc))
+        version = raw_version if isinstance(raw_version, str) else ""
     description = str(pack.get("description", ""))
     if not description:
         violations.append("pack.description must be nonempty")

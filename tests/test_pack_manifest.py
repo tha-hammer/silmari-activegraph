@@ -117,6 +117,44 @@ def test_manifest_name_rejects_non_string_without_coercion(tmp_path, toml_value)
     )
 
 
+@pytest.mark.parametrize(
+    "version",
+    ["0.1", "1.0.0rc1", "1!2.0", "1.0.post1", "1.0.dev2", "1.0+local.1"],
+)
+def test_manifest_version_accepts_pep440_without_rewriting(tmp_path, version):
+    text = GOOD_MANIFEST.replace(
+        'version = "0.1.0"', f'version = "{version}"'
+    )
+    assert load_manifest(_write_pack(tmp_path, text)).version == version
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["", " 1.0", "1.0 ", "nightly", "1..0", "release-1", "1.0+local..1"],
+)
+def test_manifest_version_rejects_non_pep440_values(tmp_path, version):
+    text = GOOD_MANIFEST.replace(
+        'version = "0.1.0"', f'version = "{version}"'
+    )
+    with pytest.raises(PackManifestError, match="pack.version"):
+        load_manifest(_write_pack(tmp_path, text))
+
+
+@pytest.mark.parametrize("toml_value", ["123", "true"])
+def test_manifest_version_rejects_non_string_without_coercion(
+    tmp_path, toml_value
+):
+    text = GOOD_MANIFEST.replace(
+        'version = "0.1.0"', f"version = {toml_value}"
+    )
+    with pytest.raises(PackManifestError) as excinfo:
+        load_manifest(_write_pack(tmp_path, text))
+    assert any(
+        violation == "pack.version must be a string"
+        for violation in excinfo.value.violations
+    )
+
+
 def test_violations_are_aggregated_into_one_error(tmp_path):
     bad = GOOD_MANIFEST.replace('name = "meeting_notes"', 'name = "Bad-Name"')
     bad = bad.replace('version = "0.1.0"', 'version = "not-a-version"')
@@ -176,6 +214,31 @@ def test_surface_check_passes_on_agreement(tmp_path):
         ),
     )
     verify_surface(m, pack)  # no raise
+
+
+def test_surface_check_requires_exact_valid_version_spelling(tmp_path):
+    from activegraph.packs.manifest import CapabilityDecl
+
+    text = GOOD_MANIFEST.replace('version = "0.1.0"', 'version = "1.0"')
+    manifest = load_manifest(_write_pack(tmp_path, text))
+    pack = Pack(
+        name="meeting_notes",
+        version="1.0.0",
+        object_types=_pack().object_types,
+        capabilities=(
+            CapabilityDecl(
+                provider="meeting",
+                capability="export_summary",
+                risk_class="medium",
+            ),
+        ),
+    )
+
+    with pytest.raises(PackManifestError) as excinfo:
+        verify_surface(manifest, pack)
+
+    assert any("pack.version '1.0' != Pack(version='1.0.0')" in violation
+               for violation in excinfo.value.violations)
 
 
 def test_surface_check_catches_both_directions(tmp_path):

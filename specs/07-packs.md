@@ -182,9 +182,9 @@ Contract notes — all violations raise `PackValidationError`:
 1. `Pack.name` and manifest `pack.name` share one validator and must match
    `^[a-z][a-z0-9_]{0,63}$` (1–64 characters). The original spelling is the
    identity spelling; it is never normalized.
-2. `Pack.version` must be a non-empty `str` — **no PEP 440 check here**
-   (`activegraph/packs/__init__.py:596-597`). PEP 440 is enforced only manifest-side
-   (`activegraph/packs/manifest.py:64-67`, `:229-231`).
+2. `Pack.version` and manifest `pack.version` share the complete PEP 440
+   validator from `packaging.version.Version`. Surrounding whitespace and
+   non-strings fail. Valid spelling is preserved exactly rather than normalized.
 3. `settings_schema` must be a Pydantic `BaseModel` subclass (`activegraph/packs/__init__.py:600-603`).
 4. Within-pack name uniqueness across object types, relation types, behaviors, tools, policies, and
    prompts (`activegraph/packs/__init__.py:606-611`, `_check_unique` at `:697-704`).
@@ -711,11 +711,10 @@ sequenceDiagram
    `sha256:` + **64** hex chars (`activegraph/packs/manifest.py:245-247`). Both surface near
    `pack.loaded`. Not a bug, but they must not be conflated.
 
-8. **`Pack.version` is unvalidated as a version.** Only non-emptiness is checked
-   (`activegraph/packs/__init__.py:596-597`), while `verify_surface` demands exact string equality with
-   the manifest's PEP 440-validated `version` (`activegraph/packs/manifest.py:413-417`). A pack whose
-   Python-side version is `"nightly"` constructs fine and only fails at manifest verification — which
-   is a warning, not an error, before 2.0.
+8. **Pack versions now share complete PEP 440 validation.** Pack construction and manifest parsing
+   reject invalid/non-string/padded values at their earliest boundary, preserve the caller's exact
+   valid spelling, and `verify_surface` still requires exact textual equality. Thus `1.0` and `1.0.0`
+   are individually valid but deliberately do not describe the same Pack identity.
 
 9. **The manifest module is explicitly PROVISIONAL**, with "expect one round of breaking edits before
    the API is contract-stable" (`activegraph/packs/manifest.py:9-11`). Every consumer of this spec

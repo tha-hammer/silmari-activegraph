@@ -63,7 +63,7 @@ from activegraph.behaviors.base import (
     _llm_behavior_fn_placeholder,
 )
 from activegraph.tools.base import Tool
-from activegraph.packs.validation import validate_pack_name
+from activegraph.packs.validation import validate_pack_name, validate_pack_version
 
 
 # ---------------------------------------------------------------- exceptions
@@ -591,8 +591,10 @@ class Pack:
             validate_pack_name(self.name, field="Pack.name")
         except ValueError as exc:
             raise PackValidationError(str(exc)) from exc
-        if not isinstance(self.version, str) or not self.version:
-            raise PackValidationError(f"Pack.version must be non-empty str, got {self.version!r}")
+        try:
+            validate_pack_version(self.version, field="Pack.version")
+        except ValueError as exc:
+            raise PackValidationError(str(exc)) from exc
 
         # settings_schema shape
         if not (isinstance(self.settings_schema, type) and issubclass(self.settings_schema, BaseModel)):

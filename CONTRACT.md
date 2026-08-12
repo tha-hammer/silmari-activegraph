@@ -8652,3 +8652,18 @@ longer than 64 characters must choose a shorter stable identity before
 upgrading. Hard constructor rejection in the current 1.x line is an explicit
 compatibility break, justified by aligning all identity boundaries before a
 Pack can register or emit audit events.
+
+## 2026-08-12 Set 4 amendment #6 — PEP 440 Pack versions
+
+This amendment intentionally narrows v0.9 #2/#6 and resolves the v0.9 #26
+version-string deferral. Both `Pack.version` and manifest `pack.version` must
+be strings accepted by `packaging.version.Version`; surrounding whitespace is
+rejected before parsing. The original valid string is retained without
+normalization, and `(name, version)` identity remains exact-string identity.
+Consequently, distinct valid spellings such as `1.0` and `1.0.0` do not pass
+surface agreement.
+
+Hard rejection in the current 1.x line is an explicit compatibility break,
+justified by refusing invalid identity before registration or audit events.
+Third-party labels such as `nightly` must migrate to a valid exact spelling
+such as `0+nightly`. No automatic rewrite is performed on callers' behalf.
