@@ -8591,3 +8591,33 @@ in place as history.
    Existing pending approvals and their durable events remain unchanged and
    may still be approved or denied. This correction changes no approval or
    object event schema.
+
+## v1.11 #3. Capability declarations are verified; wiring remains host-owned
+
+This append-only correction supersedes only v1.4 #1's statement that both
+`capabilities` and `consumes` are excluded from `verify_surface`. It also
+clarifies v1.9 #1: adding `action_class` to the verified capability surface
+did not make a declaration register a gateway or resolve credentials. The
+historical clauses remain in place as archaeology.
+
+1. `Pack.capabilities` is declaration data. Construction requires
+   `CapabilityDecl` entries, validates closed `risk_class` and optional
+   `action_class` values, and rejects duplicate `(provider, capability)`
+   pairs. It does not require non-empty provider, capability, or
+   `credential_ref` values.
+2. `verify_surface` checks capabilities in both directions by
+   `(provider, capability)` and requires exact `risk_class` and
+   `action_class` agreement for shared pairs. `credential_ref` is recorded
+   but not compared.
+3. For a discoverable manifest, normal `Runtime.load_pack` retains v1.6 #1's
+   warning tier: a capability mismatch emits one structured
+   `pack.manifest_invalid` warning and the pack remains loaded and
+   dispatchable. Fork-trial sandbox materialization uses the same comparison
+   strictly before runtime loading, so the mismatch fails materialization.
+4. Manifest `consumes` parses and normalizes to a tuple but is excluded from
+   `verify_surface` on both connectors. A consumes-only difference neither
+   warns during normal load nor fails sandbox materialization.
+5. `pack.loaded` records capability declarations for audit. ActiveGraph does
+   not create a gateway registry, register an implementation, resolve a
+   credential, or use `consumes` for runtime authority. Host code owns those
+   operations and the gateway-side declaration check.

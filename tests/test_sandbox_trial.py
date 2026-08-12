@@ -73,14 +73,19 @@ def main(rt):
 '''
 
 
-def _candidate_dir(tmp_path, scenario=HAPPY_SCENARIO, init=PACK_INIT):
+def _candidate_dir(
+    tmp_path,
+    scenario=HAPPY_SCENARIO,
+    init=PACK_INIT,
+    manifest_template=MANIFEST_TEMPLATE,
+):
     root = tmp_path / "trial_candidate"
     root.mkdir()
     (root / "__init__.py").write_text(init)
     (root / "scenario.py").write_text(scenario)
     content = compute_content_hash(root)
     (root / "manifest.toml").write_text(
-        MANIFEST_TEMPLATE.format(content_hash=content)
+        manifest_template.format(content_hash=content)
     )
     return root, compute_bundle_hash(root)
 
@@ -274,6 +279,88 @@ pack = Pack(
     )
     assert report.outcome == "materialization_failed"
     assert "undeclared" in report.detail
+    _parent_untouched(path, parent_run, n_parent)
+
+
+CAPABILITY_PACK_INIT = PACK_INIT.replace(
+    "from activegraph.packs import Pack, behavior",
+    "from activegraph.packs import Pack, behavior\n"
+    "from activegraph.packs.manifest import CapabilityDecl",
+).replace(
+    'pack = Pack(name="trial_candidate", version="0.1.0", behaviors=(greeter,))',
+    '''pack = Pack(
+    name="trial_candidate",
+    version="0.1.0",
+    behaviors=(greeter,),
+    capabilities=(
+        CapabilityDecl(
+            provider="meeting",
+            capability="export_summary",
+            risk_class="low",
+            action_class="R2",
+        ),
+    ),
+)''',
+)
+
+CAPABILITY_MISMATCH_MANIFEST = MANIFEST_TEMPLATE.replace(
+    "\n[fixtures]",
+    '''
+[[surface.capabilities]]
+provider = "meeting"
+capability = "export_summary"
+risk_class = "medium"
+action_class = "R2"
+
+[fixtures]''',
+)
+
+CONSUMES_ONLY_MANIFEST = MANIFEST_TEMPLATE.replace(
+    'settings_schema = ""',
+    'settings_schema = ""\nconsumes = ["gateway.search"]',
+)
+
+
+def test_capability_mismatch_fails_strict_sandbox_materialization(tmp_path):
+    path, parent_run, tip, n_parent = _parent_store(tmp_path)
+    root, bundle = _candidate_dir(
+        tmp_path,
+        init=CAPABILITY_PACK_INIT,
+        manifest_template=CAPABILITY_MISMATCH_MANIFEST,
+    )
+
+    report = run_forked_trial(
+        path,
+        parent_run_id=parent_run,
+        at_event=tip,
+        pack_source=PackSource(root_dir=str(root), expected_bundle_hash=bundle),
+        scenario="scenario.py",
+    )
+
+    assert report.outcome == "materialization_failed"
+    assert "meeting.export_summary risk_class mismatch" in report.detail
+    assert report.events_appended == 0
+    _parent_untouched(path, parent_run, n_parent)
+
+
+def test_consumes_only_manifest_difference_passes_strict_sandbox(tmp_path):
+    path, parent_run, tip, n_parent = _parent_store(tmp_path)
+    root, bundle = _candidate_dir(
+        tmp_path,
+        manifest_template=CONSUMES_ONLY_MANIFEST,
+    )
+
+    report = run_forked_trial(
+        path,
+        parent_run_id=parent_run,
+        at_event=tip,
+        pack_source=PackSource(root_dir=str(root), expected_bundle_hash=bundle),
+        scenario="scenario.py",
+    )
+
+    assert report.outcome == "completed", report.detail
+    fork = Runtime.load(path, run_id=report.fork_run_id, behaviors=[])
+    assert [obj.type for obj in fork.graph.all_objects() if obj.type == "greeting"]
     _parent_untouched(path, parent_run, n_parent)
 
 

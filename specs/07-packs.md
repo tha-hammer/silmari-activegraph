@@ -80,7 +80,10 @@ graph TD
 
 Value objects and public API (`activegraph/packs/__init__.py`):
 
-- `Pack` — frozen dataclass; equality/hash by `(name, version)` only — `activegraph/packs/__init__.py:552-694`
+- `Pack` — frozen dataclass; equality/hash by `(name, version)` only;
+  `capabilities` is verified/audited declaration data, while gateway
+  registration and credential resolution remain host-owned —
+  `activegraph/packs/__init__.py:558-705`
 - `ObjectType(name, schema, description)` — `schema` is a Pydantic `BaseModel` subclass — `activegraph/packs/__init__.py:387-407`
 - `RelationType(name, source_types, target_types, description)` — `activegraph/packs/__init__.py:410-429`
 - `PackPolicy(name, requires_approval, auto_apply)` — `auto_apply` is reserved
@@ -733,12 +736,15 @@ sequenceDiagram
     checked. The whole tier is also swallowed by a bare `except Exception` (`:412-420`), so a discovery
     bug is invisible at default log levels.
 
-11. **`consumes` is declared in the manifest but verified nowhere in-tree.** It is parsed and stored
-    (`activegraph/packs/manifest.py:341-347`, `:377`) and deliberately excluded from `verify_surface`
-    as "imperative gateway wiring the loader cannot observe" (`activegraph/packs/manifest.py:397-399`),
-    left to static CI / evolution gates that live outside this repo. The same holds for *capability
-    registration*: `Pack.capabilities` is purely declarative and the runtime never registers a gateway
-    from it (`activegraph/packs/__init__.py:573-581`).
+11. **Resolved boundary: capabilities are verified/audited; wiring and `consumes` are host-owned.**
+    `Pack.capabilities` validates declaration entry type, the closed risk/action values, and pair
+    uniqueness. `verify_surface` compares capability identity, `risk_class`, and `action_class` in
+    both directions. Normal `Runtime.load_pack` warns but remains loaded/dispatchable on a mismatch;
+    sandbox materialization applies the same comparison strictly. A successful load records the
+    declarations in `pack.loaded`, but no gateway or credential is registered. Manifest `consumes`
+    parses to a tuple and remains excluded from both connector comparisons, so a consumes-only
+    difference neither warns nor fails materialization (`tests/test_pack_manifest.py`,
+    `tests/test_manifest_warning_tier.py`, `tests/test_sandbox_trial.py`).
 
 12. **Import-graph correction.** `packs -> llm` is not a machinery dependency; it exists only via the
     bundled example pack's recorded fixtures (`activegraph/packs/diligence/fixtures/__init__.py:19`,

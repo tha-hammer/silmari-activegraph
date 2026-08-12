@@ -565,6 +565,12 @@ class Pack:
     full structural equality would not work and isn't what users
     care about. The identity that matters is "is this the same pack
     name and version" — that's what idempotent loading hinges on.
+
+    ``capabilities`` is the declarative, auditable half of a host-owned
+    gateway integration. ``Pack`` validates entry type, closed risk/action
+    classes, and pair uniqueness; manifest verification checks the declaration
+    two ways. Loading records it but never registers a gateway or resolves a
+    credential.
     """
 
     name: str
@@ -581,11 +587,14 @@ class Pack:
     # (manifest spec Q8). Entries are CapabilityDecl instances from
     # activegraph.packs.manifest. The runtime never registers these —
     # registration stays imperative host wiring — but the declaration
-    # is loader-introspectable: verify_surface two-way checks it
-    # against the manifest, and load_pack records it in the
-    # pack.loaded payload so decision surfaces read a pack's declared
-    # outbound reach from the graph. The gateway-side check ("did the
-    # registering pack declare this?") is downstream's half.
+    # is loader-introspectable: verify_surface two-way checks identity,
+    # risk_class, and action_class against the manifest, and load_pack
+    # records it in the pack.loaded payload so decision surfaces read a
+    # pack's declared outbound reach from the graph. The gateway-side
+    # registration/credential check is downstream's half. Construction
+    # deliberately does not require non-empty provider/capability/
+    # credential_ref strings; it validates entry type, closed classes,
+    # and (provider, capability) uniqueness only.
     capabilities: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:

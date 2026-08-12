@@ -70,6 +70,42 @@ def test_provider_docs_keep_raw_access_outside_the_supported_generation_path() -
         assert "embed" in normalized
 
 
+def test_capability_docs_separate_verification_from_host_owned_wiring() -> None:
+    for path in (PACK_AUTHORING, PACK_SPEC):
+        normalized = " ".join(path.read_text().split())
+        assert "capabilities" in normalized
+        assert "both directions" in normalized
+        assert "risk_class" in normalized
+        assert "action_class" in normalized
+        assert "warning" in normalized
+        assert "sandbox" in normalized
+        assert "consumes" in normalized
+        assert "host-owned" in normalized
+        assert "pack.loaded" in normalized
+
+        assert "capabilities are excluded from" not in normalized.lower()
+        assert "consumes registers" not in normalized.lower()
+
+
+def test_contract_appends_capability_verification_overlay() -> None:
+    contract = CONTRACT.read_text()
+    assert "`capabilities`/`consumes` deliberately excluded" in contract
+
+    heading = (
+        "## v1.11 #3. Capability declarations are verified; wiring remains "
+        "host-owned"
+    )
+    assert contract.count(heading) == 1
+    overlay = " ".join(contract.split(heading, 1)[1].split())
+    assert "supersedes only v1.4 #1" in overlay
+    assert "clarifies v1.9 #1" in overlay
+    assert "`verify_surface` checks capabilities in both directions" in overlay
+    assert "normal `Runtime.load_pack` retains v1.6 #1's warning tier" in overlay
+    assert "Fork-trial sandbox materialization" in overlay
+    assert "Manifest `consumes` parses and normalizes to a tuple" in overlay
+    assert "does not create a gateway registry" in overlay
+
+
 def test_contract_preserves_history_and_appends_explicit_approval_overlay() -> None:
     contract = CONTRACT.read_text()
 
