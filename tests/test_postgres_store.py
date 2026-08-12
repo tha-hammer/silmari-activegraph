@@ -3,7 +3,7 @@
 Gated by ACTIVEGRAPH_TEST_POSTGRES_URL. If not set, the tests skip.
 CI / contributors with Docker can use testcontainers (see CONTRIBUTING.md);
 local dev without Docker just skips these and runs the other 247+ tests
-unaffected. CONTRACT v0.8 #20.
+unaffected. CONTRACT v0.8 #18.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.mark.postgres
 class TestPostgresConformance(EventStoreConformance):
     __test__ = True
+    backend_name = "postgres"
 
     def setup_method(self, method):
         # Each test uses a unique run_id so conformance tests are
@@ -39,6 +40,12 @@ class TestPostgresConformance(EventStoreConformance):
         scoped = f"{run_id}_{uuid.uuid4().hex[:8]}"
         self._created_run_ids.append(scoped)
         return PostgresEventStore(PG_URL, run_id=scoped)
+
+    def make_second_store(self, run_id):
+        return self.make_store(run_id)
+
+    def close_store(self, store):
+        store.close()
 
     def cleanup(self):
         import psycopg

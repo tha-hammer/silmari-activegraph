@@ -1,4 +1,4 @@
-"""EventStore conformance suite. CONTRACT v0.8 #18.
+"""EventStore conformance suite. CONTRACT v0.8 #17.
 
 A reusable pytest-compatible base class that exercises any EventStore
 implementation against the protocol. Concrete subclasses override
@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from activegraph.core.event import Event
+from activegraph.store.errors import DuplicateEventError
 
 
 class EventStoreConformance(ABC):
@@ -28,6 +29,8 @@ class EventStoreConformance(ABC):
     Subclasses MUST implement:
 
         def make_store(self, run_id: str) -> EventStore: ...
+        def make_second_store(self, run_id: str) -> EventStore: ...
+        def close_store(self, store: EventStore) -> None: ...
         def cleanup(self) -> None: ...
 
     Tests are method names starting with ``test_``. They are picked up
@@ -41,9 +44,19 @@ class EventStoreConformance(ABC):
 
     __test__ = False  # do not collect the base; subclasses override.
 
+    backend_name: str
+
     @abstractmethod
     def make_store(self, run_id: str) -> Any:
         """Return a fresh EventStore for ``run_id``. Called per test."""
+
+    @abstractmethod
+    def make_second_store(self, run_id: str) -> Any:
+        """Return another handle scoped to a distinct run."""
+
+    @abstractmethod
+    def close_store(self, store: Any) -> None:
+        """Close one handle opened by the conformance suite."""
 
     def cleanup(self) -> None:
         """Tear down any resources after a test. Default: no-op."""
@@ -142,12 +155,52 @@ class EventStoreConformance(ABC):
             self.cleanup()
 
     def test_duplicate_id_in_same_run_is_rejected(self) -> None:
+        store = None
         try:
             store = self.make_store("run_conformance_8")
-            store.append(self._ev("evt_dup"))
-            with pytest.raises(Exception):
-                store.append(self._ev("evt_dup"))
+            event = self._ev("evt_dup")
+            store.append(event)
+            before = store.get_event(event.id)
+            before_count = store.count()
+
+            with pytest.raises(DuplicateEventError) as excinfo:
+                store.append(self._ev(event.id, payload={"replacement": True}))
+
+            assert store.get_event(event.id) == before
+            assert store.count() == before_count
+            assert excinfo.value.context == {
+                "event_id": event.id,
+                "run_id": store.run_id,
+                "backend": self.backend_name,
+            }
+            assert event.id in str(excinfo.value)
+            assert store.run_id in str(excinfo.value)
         finally:
+            if store is not None:
+                self.close_store(store)
+            self.cleanup()
+
+    def test_same_event_id_is_allowed_in_distinct_runs(self) -> None:
+        primary = None
+        secondary = None
+        try:
+            primary = self.make_store("run_conformance_distinct_primary")
+            secondary = self.make_second_store("run_conformance_distinct_secondary")
+            assert secondary.run_id != primary.run_id
+
+            event = self._ev("evt_shared")
+            primary.append(event)
+            secondary.append(event)
+
+            assert primary.get_event(event.id) is not None
+            assert secondary.get_event(event.id) is not None
+            assert primary.count() == 1
+            assert secondary.count() == 1
+        finally:
+            if secondary is not None:
+                self.close_store(secondary)
+            if primary is not None:
+                self.close_store(primary)
             self.cleanup()
 
     def test_close_is_idempotent(self) -> None:

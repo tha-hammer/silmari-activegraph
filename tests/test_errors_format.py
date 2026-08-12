@@ -588,19 +588,22 @@ def test_event_not_found_is_a_key_error() -> None:
         list(store.iter_events(after="evt_does_not_exist"))
 
 
-def test_duplicate_event_snapshot() -> None:
-    """Hand-constructed events colliding on id. Voice frames this as
-    a programmer error (the id generator is monotonic in normal use)."""
-    from activegraph import Event
-    from activegraph.store import InMemoryEventStore
-    store = InMemoryEventStore(run_id="run_test")
-    e1 = Event(id="evt_001", type="goal.created", payload={}, timestamp="2026-05-17T00:00:00Z")
-    e2 = Event(id="evt_001", type="goal.created", payload={}, timestamp="2026-05-17T00:00:01Z")
-    store.append(e1)
-    with pytest.raises(DuplicateEventError) as excinfo:
-        store.append(e2)
-    _assert_format_compliant(excinfo.value)
-    _check_snapshot("duplicate_event", excinfo.value)
+@pytest.mark.parametrize("backend", ["memory", "sqlite", "postgres"])
+def test_duplicate_event_factory_is_backend_neutral(backend: str) -> None:
+    """Every store uses identical operator prose and backend-rich context."""
+    from activegraph.store.errors import _duplicate_event_error
+
+    err = _duplicate_event_error(
+        event_id="evt_001", run_id="run_test", backend=backend
+    )
+    assert err.context == {
+        "event_id": "evt_001",
+        "run_id": "run_test",
+        "backend": backend,
+    }
+    _assert_format_compliant(err)
+    if backend == "memory":
+        _check_snapshot("duplicate_event", err)
 
 
 def test_duplicate_event_is_a_value_error() -> None:

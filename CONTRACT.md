@@ -8563,3 +8563,17 @@ Tested against `claude-agent-sdk==0.2.135` and `claude` CLI `2.1.227`
 exactly — `_load_sdk_bindings()` checks the installed SDK version at
 call time and refuses (terminal `llm.request_error`) to run against
 any other.
+
+---
+
+## 2026-08-12 Set 4 amendment #1 — backend-neutral duplicate appends
+
+The v0.5 #2/#3 EventStore contract, v0.8 #17/#18 conformance contract,
+and v1.0 PR-C `DuplicateEventError` contract are clarified as follows.
+Every shipped EventStore translates only a duplicate `(event.id, run_id)`
+append to the existing public `DuplicateEventError`. Its structured context
+is exactly `event_id`, the store's actual `run_id`, and the stable backend
+name (`memory`, `sqlite`, or `postgres`). The rejected append leaves the
+existing backend-native event and event count unchanged. Reusing the same
+event id in a distinct run remains legal. Encoding failures and all other
+driver/database failures retain their existing exception types.

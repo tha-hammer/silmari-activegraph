@@ -48,6 +48,7 @@ from typing import Any, Iterator, Optional
 
 from activegraph.core.event import Event
 from activegraph.store.base import RunRecord
+from activegraph.store.errors import _duplicate_event_error
 from activegraph.store.serde import decode_event, encode_event
 
 
@@ -232,13 +233,18 @@ class SQLiteEventStore:
 
     def append(self, event: Event) -> None:
         row = encode_event(event)
-        self._conn.execute(
+        cursor = self._conn.execute(
             """
             INSERT INTO events (id, type, actor, payload, frame_id, caused_by, timestamp, run_id)
             VALUES (:id, :type, :actor, :payload, :frame_id, :caused_by, :timestamp, :run_id)
+            ON CONFLICT(id, run_id) DO NOTHING
             """,
             {**row, "run_id": self.run_id},
         )
+        if cursor.rowcount == 0:
+            raise _duplicate_event_error(
+                event_id=event.id, run_id=self.run_id, backend="sqlite"
+            )
 
     def iter_events(
         self,

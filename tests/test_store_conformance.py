@@ -18,13 +18,21 @@ from activegraph.store.sqlite import SQLiteEventStore
 
 class TestInMemoryConformance(EventStoreConformance):
     __test__ = True
+    backend_name = "memory"
 
     def make_store(self, run_id):
         return InMemoryEventStore(run_id=run_id)
 
+    def make_second_store(self, run_id):
+        return self.make_store(run_id)
+
+    def close_store(self, store):
+        store.close()
+
 
 class TestSQLiteConformance(EventStoreConformance):
     __test__ = True
+    backend_name = "sqlite"
 
     def setup_method(self, method):
         fd, self._path = tempfile.mkstemp(suffix=".db")
@@ -33,6 +41,12 @@ class TestSQLiteConformance(EventStoreConformance):
 
     def make_store(self, run_id):
         return SQLiteEventStore(self._path, run_id=run_id)
+
+    def make_second_store(self, run_id):
+        return self.make_store(run_id)
+
+    def close_store(self, store):
+        store.close()
 
     def cleanup(self):
         try:
