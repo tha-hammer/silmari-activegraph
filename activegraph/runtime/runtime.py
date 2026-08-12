@@ -535,6 +535,11 @@ class Runtime:
                 else get_registry()
             )
             _resolve_and_validate_llm_models(source, self.llm_provider)
+            # v1.11 #1 (Behavior 1): capability-binding validation runs
+            # before track_runtime() below, so a rejected construction
+            # never enters the live set (mirrors the cross-provider
+            # check's existing "fail before joining the WeakSet" shape).
+            _resolve_and_validate_llm_capabilities(source, self.llm_provider, self.budget)
         from activegraph.runtime._live import track_runtime
 
         try:
@@ -970,6 +975,9 @@ class Runtime:
             # behaviors that didn't pin one, and validate explicit model
             # names against cross-provider mismatches.
             _resolve_and_validate_llm_models(source, self.llm_provider)
+            # v1.11 #1 (Behavior 1): the defensive double-check mirroring
+            # the constructor's eager capability-binding pass above.
+            _resolve_and_validate_llm_capabilities(source, self.llm_provider, self.budget)
             # CONTRACT v1.3 #1 #1: resolve the structured-output mode per
             # behavior - a pure function of (flag, capability, model,
             # schema pre-flight); no network, no clock.
@@ -3954,6 +3962,33 @@ def _resolve_and_validate_llm_models(source: list[Any], provider: LLMProvider) -
             continue
         # v1.0.2 #1 (b): cross-provider mismatch check.
         _validate_one(b, provider)
+
+
+def _resolve_and_validate_llm_capabilities(
+    source: list[Any], provider: LLMProvider, budget: Budget
+) -> None:
+    """Capability-binding validation (CONTRACT v1.11 #1, Behavior 1):
+    reject a provider that requires generation-control acknowledgement
+    and didn't get it, a deterministic behavior bound to a provider
+    that can't honor determinism, or a hard `max_cost_usd` budget bound
+    to a provider that lacks an enforceable output bound or an official
+    input token count — before any I/O.
+
+    Delegates to :func:`activegraph.runtime._live._validate_capability`
+    so the same check fires from all three binding moments (Runtime
+    construction and `_ensure_registry` here, register()/decoration in
+    `_live.validate_behavior_against_live_runtimes`). Runs even for
+    providers with the full default capability descriptor — the check
+    is a no-op for them (every default is permissive), so this adds no
+    behavior change for `AnthropicProvider`/`OpenAIProvider` or any
+    other provider that predates this capability model.
+    """
+    from activegraph.runtime._live import _validate_capability
+
+    for b in source:
+        if not isinstance(b, LLMBehavior):
+            continue
+        _validate_capability(b, provider, budget)
 
 
 def _budget_reason(name: Optional[str]) -> str:

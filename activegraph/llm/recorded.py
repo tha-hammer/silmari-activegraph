@@ -260,6 +260,25 @@ class RecordingLLMProvider(LLMProvider):
         self._dir = fixtures_dir
         os.makedirs(self._dir, exist_ok=True)
 
+    # v1.11 #1: delegate the inner provider's declared capabilities and
+    # its acknowledgement flag, so Runtime's capability-binding
+    # validation sees the SAME constraints whether a behavior is bound
+    # directly to a capability-limited provider (e.g. ClaudeCodeProvider)
+    # or to one wrapped in a recording shim — wrapping must not silently
+    # widen what the runtime will accept. Absent on the inner provider
+    # (every provider that pre-dates this model) resolves through
+    # get_llm_provider_capabilities the same way any other missing
+    # attribute would.
+    @property
+    def llm_capabilities(self) -> Any:
+        from activegraph.llm.provider import get_llm_provider_capabilities
+
+        return get_llm_provider_capabilities(self._inner)
+
+    @property
+    def allow_unenforced_generation_controls(self) -> bool:
+        return bool(getattr(self._inner, "allow_unenforced_generation_controls", False))
+
     # v1.0.2 #1: delegate default_model + recognizes_model to the inner
     # provider so wrapping doesn't change the resolution surface. Falls
     # back to the historical default if the inner provider pre-dates

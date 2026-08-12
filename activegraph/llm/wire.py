@@ -110,6 +110,25 @@ def _definition_name(tool: dict[str, Any]) -> str:
 # ---- exception classification (CONTRACT v1.3 #3) ---------------------------
 
 
+def classify_provider_status(status_code: Optional[int]) -> str:
+    """Map a bare HTTP-style status code to a v0.6 #11 / v1.3 #3 reason
+    code. Extracted from :func:`classify_provider_exception`'s
+    status-code branch (CONTRACT v1.11 #1) so a result-shaped failure
+    (no exception object — e.g. `ClaudeCodeProvider`'s
+    `ResultMessage.is_error=True` / `api_error_status`) can reuse the
+    same ladder as an exception-shaped one, instead of a second
+    parallel implementation or a synthetic exception built purely to
+    satisfy this function's original exception-only signature.
+    """
+    if status_code == 429:
+        return "llm.rate_limited"
+    if status_code in (401, 403):
+        return "llm.auth_error"
+    if status_code is not None and 400 <= status_code < 500:
+        return "llm.request_error"
+    return "llm.network_error"
+
+
 def classify_provider_exception(e: Exception) -> str:
     """Map a provider-SDK exception to a v0.6 #11 / v1.3 #3 reason code.
 
@@ -134,7 +153,7 @@ def classify_provider_exception(e: Exception) -> str:
     if isinstance(status, int) and 400 <= status < 500:
         # 400/404/422/...: the request itself is invalid for this
         # provider or model. Retrying identical bytes cannot succeed.
-        return "llm.request_error"
+        return classify_provider_status(status)
     if "badrequest" in name or "unprocessableentity" in name or "notfounderror" in name:
         return "llm.request_error"
     return "llm.network_error"

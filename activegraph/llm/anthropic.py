@@ -27,19 +27,15 @@ import time
 from decimal import Decimal
 from typing import Any, Mapping, Optional
 
+from activegraph.llm._claude_shared import (
+    DEFAULT_MODEL as _DEFAULT_MODEL,
+    DEFAULT_PRICING as _DEFAULT_PRICING,
+    NATIVE_STRUCTURED_OUTPUT_PREFIXES as _NATIVE_STRUCTURED_OUTPUT_PREFIXES,
+)
 from activegraph.llm.errors import LLMBehaviorError
 from activegraph.llm.parsing import parse_structured_response as _parse_structured
 from activegraph.llm.provider import LLMProvider
 from activegraph.llm.types import LLMMessage, LLMResponse, ToolCall
-
-
-# Per-million-token pricing in USD. Tracks the rates of the Claude 4.x
-# family available in May 2026. Provide your own `pricing=` to override.
-_DEFAULT_PRICING: dict[str, dict[str, str]] = {
-    "claude-opus-4": {"input": "15", "output": "75"},
-    "claude-sonnet-4": {"input": "3", "output": "15"},
-    "claude-haiku-4-5": {"input": "1", "output": "5"},
-}
 
 
 def _pricing_for(model: str, pricing: Mapping[str, Mapping[str, str]]) -> tuple[Decimal, Decimal]:
@@ -59,28 +55,10 @@ def _pricing_for(model: str, pricing: Mapping[str, Mapping[str, str]]) -> tuple[
     return Decimal(str(entry["input"])), Decimal(str(entry["output"]))
 
 
-# Model families with GA structured-output support on the Claude API
-# (CONTRACT v1.3 #1 #3). Table-driven like the pricing table; override
-# via the `native_structured_output_models=` constructor kwarg to track
-# the docs over time. Claude 4.0-era families are deliberately absent.
-_NATIVE_STRUCTURED_OUTPUT_PREFIXES: tuple[str, ...] = (
-    "claude-fable-5",
-    "claude-mythos-5",
-    "claude-sonnet-5",
-    "claude-sonnet-4-5",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5",
-    "claude-opus-4-5",
-    "claude-opus-4-6",
-    "claude-opus-4-7",
-    "claude-opus-4-8",
-)
-
-
 class AnthropicProvider(LLMProvider):
     # v1.0.2 #1: provider-aware default model. @llm_behavior(model=None)
     # resolves to this string at registration time.
-    default_model: str = "claude-sonnet-4-5"
+    default_model: str = _DEFAULT_MODEL
 
     def __init__(
         self,
@@ -92,13 +70,21 @@ class AnthropicProvider(LLMProvider):
     ) -> None:
         self._api_key_env = api_key_env
         self._client_override = client
-        self._pricing: dict[str, dict[str, str]] = dict(pricing or _DEFAULT_PRICING)
+        # v1.11 #1 (CC4): the default table is the shared
+        # `_claude_shared.DEFAULT_PRICING` object itself, not a copy — so
+        # AnthropicProvider and ClaudeCodeProvider read one source of
+        # truth rather than two independently-maintained tables that
+        # happen to agree today.
+        self._pricing: Mapping[str, Mapping[str, str]] = pricing or _DEFAULT_PRICING
         self._native_prefixes: tuple[str, ...] = (
             native_structured_output_models
             if native_structured_output_models is not None
             else _NATIVE_STRUCTURED_OUTPUT_PREFIXES
         )
         self._client_cached: Any = None
+
+    def _pricing_table(self) -> Mapping[str, Mapping[str, str]]:
+        return self._pricing
 
     # ---- client lazy-load ----
 
