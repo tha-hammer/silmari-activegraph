@@ -1359,6 +1359,8 @@ class Runtime:
             if matched is None:
                 continue
             relations, p_matches = matched
+            if p_matches:
+                self._emit_pattern_matched(behavior, ev, p_matches)
             # Dispatch as normal (without re-scheduling — we are AT the
             # fire moment).
             if isinstance(behavior, RelationBehavior):

@@ -14,12 +14,14 @@ from __future__ import annotations
 import pytest
 
 from activegraph import (
+    Event,
     Graph,
     Runtime,
     UnsupportedPatternError,
     behavior,
     clear_registry,
 )
+from activegraph.runtime.registry import Registry
 
 
 def test_pattern_and_event_type_both_required():
@@ -130,3 +132,95 @@ def test_pattern_matched_event_emitted_when_pattern_fires():
     assert len(pm) == 1
     assert pm[0].payload["behavior"] == "critic"
     assert pm[0].payload["matches_count"] == 1
+
+
+def test_pattern_observer_counts_empty_and_raised_evaluations_without_masking():
+    observed: list[float] = []
+
+    @behavior(name="observed", on=["pattern.observe"])
+    def observed_behavior(event, graph, ctx):
+        pass
+
+    class EmptyMatcher:
+        def matches(self, event, graph):
+            return []
+
+    observed_behavior.pattern_matcher = EmptyMatcher()
+    registry = Registry([observed_behavior], pattern_observer=observed.append)
+    graph = Graph()
+    event = Event(
+        id=graph.ids.event(),
+        type="pattern.observe",
+        payload={},
+        actor="test",
+        timestamp=graph.clock.now(),
+    )
+    assert registry.match(event, graph) == []
+    assert len(observed) == 1
+    assert observed[0] >= 0
+
+    class RaisingMatcher:
+        def matches(self, event, graph):
+            raise LookupError("matcher wins")
+
+    observed_behavior.pattern_matcher = RaisingMatcher()
+    with pytest.raises(LookupError, match="matcher wins"):
+        registry.match(event, graph)
+    assert len(observed) == 2
+
+
+def test_pattern_observer_is_not_called_for_gates_or_missing_matcher():
+    observed: list[float] = []
+
+    @behavior(name="gated", on=["expected"])
+    def gated(event, graph, ctx):
+        pass
+
+    class Matcher:
+        def matches(self, event, graph):
+            return []
+
+    gated.pattern_matcher = Matcher()
+    @behavior(name="plain", on=["actual"])
+    def plain(event, graph, ctx):
+        pass
+
+    registry = Registry([gated, plain], pattern_observer=observed.append)
+    graph = Graph()
+    event = Event(
+        id=graph.ids.event(),
+        type="actual",
+        payload={},
+        actor="test",
+        timestamp=graph.clock.now(),
+    )
+    registry.match(event, graph)
+    assert observed == []
+
+
+def test_pattern_observer_failure_never_changes_matcher_exception_precedence():
+    @behavior(name="both_raise", on=["pattern.raise"])
+    def both_raise(event, graph, ctx):
+        pass
+
+    class RaisingMatcher:
+        def matches(self, event, graph):
+            raise LookupError("matcher failure")
+
+    both_raise.pattern_matcher = RaisingMatcher()
+    registry = Registry(
+        [both_raise],
+        pattern_observer=lambda elapsed: (_ for _ in ()).throw(
+            RuntimeError("observer failure")
+        ),
+    )
+    graph = Graph()
+    event = Event(
+        id=graph.ids.event(),
+        type="pattern.raise",
+        payload={},
+        actor="test",
+        timestamp=graph.clock.now(),
+    )
+    with pytest.raises(LookupError, match="matcher failure"):
+        registry.match(event, graph)

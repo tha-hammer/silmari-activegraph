@@ -382,39 +382,133 @@ def test_activate_after_fires_after_n_events():
     assert scheds[0].payload["activate_after"] == 2
 
 
-def test_activate_after_skips_when_where_no_longer_holds():
-    """Per CONTRACT v0.7 #13, the where= clause is re-evaluated at fire time."""
-
-    fired: list = []
-
-    @behavior(name="seed", on=["goal.created"])
-    def seed(event, graph, ctx):
-        graph.add_object("task", {"title": "t", "status": "open"})
+def test_activate_after_where_filters_the_original_event_payload():
+    fired: list[str] = []
 
     @behavior(
-        name="closer",
-        on=["object.created"],
-        where={"object.type": "task"},
-    )
-    def closer(event, graph, ctx):
-        graph.patch_object(event.payload["object"]["id"], {"status": "closed"})
-
-    @behavior(
-        name="nag",
-        on=["object.created"],
-        where={"object.type": "task"},
+        name="ready",
+        on=["where.trigger"],
+        where={"status": "ready"},
         activate_after=1,
     )
-    def nag(event, graph, ctx):
-        # Re-check: only fire if status is still open.
-        obj = graph.get_object(event.payload["object"]["id"])
-        if obj and obj.data.get("status") == "open":
-            fired.append(obj.id)
+    def ready(event, graph, ctx):
+        fired.append(event.id)
 
-    g = Graph()
-    Runtime(g).run_goal("g")
-    # `closer` ran between schedule and fire time; nag's where re-check
-    # sees status='closed' and skips. (The runtime's where= re-check
-    # uses the behavior's where=, which still says open — closer
-    # patched it to closed, so where no longer holds.)
+    @behavior(
+        name="blocked",
+        on=["where.trigger"],
+        where={"status": "blocked"},
+        activate_after=1,
+    )
+    def blocked(event, graph, ctx):
+        fired.append("blocked")
+
+    graph = Graph()
+    marker = graph.add_object("marker", {"status": "ready"})
+    runtime = Runtime(graph, behaviors=[ready, blocked])
+    trigger = _emit_event(
+        graph,
+        "where.trigger",
+        {"status": "ready", "marker_id": marker.id},
+    )
+    paused = runtime.run_quantum(max_queue_events=1, max_seconds=1.0)
+    assert paused.delayed_depth == 1
+
+    graph.patch_object(marker.id, {"status": "closed"})
+    runtime.run_until_idle()
+
+    assert fired == [trigger.id]
+    scheduled = [
+        e.payload["behavior"]
+        for e in graph.events
+        if e.type == "behavior.scheduled" and e.payload["event_id"] == trigger.id
+    ]
+    assert scheduled == ["ready"]
+
+
+def test_scheduled_relation_pattern_emits_one_marker_and_shares_all_bindings():
+    contexts: list[tuple[str, list[dict[str, str]]]] = []
+
+    @relation_behavior(
+        name="patterned_relation",
+        relation_type="depends_on",
+        on=["subscription.trigger"],
+        pattern="(s:task)-[r:depends_on]->(t:task)",
+        activate_after=1,
+    )
+    def patterned_relation(relation, event, graph, ctx):
+        contexts.append(
+            (relation.id, [dict(match.bindings) for match in ctx.matches])
+        )
+
+    graph = Graph()
+    source = graph.add_object("task", {})
+    targets = [graph.add_object("task", {}) for _ in range(2)]
+    relations = [
+        graph.add_relation(source.id, target.id, "depends_on")
+        for target in targets
+    ]
+    runtime = Runtime(graph, behaviors=[patterned_relation])
+    trigger = _emit_event(graph, "subscription.trigger", {"task_id": source.id})
+    _emit_event(graph, "subscription.advance", {})
+    runtime.run_until_idle()
+
+    assert {relation_id for relation_id, _ in contexts} == {
+        relation.id for relation in relations
+    }
+    assert len(contexts) == 2
+    expected_bindings = contexts[0][1]
+    assert len(expected_bindings) == 2
+    assert all(bindings == expected_bindings for _, bindings in contexts)
+
+    markers = [
+        event
+        for event in graph.events
+        if event.type == "pattern.matched"
+        and event.payload["behavior"] == "patterned_relation"
+        and event.payload["event_id"] == trigger.id
+    ]
+    assert len(markers) == 1
+    assert markers[0].payload["matches_count"] == 2
+    starts = [
+        event
+        for event in graph.events
+        if event.type == "relation_behavior.started"
+        and event.payload["behavior"] == "patterned_relation"
+        and event.payload["event_id"] == trigger.id
+    ]
+    assert len(starts) == 2
+    assert graph.events.index(markers[0]) < min(graph.events.index(e) for e in starts)
+
+
+def test_scheduled_relation_pattern_lapse_skips_without_marker():
+    fired: list[str] = []
+
+    @relation_behavior(
+        name="lapsed_pattern",
+        relation_type="depends_on",
+        on=["subscription.lapse"],
+        pattern="(s:task)-[r:depends_on]->(t:task)",
+        activate_after=1,
+    )
+    def lapsed_pattern(relation, event, graph, ctx):
+        fired.append(relation.id)
+
+    graph = Graph()
+    source = graph.add_object("task", {})
+    target = graph.add_object("task", {})
+    relation = graph.add_relation(source.id, target.id, "depends_on")
+    runtime = Runtime(graph, behaviors=[lapsed_pattern])
+    trigger = _emit_event(graph, "subscription.lapse", {"task_id": source.id})
+    paused = runtime.run_quantum(max_queue_events=1, max_seconds=1.0)
+    assert paused.delayed_depth == 1
+    graph.remove_relation(relation.id)
+    runtime.run_until_idle()
+
     assert fired == []
+    assert not [
+        event
+        for event in graph.events
+        if event.type == "pattern.matched"
+        and event.payload["event_id"] == trigger.id
+    ]
