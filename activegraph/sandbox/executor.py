@@ -48,7 +48,13 @@ class TrialSpecification:
     limits: TrialLimits = TrialLimits()
     label: str = "trial"
     extra_packs: tuple[PackSource, ...] = ()
-    schema_version: int = 1
+    schema_version: int = 2
+
+    def __post_init__(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version != 2:
+            raise ValueError(
+                "TrialSpecification schema_version must be the integer 2"
+            )
 
     def to_json(self) -> str:
         """Serialize this specification as canonical versioned JSON."""
@@ -79,7 +85,7 @@ class TrialSpecification:
         if not isinstance(payload, dict):
             raise ValueError("trial specification must be a JSON object")
         version = payload.get("schema_version")
-        if version != 1:
+        if type(version) is not int or version not in (1, 2):
             raise ValueError(
                 f"unsupported trial specification schema_version {version!r}"
             )
@@ -108,7 +114,7 @@ class TrialSpecification:
             limits=limits,
             label=label,
             extra_packs=extra_packs,
-            schema_version=1,
+            schema_version=2,
         )
 
 
@@ -321,23 +327,26 @@ def _parse_pack_source(value: Any, field_name: str) -> PackSource:
     if not isinstance(value, dict):
         raise ValueError(f"trial specification {field_name} must be an object")
     root_dir = value.get("root_dir")
-    expected_hash = value.get("expected_bundle_hash", "")
+    if "expected_bundle_hash" not in value:
+        raise ValueError(
+            f"trial specification {field_name}.expected_bundle_hash is required"
+        )
+    expected_hash = value["expected_bundle_hash"]
     manifest_required = value.get("manifest_required", True)
     if not isinstance(root_dir, str) or not root_dir:
         raise ValueError(f"trial specification {field_name}.root_dir is required")
-    if not isinstance(expected_hash, str):
-        raise ValueError(
-            f"trial specification {field_name}.expected_bundle_hash must be a string"
-        )
     if not isinstance(manifest_required, bool):
         raise ValueError(
             f"trial specification {field_name}.manifest_required must be boolean"
         )
-    return PackSource(
-        root_dir=root_dir,
-        expected_bundle_hash=expected_hash,
-        manifest_required=manifest_required,
-    )
+    try:
+        return PackSource(
+            root_dir=root_dir,
+            expected_bundle_hash=expected_hash,
+            manifest_required=manifest_required,
+        )
+    except ValueError as exc:
+        raise ValueError(f"trial specification {field_name}.{exc}") from exc
 
 
 def _limits_payload(limits: TrialLimits) -> dict[str, Any]:

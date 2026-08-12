@@ -137,8 +137,7 @@ def _materialize_pack(job: dict[str, Any]) -> Any:
 
     root = Path(job["pack_root"])
     manifest = None
-    if job.get("expected_bundle_hash"):
-        verify_bundle_hash(job["expected_bundle_hash"], root)
+    verify_bundle_hash(job["expected_bundle_hash"], root)
     if job.get("manifest_required", True):
         manifest = load_manifest(root)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from activegraph.sandbox import (
     TrialSpecification,
 )
 from activegraph.sandbox.conformance import TrialExecutorConformance
+from activegraph.store.sqlite import SQLiteEventStore
 from tests.test_sandbox_trial import _candidate_dir, _parent_store
 
 
@@ -118,6 +120,155 @@ def test_local_executor_declares_honest_non_security_isolation() -> None:
     assert guarantees.security_sandbox is False
 
 
-def test_specification_rejects_unknown_schema_version() -> None:
+_VALID_PIN = "sha256:" + "a" * 64
+
+
+def _wire_payload(schema_version=2):
+    return {
+        "schema_version": schema_version,
+        "store_path": "trial.db",
+        "parent_run_id": "run_parent",
+        "at_event": "evt_001",
+        "pack_source": {
+            "root_dir": "/candidate",
+            "expected_bundle_hash": _VALID_PIN,
+            "manifest_required": True,
+        },
+        "scenario": "",
+        "limits": {},
+        "label": "trial",
+        "extra_packs": [
+            {
+                "root_dir": "/extra",
+                "expected_bundle_hash": _VALID_PIN,
+                "manifest_required": True,
+            }
+        ],
+    }
+
+
+def test_pack_source_requires_bundle_hash() -> None:
+    with pytest.raises(TypeError, match="expected_bundle_hash"):
+        PackSource(root_dir="/candidate")
+
+
+@pytest.mark.parametrize(
+    "pin",
+    [
+        "",
+        "sha256:" + "A" * 64,
+        "sha256:" + "a" * 63,
+        "sha256:" + "a" * 65,
+        "md5:" + "a" * 64,
+        "sha256:" + "g" * 64,
+        None,
+        True,
+    ],
+)
+def test_pack_source_rejects_invalid_bundle_hash(pin) -> None:
+    with pytest.raises(ValueError, match="expected_bundle_hash"):
+        PackSource(root_dir="/candidate", expected_bundle_hash=pin)
+
+
+@pytest.mark.parametrize("schema_version", [1, 2])
+@pytest.mark.parametrize(
+    ("container", "value", "expected_path"),
+    [
+        ("pack_source", None, "pack_source.expected_bundle_hash"),
+        ("pack_source", "", "pack_source.expected_bundle_hash"),
+        ("pack_source", "sha256:BAD", "pack_source.expected_bundle_hash"),
+        ("extra_packs", None, "extra_packs[0].expected_bundle_hash"),
+        ("extra_packs", "", "extra_packs[0].expected_bundle_hash"),
+        ("extra_packs", 7, "extra_packs[0].expected_bundle_hash"),
+    ],
+)
+def test_wire_versions_require_nested_bundle_hash(
+    schema_version, container, value, expected_path
+) -> None:
+    payload = _wire_payload(schema_version)
+    source = (
+        payload["pack_source"]
+        if container == "pack_source"
+        else payload["extra_packs"][0]
+    )
+    if value is None:
+        del source["expected_bundle_hash"]
+    else:
+        source["expected_bundle_hash"] = value
+
+    with pytest.raises(ValueError) as excinfo:
+        TrialSpecification.from_json(json.dumps(payload))
+
+    assert expected_path in str(excinfo.value)
+
+
+def test_pinned_v1_migrates_to_canonical_v2() -> None:
+    specification = TrialSpecification.from_json(json.dumps(_wire_payload(1)))
+    assert specification.schema_version == 2
+    emitted = specification.to_json()
+    assert json.loads(emitted)["schema_version"] == 2
+    assert emitted == json.dumps(
+        json.loads(emitted), sort_keys=True, separators=(",", ":")
+    )
+
+
+def test_pinned_v2_round_trips_canonically() -> None:
+    serialized = json.dumps(
+        _wire_payload(2), sort_keys=True, separators=(",", ":")
+    )
+    specification = TrialSpecification.from_json(serialized)
+    emitted = specification.to_json()
+    assert TrialSpecification.from_json(emitted) == specification
+    assert TrialSpecification.from_json(emitted).to_json() == emitted
+
+
+@pytest.mark.parametrize("schema_version", [1, True, 2.0, "2"])
+def test_direct_specification_rejects_non_v2_schema(schema_version) -> None:
     with pytest.raises(ValueError, match="schema_version"):
-        TrialSpecification.from_json('{"schema_version":2}')
+        TrialSpecification(
+            store_path="trial.db",
+            parent_run_id="run_parent",
+            at_event="evt_001",
+            pack_source=PackSource(
+                root_dir="/candidate", expected_bundle_hash=_VALID_PIN
+            ),
+            schema_version=schema_version,
+        )
+
+
+@pytest.mark.parametrize("schema_version", [True, 2.0, "2", 3])
+def test_specification_rejects_unknown_schema_version(schema_version) -> None:
+    payload = _wire_payload(schema_version)
+    with pytest.raises(ValueError, match="schema_version"):
+        TrialSpecification.from_json(json.dumps(payload))
+
+
+def test_local_executor_rejects_unpinned_v1_before_fork(tmp_path, monkeypatch) -> None:
+    store_path, parent_run_id, at_event, _ = _parent_store(tmp_path)
+    payload = _wire_payload(1)
+    payload["store_path"] = store_path
+    payload["parent_run_id"] = parent_run_id
+    payload["at_event"] = at_event
+    payload["pack_source"]["expected_bundle_hash"] = ""
+    run_ids_before = [
+        run.run_id for run in SQLiteEventStore.list_runs(store_path)
+    ]
+    called = False
+
+    def forbidden_fork(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("fork seam reached")
+
+    monkeypatch.setattr(
+        "activegraph.sandbox._run_forked_trial_local", forbidden_fork
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        LocalSubprocessTrialExecutor().execute(json.dumps(payload))
+
+    assert "pack_source.expected_bundle_hash" in str(excinfo.value)
+    assert called is False
+    assert [run.run_id for run in SQLiteEventStore.list_runs(store_path)] == (
+        run_ids_before
+    )

@@ -8613,3 +8613,25 @@ type/text rule is the verified compatibility basis for FalkorDB Python 1.0.0
 through 1.6.2, redis-py 5.0.1 through 8.1.0, and FalkorDB 4.10.0 through
 4.18.3; it is not a timeless upstream guarantee. The live reopen canary must
 fail if a future supported version changes that response contract.
+
+## 2026-08-12 Set 4 amendment #4 — TrialSpecification schema v2 pins
+
+This amendment versions, rather than rewrites, v1.8 #9. Wire schema v1
+historically preserved an intentional empty-pin posture. Wire schema v2 is now
+the only form emitted by `TrialSpecification.to_json` and the only version
+accepted by direct `TrialSpecification` construction. The version value must
+be the exact integer `2`; booleans, floats, and strings do not qualify.
+
+`PackSource.expected_bundle_hash` is required and must match exactly
+`sha256:[0-9a-f]{64}`. This applies independently to the candidate and every
+ordered extra pack, including when `manifest_required` is false. The child
+always verifies each accepted pin before manifest loading or module import.
+
+`TrialSpecification.from_json` remains a migration reader for exact integer
+schema versions 1 and 2. A v1 payload is accepted only when its candidate and
+every extra already carry well-formed, nonempty pins; it is returned and
+reserialized as schema v2. Missing, empty, or malformed pins in either wire
+version fail with `pack_source.expected_bundle_hash` or the indexed
+`extra_packs[i].expected_bundle_hash` path before executor work, parent fork,
+or child import. This intentionally breaks the insecure subset of v1 rather
+than retain an unpinned escape hatch.

@@ -66,6 +66,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -111,8 +112,16 @@ class PackSource:
     """
 
     root_dir: str
-    expected_bundle_hash: str = ""
+    expected_bundle_hash: str
     manifest_required: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.expected_bundle_hash, str) or re.fullmatch(
+            r"sha256:[0-9a-f]{64}", self.expected_bundle_hash
+        ) is None:
+            raise ValueError(
+                "expected_bundle_hash must match sha256:[0-9a-f]{64}"
+            )
 
 
 @dataclass(frozen=True)

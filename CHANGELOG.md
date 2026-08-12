@@ -44,6 +44,16 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
   `AnthropicProvider` now also sources from (additive, behavior-
   preserving — its own test suite is unmodified).
 
+### Changed
+
+- **Sandbox trial wire schema v2 now requires artifact pins.** New
+  `PackSource` values require an exact lowercase `sha256:` bundle hash, and
+  `TrialSpecification` emits schema v2. Pinned schema-v1 JSON remains accepted
+  as migration input and reserializes as v2; missing, empty, or malformed v1
+  pins now fail before a fork or import. Callers that previously relied on an
+  empty pin must compute the candidate and every extra pack's bundle hash and
+  reserialize the specification.
+
 ## [1.10.0] — 2026-07-12
 
 Runtime legibility and cooperative-host round (CONTRACT v1.10 #1–#3): the behavior-frame
