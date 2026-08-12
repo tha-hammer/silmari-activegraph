@@ -167,6 +167,27 @@ def test_estimate_cost_uses_family_prefix():
     assert opus == Decimal("15")
 
 
+# ---- v1.11 #1: shared Claude-family metadata regression --------------------
+
+
+def test_pricing_default_model_and_native_prefixes_come_from_shared_module():
+    from activegraph.llm._claude_shared import (
+        DEFAULT_MODEL,
+        DEFAULT_PRICING,
+        NATIVE_STRUCTURED_OUTPUT_PREFIXES,
+    )
+
+    p = AnthropicProvider(client=MagicMock())
+    # Additive edit (v1.11 #1, Behavior 11): anthropic.py now imports
+    # these facts from _claude_shared.py instead of defining them
+    # locally, so ClaudeCodeProvider can't silently drift from them.
+    # Identity (is), not just equality — proves it's the same object,
+    # not a second copy that happens to agree today.
+    assert p._pricing_table() is DEFAULT_PRICING
+    assert p.default_model == DEFAULT_MODEL
+    assert p.supports_native_structured_output(NATIVE_STRUCTURED_OUTPUT_PREFIXES[0])
+
+
 def test_count_tokens_delegates_to_sdk():
     client = MagicMock()
     client.messages.count_tokens.return_value = SimpleNamespace(input_tokens=123)

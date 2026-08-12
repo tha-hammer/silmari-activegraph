@@ -13,6 +13,7 @@ from activegraph import Graph, Runtime, behavior, llm_behavior
 from activegraph.llm.wire import (
     build_tool_name_map,
     classify_provider_exception,
+    classify_provider_status,
     restore_tool_name,
     sanitize_tool_name,
 )
@@ -100,6 +101,23 @@ def test_classification_table():
     assert classify_provider_exception(_APIConnectionError("refused")) == "llm.network_error"
     # Unknown shapes keep the pre-v1.3 transient behavior.
     assert classify_provider_exception(Exception("???")) == "llm.network_error"
+
+
+# -------------------------------------------- status-code-only ladder
+
+
+def test_classify_provider_status_matches_the_exception_based_ladder():
+    # v1.11 #1: extracted from classify_provider_exception's status-code
+    # branch so a result-shaped failure (no exception object at all —
+    # e.g. ClaudeCodeProvider's ResultMessage.is_error=True) can reuse
+    # the same ladder as an exception-shaped one.
+    assert classify_provider_status(429) == "llm.rate_limited"
+    assert classify_provider_status(401) == "llm.auth_error"
+    assert classify_provider_status(403) == "llm.auth_error"
+    assert classify_provider_status(404) == "llm.request_error"
+    assert classify_provider_status(422) == "llm.request_error"
+    assert classify_provider_status(500) == "llm.network_error"
+    assert classify_provider_status(None) == "llm.network_error"
 
 
 # ---------------------------------------------------------- retry set

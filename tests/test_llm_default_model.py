@@ -29,7 +29,7 @@ from activegraph import (
     behavior,
     llm_behavior,
 )
-from activegraph.llm import AnthropicProvider, OpenAIProvider
+from activegraph.llm import AnthropicProvider, ClaudeCodeProvider, OpenAIProvider
 
 from tests._llm_helpers import ClaimList, ScriptedProvider
 
@@ -136,6 +136,35 @@ def test_claude_model_on_openai_runtime_raises_at_runtime_construction():
     assert "AnthropicProvider" in msg
     # The error names the way out: swap providers or use the default.
     assert "gpt-4o-mini" in msg or "OpenAIProvider's model families" in msg
+
+
+def test_claude_model_on_openai_runtime_hint_names_both_claude_family_providers():
+    """v1.11 #1 (Behavior 14, review I1): AnthropicProvider and
+    ClaudeCodeProvider both legitimately claim claude-* names.
+    _which_shipped_provider_claims must return (and the hint must
+    name) both — silently picking one, or letting ClaudeCodeProvider's
+    late position in the candidates list make it unreachable, was the
+    original bug this behavior fixes."""
+
+    @llm_behavior(
+        name="extractor",
+        on=["object.created"],
+        description="extract",
+        output_schema=ClaimList,
+        model="claude-sonnet-4-5",
+    )
+    def extractor(event, graph, ctx, llm_output):
+        pass
+
+    provider = OpenAIProvider(client=object())
+    g = Graph()
+
+    with pytest.raises(InvalidRuntimeConfiguration) as excinfo:
+        Runtime(g, llm_provider=provider)
+
+    msg = str(excinfo.value)
+    assert "AnthropicProvider" in msg
+    assert "ClaudeCodeProvider" in msg
 
 
 def test_gpt_model_on_anthropic_runtime_raises_at_runtime_construction():
@@ -246,6 +275,14 @@ def test_anthropic_recognizes_model_claude_family():
     assert p.recognizes_model("claude-haiku-4-5-20251001")
     assert not p.recognizes_model("gpt-4o-mini")
     assert not p.recognizes_model("o3-mini")
+    assert not p.recognizes_model("my-custom-model")
+
+
+def test_claude_code_recognizes_model_claude_family():
+    p = ClaudeCodeProvider()
+    assert p.recognizes_model("claude-sonnet-4-5")
+    assert p.recognizes_model("claude-opus-4-7")
+    assert not p.recognizes_model("gpt-4o-mini")
     assert not p.recognizes_model("my-custom-model")
 
 

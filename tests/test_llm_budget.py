@@ -11,8 +11,10 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from activegraph import Graph, Runtime, behavior, llm_behavior
-from activegraph.llm import LLMMessage, LLMResponse
+import pytest
+
+from activegraph import Graph, InvalidRuntimeConfiguration, Runtime, behavior, llm_behavior
+from activegraph.llm import ClaudeCodeProvider, LLMMessage, LLMResponse
 
 from tests._llm_helpers import Claim, ClaimList, ScriptedProvider
 
@@ -150,3 +152,64 @@ def test_max_llm_calls_dimension_consumed_per_call():
     rt = Runtime(g, llm_provider=provider, budget={"max_llm_calls": 1})
     rt.run_goal("g")
     assert rt.budget.used["max_llm_calls"] == 1.0
+
+
+# ---- capability-aware hard-budget rejection (v1.11 #1, Behavior 1) --------
+
+
+def test_hard_max_cost_usd_rejects_binding_to_capability_limited_provider():
+    _seed_doc()
+
+    @llm_behavior(
+        name="extractor",
+        on=["object.created"],
+        where={"object.type": "document"},
+        output_schema=ClaimList,
+        view={"around": "event.payload.object.id", "depth": 1},
+    )
+    def extractor(event, graph, ctx, out):
+        pass
+
+    provider = ClaudeCodeProvider(allow_unenforced_generation_controls=True)
+    with pytest.raises(InvalidRuntimeConfiguration) as exc:
+        Runtime(Graph(), llm_provider=provider, budget={"max_cost_usd": "1.00"})
+    assert "max_cost_usd" in str(exc.value) or "enforces_max_tokens" in str(exc.value)
+
+
+def test_no_hard_budget_binds_fine_to_capability_limited_provider():
+    _seed_doc()
+
+    @llm_behavior(
+        name="extractor",
+        on=["object.created"],
+        where={"object.type": "document"},
+        output_schema=ClaimList,
+        view={"around": "event.payload.object.id", "depth": 1},
+    )
+    def extractor(event, graph, ctx, out):
+        pass
+
+    provider = ClaudeCodeProvider(allow_unenforced_generation_controls=True)
+    Runtime(Graph(), llm_provider=provider, budget={"max_llm_calls": 5})  # must not raise
+
+
+def test_non_cost_budget_dimensions_still_bind_to_capability_limited_provider():
+    _seed_doc()
+
+    @llm_behavior(
+        name="extractor",
+        on=["object.created"],
+        where={"object.type": "document"},
+        output_schema=ClaimList,
+        view={"around": "event.payload.object.id", "depth": 1},
+    )
+    def extractor(event, graph, ctx, out):
+        pass
+
+    provider = ClaudeCodeProvider(allow_unenforced_generation_controls=True)
+    rt = Runtime(
+        Graph(),
+        llm_provider=provider,
+        budget={"max_events": 100, "max_behavior_calls": 50, "max_seconds": 60},
+    )
+    rt._ensure_registry()  # must not raise
