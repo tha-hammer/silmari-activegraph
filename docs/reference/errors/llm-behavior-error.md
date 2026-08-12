@@ -140,6 +140,32 @@ placeholder contains. If the model never recovers even with a real
 example, switch to a tool-trained model (the small models that echo
 schemas back rarely come from the tool-trained families).
 
+### `ClaudeCodeProvider`-specific: `llm.request_error` covers more ground
+
+CONTRACT v1.11 #1. `ClaudeCodeProvider` (the Claude Agent SDK-backed
+provider — see [`llm-providers`](../llm-providers.md)) routes several
+setup/isolation failures other providers don't have through
+`llm.request_error` rather than a bare exception, since every one of
+them is terminal (retrying identical bytes/environment can't
+succeed):
+
+- The `claude-agent-sdk` extra is missing, the wrong version, or its
+  bundled CLI binary is missing/not executable — `payload_extras.phase
+  == "setup"`, message names the exact install command.
+- A nested-session/isolation env var (`CLAUDECODE`,
+  `CLAUDE_CODE_SESSION_ID`, etc.) is set — this provider refuses to run
+  nested inside another Claude Code session. `payload_extras
+  ["conflicting_vars"]` names every offending variable (never values).
+- `complete()` was called from inside a running asyncio/Trio context —
+  call it from a synchronous context or a worker thread instead.
+- A local turn/budget/permission-denial limit (`error_max_turns`,
+  `error_max_budget_usd`, `error_permission_denied`) — deterministic,
+  not a transient provider hiccup.
+
+A conflicting metered-credential env var (`ANTHROPIC_API_KEY`,
+`CLAUDE_CODE_USE_BEDROCK`, ...) maps to `llm.auth_error` instead —
+see `payload_extras["conflicting_vars"]` there too.
+
 ### Failures from fork/replay: re-record
 
 `llm.fixture_missing`. You're running against `RecordedLLMProvider`

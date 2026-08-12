@@ -8402,3 +8402,164 @@ interleaves other work between atomic quanta.
   split above is the honest scope; extending it (e.g. tool-side reads)
   is a separate amendment, not a silent widening.
 - **No new storage backends and no concurrent graph execution.**
+
+## v1.11 #1. `ClaudeCodeProvider` — a capability-limited third `LLMProvider`
+
+`activegraph/llm/claude_code.py` adds `ClaudeCodeProvider`, backed by
+the Claude Agent SDK (`claude-agent-sdk`, exact-pinned to `0.2.135`
+with its bundled `claude` CLI `2.1.227`, driving it as an async
+subprocess), alongside the existing `AnthropicProvider` and
+`OpenAIProvider`. Its entire purpose: bill LLM calls against the
+caller's Claude Max/Pro/Team/Enterprise **subscription** instead of
+`ANTHROPIC_API_KEY` metered billing.
+
+**Capability model, not a per-call flag.** `activegraph/llm/provider.py`
+gains an additive `LLMProviderCapabilities` dataclass (`enforces_max_tokens`,
+`supports_sampling_controls`, `input_token_count: "official"|"estimate"`,
+`max_tool_calls_per_completion`, `requires_generation_control_acknowledgement`)
+plus `get_llm_provider_capabilities(provider)`, defaulting to
+`FULL_LLM_PROVIDER_CAPABILITIES` (full parity) when a provider doesn't
+declare `llm_capabilities` — zero behavior change for `AnthropicProvider`/
+`OpenAIProvider`/any pre-existing custom provider. The locked
+`LLMProvider.complete()`/`count_tokens()` Protocol signatures never
+grow provider-specific keywords (no `deterministic=` on `complete()`,
+no `tools=` on `count_tokens()`) — capability limits are declared data,
+checked by `Runtime` before a provider is ever called, not a per-call
+argument a provider must recognize.
+
+`ClaudeCodeProvider.llm_capabilities` declares `enforces_max_tokens=False`,
+`supports_sampling_controls=False`, `input_token_count="estimate"`,
+`max_tool_calls_per_completion=1`, `requires_generation_control_acknowledgement=True`.
+`Runtime` reads this at all three capability-binding moments (the
+constructor's eager pass before `track_runtime()`, the defensive
+`_ensure_registry()` pass, and `register()`/decoration against an
+already-live Runtime, via `runtime.py`'s new
+`_resolve_and_validate_llm_capabilities` and `_live.py`'s new
+`_validate_capability`) and raises `InvalidRuntimeConfiguration`,
+before any I/O, when: (1) the provider requires acknowledgement and
+`allow_unenforced_generation_controls=True` wasn't passed to its
+constructor; (2) a bound `@llm_behavior(deterministic=True)` is
+present; or (3) `budget={"max_cost_usd": ...}` is set while the
+provider lacks either an enforceable output bound or an official
+input token count. A rejected construction never joins the live
+`_LIVE_RUNTIMES` weak set and emits no graph event.
+`RecordingLLMProvider` delegates both `llm_capabilities` and
+`allow_unenforced_generation_controls` from its wrapped provider (via
+new `@property` accessors on `recorded.py`) so wrapping never silently
+widens what `Runtime` accepts; `RecordedLLMProvider` keeps the full
+default since fixture replay has no live generation or spend.
+
+**What's still capability-limited.** `max_tokens`/`temperature`/`top_p`
+are accepted (Protocol-required keywords) but never forwarded —
+`ClaudeAgentOptions` has no such fields at all. Tool-call cardinality
+is 0-or-1 per `complete()`, never a batch — the SDK's
+`DeferredToolUse` is singular by construction. `LLMResponse.cost_usd`
+is sourced from the SDK's own list-rate `total_cost_usd`, then summed
+`model_usage[*]["costUSD"]`, then a local pricing-table estimate as a
+last resort — never the caller's actual subscription draw or
+remaining credit meter, and `model_usage[*]["provider"] ==
+"firstParty"` is evidence of no named cloud backend, not proof of
+subscription billing. `input_tokens` sums `inputTokens +
+cacheReadInputTokens + cacheCreationInputTokens` across `model_usage`
+(falling back to the equivalent snake_case `usage` fields) —
+representing every billed/list-rate input token class, not only
+uncached input.
+
+**Everything else stays in scope**: `tools=` tool-use support via one
+exactly-anchored `PreToolUse`-defer hook per offered tool (never an
+unconditional/catch-all matcher; the callback also re-checks the exact
+allow-list as defense in depth), structured output in both the
+prompt-embedded path and native mode (`ResultMessage.structured_output`,
+mapped only on a final, non-tool-deferring turn), the existing 7
+`LLMBehaviorError` reason codes, and full `Runtime` cache/fork/replay
+compatibility — `complete()` is a pure function of exactly the
+arguments the runtime's per-turn cache hash covers, so this provider
+needs zero special-casing to participate in `replay_llm_cache=True`/
+`Runtime.fork()`/`Runtime.diff()` correctly.
+
+Multi-turn tool continuation is handled by flattening the entire
+`messages` history into one canonical, versioned JSON transcript
+(`activegraph-transcript-json-v1` preamble, `sort_keys=True` so
+cache-identical `messages` always produce byte-identical prompts) sent
+as a single new `user` turn into a fresh, non-resumed `query()` call
+every `complete()` — the only mechanism verified to always produce
+exactly one clean response; reconstructing history via the SDK's
+streaming-input mode or `resume=`-based session continuation both
+produce extra, wrong, billed turns for real multi-turn conversations.
+
+**Isolation and auth.** Every call resolves the SDK's own bundled
+`claude` binary internally (`_load_sdk_bindings()` — never a caller
+override, never a system-`PATH` fallback) and constructs a fresh
+`ClaudeAgentOptions`: no session reuse or persistence, no ambient
+skills/plugins/subagents, a private empty temp `cwd` alive only
+through the call, hard-coded `permission_mode="dontAsk"`.
+`reject_metered_env_auth=True` (the default) rejects — terminal
+`llm.auth_error`, before any subprocess — the documented
+higher-precedence credential/routing env vars (`ANTHROPIC_API_KEY`,
+Bedrock/Vertex/Foundry/Mantle/AWS selectors, `ANTHROPIC_*_BASE_URL`
+overrides, `CLAUDE_CONFIG_DIR`); nested-session/isolation env vars
+(`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, etc.) are **always** rejected
+(terminal `llm.request_error`) regardless of that flag.
+`CLAUDE_CODE_OAUTH_TOKEN` is never rejected. `setting_sources=[]` does
+not suppress managed policy or global CLI configuration — a stated
+limitation.
+
+**Async bridge.** `complete()` detects an already-running asyncio/Trio
+context via `sniffio.current_async_library()` and fails loud
+(`llm.request_error`) before ever calling `query()`; otherwise
+`anyio.run(_run_single_query, ...)` drives one query to its first
+terminal `ResultMessage`, applying `anyio.fail_after(timeout_seconds)`
+only to the query work. Cleanup (`aclose()`) runs in `finally` under a
+**shielded** cancel scope with its own `teardown_grace_seconds`
+(default 25s, covering the pinned SDK's documented ~20s
+terminate/kill escalation) so a Runtime retry cannot begin until close
+completes or the teardown bound is reached. Error precedence: a
+primary work error or timeout remains primary and carries cleanup
+diagnostics as extras; a successful terminal result is not returned
+unless cleanup also succeeded (cleanup failure/timeout after success
+maps to `llm.network_error`); a zero-result clean stream is
+`llm.network_error` (or an `AssistantMessage.error`-derived reason
+when one was observed). `wire.py` gains `classify_provider_status`,
+extracted from `classify_provider_exception`'s status-code branch so a
+result-shaped failure (no exception object) reuses the same ladder as
+an exception-shaped one.
+
+Shared Claude-family facts (pricing, default model, native-structured-
+output model prefixes) live in the module-private
+`activegraph/llm/_claude_shared.py`, which both `AnthropicProvider` and
+`ClaudeCodeProvider` import from — a small, additive,
+behavior-preserving edit to `anthropic.py` (its own test suite passes
+unmodified) that closes a two-copies-that-could-drift risk between the
+two Claude-family providers.
+
+`activegraph/runtime/_live.py`'s cross-provider candidates list gains
+`ClaudeCodeProvider`, and `_which_shipped_provider_claims` now returns
+**every** matching shipped provider class instead of only the first —
+`AnthropicProvider` and `ClaudeCodeProvider` both legitimately claim
+every `claude-*` name, so returning only the first match would have
+made `ClaudeCodeProvider` unreachable dead code in the cross-provider
+mismatch diagnostic. Structured error context uses plural
+`claiming_provider_names`/`claiming_provider_defaults`; the deprecated
+singular `claimed_by_provider`/`claimed_by_default_model` keys remain
+only in the one-match case.
+
+Not in scope for v1: an arbitrary `cli_path` override (removed rather
+than half-validated) or any other SDK option passthrough beyond the
+three public constructor kwargs (`allow_unenforced_generation_controls`,
+`reject_metered_env_auth`, `_sdk_loader`); a session-affinity/
+long-lived-client optimization (every `complete()` is a fresh,
+stateless `query()`, with `max_turns=1` and no `resume=`); routing
+third-party/hosted users through the caller's own subscription
+credentials (this provider is scoped to a caller's own local/ordinary
+use, matching Anthropic's published terms for Agent SDK/`claude -p`
+subscription usage). Unlike the `baml`/`falkordb` precedent,
+`claude-agent-sdk` **is** bundled into `[llm]`/`[all]` (exact-pinned
+there too) — consistent with the existing "`[llm]` installs every
+shipped provider's SDK" convention — since `Runtime`'s capability-
+binding acknowledgement gate is the actual safety boundary, not
+extras-list exclusion.
+
+Tested against `claude-agent-sdk==0.2.135` and `claude` CLI `2.1.227`
+exactly — `_load_sdk_bindings()` checks the installed SDK version at
+call time and refuses (terminal `llm.request_error`) to run against
+any other.

@@ -15,6 +15,35 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
 
 ## [Unreleased]
 
+### Added
+
+- **`ClaudeCodeProvider`** (CONTRACT v1.11 #1). A third `LLMProvider`,
+  `activegraph/llm/claude_code.py`, backed by the Claude Agent SDK
+  (`pip install "activegraph[claude-code]"`, or via `[llm]`/`[all]` —
+  exact-pinned to `claude-agent-sdk==0.2.135` everywhere it appears)
+  — bills LLM calls against the caller's Claude Max/Pro/Team/Enterprise
+  subscription instead of `ANTHROPIC_API_KEY` metered billing. A
+  **capability-limited** provider, enforced by a new `Runtime`-side
+  capability-binding validation rather than a per-call flag:
+  `activegraph/llm/provider.py` gains an additive
+  `LLMProviderCapabilities` descriptor (full parity by default; every
+  existing provider is unaffected), and `Runtime` refuses to bind
+  `ClaudeCodeProvider` to a `deterministic=True` behavior, a hard
+  `max_cost_usd` budget, or any behavior at all without an explicit
+  `allow_unenforced_generation_controls=True` construction-time
+  acknowledgement — before any I/O, at all three binding moments
+  (construction, `_ensure_registry()`, and live registration). Tool-
+  call cardinality is 0-or-1 per `complete()`, never batched. Supports
+  `tools=` via one exactly-anchored `PreToolUse`-defer hook per tool,
+  both structured-output modes, the same 7 `LLMBehaviorError` reason
+  codes, and full `Runtime` cache/fork/replay compatibility. See the
+  [LLM providers reference](https://docs.activegraph.ai/reference/llm-providers/)
+  for the full capability-limited contract. Shared Claude-family
+  pricing/default-model/native-output-prefix facts moved to the new
+  module-private `activegraph/llm/_claude_shared.py`, which
+  `AnthropicProvider` now also sources from (additive, behavior-
+  preserving — its own test suite is unmodified).
+
 ## [1.10.0] — 2026-07-12
 
 Runtime legibility and cooperative-host round (CONTRACT v1.10 #1–#3): the behavior-frame

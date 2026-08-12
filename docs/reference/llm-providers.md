@@ -1,10 +1,13 @@
 # LLM providers
 
-Active Graph ships two concrete `LLMProvider` implementations.
-Both expose identical Protocol surface — `complete()`,
-`estimate_cost()`, `count_tokens()` — so a runtime swapping one for
-the other doesn't reshape any call site. Choose by the model family
-you want; everything else is the same.
+Active Graph ships three concrete `LLMProvider` implementations:
+`AnthropicProvider` and `OpenAIProvider` expose identical Protocol
+surface — `complete()`, `estimate_cost()`, `count_tokens()` — so a
+runtime swapping one for the other doesn't reshape any call site.
+`ClaudeCodeProvider` is Protocol-conformant in shape too, but is a
+**capability-limited provider**, enforced by `Runtime` via the
+additive `LLMProviderCapabilities` descriptor — see its own section
+below before using it.
 
 ```python
 from activegraph import Graph, Runtime
@@ -16,22 +19,30 @@ rt = Runtime(Graph(), llm_provider=OpenAIProvider())
 
 ## Installing
 
-Pick one of three extras. They install cleanly and don't conflict.
+Pick the extra(s) you need. They install cleanly and don't conflict.
 
 ```bash
-pip install "activegraph[anthropic]"   # AnthropicProvider only
-pip install "activegraph[openai]"      # OpenAIProvider only
-pip install "activegraph[llm]"         # both providers
+pip install "activegraph[anthropic]"    # AnthropicProvider only
+pip install "activegraph[openai]"       # OpenAIProvider only
+pip install "activegraph[claude-code]"  # ClaudeCodeProvider only
+pip install "activegraph[llm]"          # all three shipped providers
 ```
 
 The `[openai]` extra also pulls in `tiktoken` so client-side token
 counting is accurate; see the count_tokens row below for what
-happens when tiktoken is missing.
+happens when tiktoken is missing. `claude-agent-sdk` is exact-pinned
+(`==0.2.135`) wherever it appears — `[claude-code]`, `[llm]`, and
+`[all]` all carry the identical exact pin, so there's exactly one
+supported version regardless of which extra installed it.
+`ClaudeCodeProvider` still refuses to run without an explicit
+`allow_unenforced_generation_controls=True` acknowledgement (Runtime
+capability-binding validation) regardless of whether its SDK happens
+to be installed.
 
 ## API keys
 
-Both providers read their API key from the environment, never from
-code or a checked-in config:
+`AnthropicProvider`/`OpenAIProvider` read their API key from the
+environment, never from code or a checked-in config:
 
 ```bash
 export ANTHROPIC_API_KEY='...'
@@ -40,7 +51,9 @@ export OPENAI_API_KEY='...'
 
 Override the env-var name via the `api_key_env=` constructor kwarg
 if you need a different one (per-environment key rotation, for
-example).
+example). `ClaudeCodeProvider` deliberately does **not** take an
+`api_key_env=` kwarg — it bills against a Claude subscription instead
+of a metered API key; see its own section below.
 
 ## Default model resolution
 
@@ -111,6 +124,150 @@ by design: only *recognized* cross-provider mismatches fire.
 | Exception mapping (v1.3) | `llm.rate_limited` on 429-shaped errors; `llm.auth_error` on 401/403-shaped errors (terminal, never retried); `llm.request_error` on other 4xx (terminal); `llm.network_error` for the rest (timeouts, connection errors, 5xx — retried) | Same mapping |
 | Reasoning-model parameters | n/a (`max_tokens` is universal) | `o1`/`o3`/`o4`/`gpt-5` families get `max_completion_tokens` and no `temperature`/`top_p` (the API rejects the GPT-4-era parameters). Override the family table with the `reasoning_model_prefixes=` kwarg |
 | Pricing | Family-prefix lookup; override with `pricing=` kwarg | Family-prefix lookup; override with `pricing=` kwarg |
+
+## `ClaudeCodeProvider` — Claude subscription billing (capability-limited)
+
+CONTRACT v1.11 #1. `ClaudeCodeProvider` is a third `LLMProvider`, backed
+by the **Claude Agent SDK** (`claude-agent-sdk`, pinned to exactly
+`0.2.135` with its bundled CLI `2.1.227` — see "Exact SDK
+compatibility" below) instead of a direct API call. Its entire
+purpose: bill LLM calls against the caller's Claude
+Max/Pro/Team/Enterprise **subscription** instead of `ANTHROPIC_API_KEY`
+metered billing.
+
+```bash
+pip install "activegraph[claude-code]"
+claude login   # or otherwise ensure an active subscription session
+```
+
+```python
+from activegraph import Graph, Runtime
+from activegraph.llm import ClaudeCodeProvider
+
+rt = Runtime(
+    Graph(),
+    llm_provider=ClaudeCodeProvider(allow_unenforced_generation_controls=True),
+)
+```
+
+**This is a capability-limited provider — `Runtime` enforces the gap,
+not a per-call flag.** `ClaudeCodeProvider.llm_capabilities`
+(`LLMProviderCapabilities`) declares:
+
+```python
+LLMProviderCapabilities(
+    enforces_max_tokens=False,
+    supports_sampling_controls=False,
+    input_token_count="estimate",
+    max_tool_calls_per_completion=1,
+    requires_generation_control_acknowledgement=True,
+)
+```
+
+Before running any `@llm_behavior`, `Runtime` reads this descriptor —
+at construction, at `_ensure_registry()`, and when a new behavior is
+registered against an already-live Runtime — and refuses the binding
+(`InvalidRuntimeConfiguration`, before any I/O) when:
+
+- the provider requires acknowledgement and
+  `allow_unenforced_generation_controls=True` wasn't passed to its
+  constructor (the SDK has no `max_tokens`/`temperature`/`top_p`
+  fields at all — this is the explicit opt-in that a caller accepts
+  that gap);
+- any bound `@llm_behavior(deterministic=True)` is present — the SDK
+  has no sampling controls, so `Runtime` refuses the binding rather
+  than silently producing non-deterministic output that claims
+  determinism; or
+- `budget={"max_cost_usd": ...}` is set — the pre-call budget gate
+  needs both an official (non-estimated) token count and an
+  enforceable output bound, and this provider has neither.
+
+There is no `deterministic=` parameter on `complete()` and no `tools=`
+parameter on `count_tokens()` to guard per-call — the locked
+`LLMProvider` Protocol signatures never grow provider-specific
+keywords; capability limits are declared data `Runtime` checks before
+a provider is ever called. Tool-call cardinality is **0-or-1 per
+`complete()`**, never a batch — a task needing several tools takes
+several `Runtime`-driven turns. `LLMResponse.cost_usd` is sourced from
+the SDK's own list-rate `total_cost_usd`/`model_usage` fields — for
+subscribers this is a **standard-rate accounting estimate**, never
+your actual subscription draw or remaining credit meter.
+`model_usage[*]["provider"] == "firstParty"` is evidence the request
+didn't use a *named cloud backend*; it is **not** proof of
+subscription billing.
+
+**Scope.** Intended for a caller's own local/ordinary use, matching
+Anthropic's published terms for Agent SDK/`claude -p` subscription
+usage. Not for routing third-party/hosted users through one
+subscription's credentials.
+
+**Auth is best-effort, not proof.** `reject_metered_env_auth=True`
+(the default) refuses to run — terminal `llm.auth_error`, before any
+subprocess — when `ANTHROPIC_API_KEY`, a Bedrock/Vertex/Foundry/Mantle/
+AWS cloud-credential selector, or an `ANTHROPIC_*_BASE_URL` routing
+override is set; those outrank subscription OAuth per the CLI's
+documented precedence in non-interactive mode:
+
+```bash
+unset ANTHROPIC_API_KEY   # let ClaudeCodeProvider bill against your subscription
+```
+
+Pass `reject_metered_env_auth=False` to opt out and allow one of those
+credential sources instead — nested-session/isolation env vars
+(`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, ...) are **always** rejected
+regardless of that flag (terminal `llm.request_error`) since an active
+one changes SDK/CLI behavior this provider's isolation contract can't
+reconcile. `CLAUDE_CODE_OAUTH_TOKEN` is never rejected — official
+precedence defines it as subscription OAuth ahead of saved `/login`
+credentials. `setting_sources=[]` on every call does **not** suppress
+managed policy or global CLI configuration — a stated limitation, not
+a promise the SDK can't keep.
+
+**Isolation.** Every call constructs a fresh `ClaudeAgentOptions` and a
+stateless `query()` — no session reuse or persistence, no ambient
+skills/plugins/subagents, a private empty temp working directory alive
+only through the call, and a hard-coded `permission_mode="dontAsk"`
+(deny anything not pre-approved by the tool allow-list, never prompt).
+
+**What still works.** `tools=` tool-use (via an exactly-anchored
+`PreToolUse`-defer hook per tool — never a catch-all matcher),
+structured output in both prompt and native mode, the same 7
+`LLMBehaviorError` reason codes the other two providers use, and full
+`Runtime` cache/fork/replay compatibility: `complete()` is a pure
+function of exactly what the runtime's per-turn cache hashes, so a
+cache hit or an unchanged `Runtime.fork(..., replay_llm_cache=True)`
+never calls this provider at all, identical to the other two.
+
+**Multi-turn tool continuation.** The SDK takes a single `prompt: str`,
+not a `messages[]` array, so each live `complete()` call flattens the
+entire `messages` history into one canonical, versioned JSON transcript
+(`activegraph-transcript-json-v1`) sent as a single new turn to a
+fresh, non-resumed SDK call — the only mechanism verified to always
+produce exactly one clean response for a real multi-turn conversation.
+This is lossy (the model reads prose describing prior turns rather
+than native content blocks) but deliberate; see
+`activegraph/llm/claude_code.py`'s module docstring for the
+alternatives that were tried and rejected.
+
+**Exact SDK compatibility.** The only supported pair is
+`claude-agent-sdk==0.2.135` with its own bundled `claude` CLI
+`2.1.227` — resolved and verified internally (never a caller override,
+never a system-`PATH` fallback). A missing/wrong-version SDK or
+missing bundled binary is a terminal `llm.request_error` naming the
+install command. Upgrading the pinned version is a deliberate
+compatibility change, gated by this provider's full fake and live test
+suites — not a silent version-range widening.
+
+**Testing.** `ClaudeCodeProvider(_sdk_loader=<fake>)` is the test seam
+— a zero-arg callable returning a `_SDKBindings` instance bundling
+every SDK symbol the provider touches (options, message/exception
+classes, hooks, MCP tool factories), constructed from real
+`claude_agent_sdk` classes in tests, not hand-rolled doubles. A
+separate, `claude_code_live`-marked suite
+(`tests/test_llm_claude_code_live.py`, gated on
+`ACTIVEGRAPH_TEST_CLAUDE_CODE_LIVE=1`) exercises the real CLI and real
+subscription auth; it never runs in ordinary CI and is a required
+pre-release gate, not merely supplementary.
 
 ## Native structured output (opt-in)
 
@@ -242,15 +399,23 @@ class MyProvider:
 assert isinstance(MyProvider(), LLMProvider)
 ```
 
-`default_model`, `recognizes_model`, and
-`supports_native_structured_output` are additive (v1.0.2 #1 /
-v1.3 #1). Custom providers that omit them keep working at every
-call site — the runtime guards each lookup with `getattr(...)` —
-they just require an explicit `model=` on every `@llm_behavior`,
-don't participate in cross-provider validation, and resolve to the
-prompt-embedded structured-output path. (The `isinstance` check
-above requires the full current method set; the runtime itself
-never isinstance-checks providers.)
+`default_model`, `recognizes_model`, `supports_native_structured_output`,
+and `llm_capabilities` are all additive (v1.0.2 #1 / v1.3 #1 / v1.11
+#1). Custom providers that omit them keep working at every call site —
+the runtime guards each lookup with `getattr(...)`/
+`get_llm_provider_capabilities(...)` — they just require an explicit
+`model=` on every `@llm_behavior`, don't participate in cross-provider
+validation, resolve to the prompt-embedded structured-output path, and
+(for `llm_capabilities`) resolve to `FULL_LLM_PROVIDER_CAPABILITIES` —
+the same full-parity behavior every provider had before that
+descriptor existed. Declare `llm_capabilities` on your own provider
+only if it genuinely can't enforce something the locked `complete()`/
+`count_tokens()` signatures imply (see `ClaudeCodeProvider`'s section
+above for the full descriptor shape) — `Runtime` will then refuse to
+bind a deterministic behavior or a hard `max_cost_usd` budget to it,
+the same way it does for `ClaudeCodeProvider`. (The `isinstance` check
+above requires the full current method set; the runtime itself never
+isinstance-checks providers.)
 
 If your provider exposes the framework's instruction-based
 structured-output path (most do), reuse
