@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
 
 import pytest
 
-from activegraph import Graph, Runtime, behavior, clear_registry
+from activegraph import (
+    Event,
+    Graph,
+    OverflowPolicy,
+    Runtime,
+    SinkConfig,
+    behavior,
+    clear_registry,
+)
 from activegraph.observability.metrics import (
     METRIC_BY_NAME,
     METRIC_NAMES,
@@ -33,6 +45,33 @@ class RecordingMetrics:
 
     def gauge(self, name, tags, value):
         self.gauges.append((name, dict(tags), value))
+
+    def observations(self):
+        return [
+            *(('counter', name, tags, value) for name, tags, value in self.counters),
+            *(('histogram', name, tags, value) for name, tags, value in self.histograms),
+            *(('gauge', name, tags, value) for name, tags, value in self.gauges),
+        ]
+
+    def values(self, kind, name, tags=None):
+        return [
+            value
+            for observed_kind, observed_name, observed_tags, value in self.observations()
+            if observed_kind == kind
+            and observed_name == name
+            and (tags is None or observed_tags == tags)
+        ]
+
+    def assert_standard_observations_match_catalog(self):
+        for kind, name, tags, _value in self.observations():
+            spec = METRIC_BY_NAME.get(name)
+            assert spec is not None, f"unknown standard metric observation: {name}"
+            assert kind == spec.kind, (
+                f"{name} observed as {kind}, catalog declares {spec.kind}"
+            )
+            assert set(tags) == set(spec.tags), (
+                f"{name} tags {sorted(tags)} != catalog tags {sorted(spec.tags)}"
+            )
 
 
 class TestProtocolShape:
@@ -184,6 +223,245 @@ class TestRuntimeEmitsExpectedMetrics:
         rt = Runtime(g, metrics=m)
         rt.run_goal("x")
         assert any(n == "activegraph_queue_depth" for n, _, _ in m.gauges)
+
+
+@dataclass(frozen=True)
+class MetricProductionCase:
+    id: str
+    proves: frozenset[str]
+    drive: Callable[[RecordingMetrics, Path], None]
+    check: Callable[[RecordingMetrics], None]
+
+
+def _drive_runtime_plain_queue_success(metrics: RecordingMetrics, _tmp_path: Path) -> None:
+    @behavior(name="metric_plain", on=["goal.created"])
+    def metric_plain(event, graph, ctx):
+        return None
+
+    Runtime(Graph(), behaviors=[metric_plain], metrics=metrics).run_goal("metrics")
+
+
+def _check_runtime_plain_queue_success(metrics: RecordingMetrics) -> None:
+    assert metrics.values(
+        "counter", "activegraph_behaviors_invoked_total", {"behavior": "metric_plain"}
+    ) == [1.0]
+    durations = metrics.values(
+        "histogram", "activegraph_behaviors_duration_seconds", {"behavior": "metric_plain"}
+    )
+    assert len(durations) == 1 and durations[0] >= 0
+    assert metrics.values("gauge", "activegraph_queue_depth")
+
+
+def _drive_plain_failure(metrics: RecordingMetrics, _tmp_path: Path) -> None:
+    @behavior(name="metric_failure", on=["goal.created"])
+    def metric_failure(event, graph, ctx):
+        raise ValueError("metric failure")
+
+    Runtime(Graph(), behaviors=[metric_failure], metrics=metrics).run_goal("metrics")
+
+
+def _check_plain_failure(metrics: RecordingMetrics) -> None:
+    assert metrics.values(
+        "counter",
+        "activegraph_behaviors_failed_total",
+        {"behavior": "metric_failure", "reason": "exception.ValueError"},
+    ) == [1.0]
+
+
+class _MetricRecordingSink:
+    def open(self) -> None:
+        return None
+
+    def on_event(self, event, context) -> None:
+        return None
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+class _MetricRaisingSink(_MetricRecordingSink):
+    def on_event(self, event, context) -> None:
+        raise RuntimeError("metric sink failure")
+
+
+class _MetricGateSink(_MetricRecordingSink):
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def on_event(self, event, context) -> None:
+        self.entered.set()
+        assert self.release.wait(timeout=2.0)
+
+    def close(self) -> None:
+        self.release.set()
+
+
+def _metric_event(graph: Graph, n: int) -> Event:
+    return Event(
+        id=graph.ids.event(),
+        type="metric.event",
+        payload={"n": n},
+        timestamp=graph.clock.now(),
+    )
+
+
+def _drive_sink_metrics(metrics: RecordingMetrics, _tmp_path: Path) -> None:
+    delivered_graph = Graph()
+    delivered = Runtime(
+        delivered_graph,
+        behaviors=[],
+        metrics=metrics,
+        sinks=[SinkConfig(_MetricRecordingSink(), name="metric_delivered")],
+    )
+    try:
+        delivered_graph.emit(_metric_event(delivered_graph, 1))
+        assert delivered.flush_sinks(timeout=2.0)
+    finally:
+        delivered.close_sinks(timeout=2.0)
+
+    error_graph = Graph()
+    error = Runtime(
+        error_graph,
+        behaviors=[],
+        metrics=metrics,
+        sinks=[SinkConfig(_MetricRaisingSink(), name="metric_error")],
+    )
+    try:
+        error_graph.emit(_metric_event(error_graph, 1))
+        assert error.flush_sinks(timeout=2.0)
+    finally:
+        error.close_sinks(timeout=2.0)
+
+    gate = _MetricGateSink()
+    drop_graph = Graph()
+    dropped = Runtime(
+        drop_graph,
+        behaviors=[],
+        metrics=metrics,
+        sinks=[
+            SinkConfig(
+                gate,
+                name="metric_drop",
+                queue_capacity=1,
+                overflow_policy=OverflowPolicy.DROP_NEWEST,
+            )
+        ],
+    )
+    try:
+        drop_graph.emit(_metric_event(drop_graph, 1))
+        assert gate.entered.wait(timeout=2.0)
+        drop_graph.emit(_metric_event(drop_graph, 2))
+        drop_graph.emit(_metric_event(drop_graph, 3))
+        gate.release.set()
+        assert dropped.flush_sinks(timeout=2.0)
+    finally:
+        gate.release.set()
+        dropped.close_sinks(timeout=2.0)
+
+
+def _check_sink_metrics(metrics: RecordingMetrics) -> None:
+    assert metrics.values(
+        "counter",
+        "activegraph_sink_events_delivered_total",
+        {"sink": "metric_delivered"},
+    ) == [1.0]
+    assert metrics.values(
+        "counter",
+        "activegraph_sink_errors_total",
+        {"sink": "metric_error", "operation": "on_event"},
+    ) == [1.0]
+    assert metrics.values(
+        "counter",
+        "activegraph_sink_events_dropped_total",
+        {"sink": "metric_drop", "reason": "overflow.drop_newest"},
+    ) == [1.0]
+    assert metrics.values("gauge", "activegraph_sink_queue_depth")
+
+
+METRIC_PRODUCTION_CASES = (
+    MetricProductionCase(
+        "runtime_plain_queue_success",
+        frozenset(
+            {
+                "activegraph_events_emitted_total",
+                "activegraph_behaviors_invoked_total",
+                "activegraph_behaviors_duration_seconds",
+                "activegraph_queue_depth",
+            }
+        ),
+        _drive_runtime_plain_queue_success,
+        _check_runtime_plain_queue_success,
+    ),
+    MetricProductionCase(
+        "plain_failure",
+        frozenset({"activegraph_behaviors_failed_total"}),
+        _drive_plain_failure,
+        _check_plain_failure,
+    ),
+    MetricProductionCase(
+        "sink_deliver_drop_error_depth",
+        frozenset(
+            {
+                "activegraph_sink_queue_depth",
+                "activegraph_sink_events_delivered_total",
+                "activegraph_sink_events_dropped_total",
+                "activegraph_sink_errors_total",
+            }
+        ),
+        _drive_sink_metrics,
+        _check_sink_metrics,
+    ),
+)
+
+
+# Removed slice-by-slice as later Phase 2 behaviors add executable cases.
+EXPECTED_METRIC_PRODUCTION_GAPS = frozenset(
+    {
+        "activegraph_llm_calls_total",
+        "activegraph_llm_cache_hits_total",
+        "activegraph_llm_failed_total",
+        "activegraph_llm_tokens_in",
+        "activegraph_llm_tokens_out",
+        "activegraph_llm_cost_usd",
+        "activegraph_tools_calls_total",
+        "activegraph_tools_cache_hits_total",
+        "activegraph_tools_failed_total",
+        "activegraph_tools_duration_seconds",
+        "activegraph_budget_cost_remaining_usd",
+        "activegraph_budget_events_remaining",
+        "activegraph_patterns_evaluated_total",
+        "activegraph_patterns_evaluation_duration_seconds",
+        "activegraph_replay_divergence_detected_total",
+    }
+)
+
+
+@pytest.mark.parametrize("case", METRIC_PRODUCTION_CASES, ids=lambda case: case.id)
+def test_metric_production_case_observes_every_declared_name(
+    case: MetricProductionCase, tmp_path: Path
+) -> None:
+    metrics = RecordingMetrics()
+    case.drive(metrics, tmp_path)
+    metrics.assert_standard_observations_match_catalog()
+    observed_names = {name for _kind, name, _tags, _value in metrics.observations()}
+    assert case.proves <= observed_names
+    case.check(metrics)
+
+
+def test_metric_production_matrix_accounts_for_the_catalog() -> None:
+    catalog_to_cases = {
+        name: sorted(case.id for case in METRIC_PRODUCTION_CASES if name in case.proves)
+        for name in sorted(METRIC_BY_NAME)
+    }
+    proved = {name for name, cases in catalog_to_cases.items() if cases}
+    assert proved.isdisjoint(EXPECTED_METRIC_PRODUCTION_GAPS)
+    assert proved | EXPECTED_METRIC_PRODUCTION_GAPS == set(METRIC_BY_NAME), json.dumps(
+        catalog_to_cases, sort_keys=True, indent=2
+    )
 
 
 class TestPrometheusMetricsOptional:
