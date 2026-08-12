@@ -15,6 +15,10 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
 
 ## [Unreleased]
 
+- Added the Diligence pack's seventh relation type,
+  `claim --has_contradiction--> contradiction`, with two edges per detected
+  contradiction so either claim reaches its review item at neighborhood depth
+  1. The historical v0.9 six-relation inventory below remains unchanged.
 - Moved canonical migration ownership to `activegraph.store.migration` and
   added migration-only backend providers, explicit registration, lazy
   `activegraph.migration_backends` discovery, capability preflight, and typed

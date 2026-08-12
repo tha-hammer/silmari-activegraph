@@ -1,6 +1,6 @@
 """Diligence pack object and relation types. CONTRACT v0.9 #15.
 
-Eight object types, six relation types. The schemas are intentionally
+Eight object types, seven relation types. The schemas are intentionally
 small and concrete — packs that try to be everything tend to be
 nothing. Future fields land here when there's a real consumer.
 """
@@ -141,6 +141,12 @@ RELATION_TYPES = [
         source_types=("claim",),
         target_types=("claim",),
         description="Two claims are in conflict.",
+    ),
+    RelationType(
+        name="has_contradiction",
+        source_types=("claim",),
+        target_types=("contradiction",),
+        description="A claim participates in a contradiction review item.",
     ),
     RelationType(
         name="references",

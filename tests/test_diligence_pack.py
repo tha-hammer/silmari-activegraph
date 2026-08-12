@@ -19,9 +19,10 @@ import tempfile
 
 import pytest
 
-from activegraph import Graph, Runtime
+from activegraph import Graph, PackSchemaViolation, Runtime
 from activegraph.packs.diligence import pack as diligence_pack
 from activegraph.packs.diligence import DiligenceSettings
+from activegraph.packs.diligence.object_types import OBJECT_TYPES, RELATION_TYPES
 from activegraph.packs.diligence.fixtures import (
     RecordedDiligenceProvider,
     THREE_COMPANIES,
@@ -118,6 +119,92 @@ def test_contradiction_detected_for_stellar(diligence_runtime):
         "expected at least one contradiction to be detected via pattern "
         "subscription on Stellar's filing-vs-survey claims"
     )
+
+
+def test_diligence_schema_inventory_includes_claim_contradiction_edge(
+    diligence_runtime,
+):
+    assert len(OBJECT_TYPES) == 8
+    assert len(RELATION_TYPES) == 7
+    selected = [
+        relation
+        for relation in RELATION_TYPES
+        if relation.name == "has_contradiction"
+    ]
+    assert len(selected) == 1
+    assert selected[0].source_types == ("claim",)
+    assert selected[0].target_types == ("contradiction",)
+
+    loaded = next(
+        event for event in diligence_runtime.graph.events if event.type == "pack.loaded"
+    )
+    assert len(loaded.payload["object_types"]) == 8
+    assert len(loaded.payload["relation_types"]) == 7
+    assert loaded.payload["relation_types"].count("has_contradiction") == 1
+
+
+def test_each_contradiction_is_reachable_from_both_real_claims(diligence_runtime):
+    graph = diligence_runtime.graph
+    contradictions = graph.objects(type="contradiction")
+    assert contradictions
+    selected_relations = graph.relations(type="has_contradiction")
+
+    for contradiction in contradictions:
+        claim_ids = (
+            contradiction.data["claim_a_id"],
+            contradiction.data["claim_b_id"],
+        )
+        exact = [
+            relation
+            for relation in selected_relations
+            if relation.target == contradiction.id
+        ]
+        assert {(relation.source, relation.target) for relation in exact} == {
+            (claim_ids[0], contradiction.id),
+            (claim_ids[1], contradiction.id),
+        }
+        assert len(exact) == 2
+
+        for claim_id in claim_ids:
+            assert graph.get_object(claim_id).type == "claim"
+            objects, relations = graph.neighborhood(claim_id, depth=1)
+            assert contradiction.id in {obj.id for obj in objects}
+            assert (claim_id, contradiction.id, "has_contradiction") in {
+                (relation.source, relation.target, relation.type)
+                for relation in relations
+            }
+
+    created = [
+        event
+        for event in graph.events
+        if event.type == "relation.created"
+        and event.payload["relation"]["type"] == "has_contradiction"
+    ]
+    assert len(created) == 2 * len(contradictions)
+
+
+def test_has_contradiction_rejects_known_wrong_endpoint_types():
+    graph = Graph()
+    runtime = Runtime(graph, behaviors=[])
+    runtime.load_pack(diligence_pack, settings=DiligenceSettings())
+    company = graph.add_object("company", {"name": "Test Co"})
+    claim = graph.add_object(
+        "claim",
+        {"text": "claim", "confidence": 0.9, "company_id": company.id},
+    )
+    contradiction = graph.add_object(
+        "contradiction",
+        {"claim_a_id": claim.id, "claim_b_id": claim.id},
+    )
+    before = len(graph.events)
+
+    with pytest.raises(PackSchemaViolation):
+        graph.add_relation(company.id, contradiction.id, "has_contradiction")
+    with pytest.raises(PackSchemaViolation):
+        graph.add_relation(claim.id, company.id, "has_contradiction")
+
+    assert len(graph.events) == before
+    assert graph.relations(type="has_contradiction") == []
 
 
 def test_pack_loaded_event_carries_prompt_hashes(diligence_runtime):

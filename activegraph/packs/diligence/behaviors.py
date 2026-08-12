@@ -287,7 +287,7 @@ def contradiction_detector(event, graph, ctx, *, settings: DiligenceSettings):
         # additionally here).
         if min(c1.data.get("confidence", 0), c2.data.get("confidence", 0)) < settings.confidence_threshold_for_review:
             continue
-        graph.add_object(
+        contradiction = graph.add_object(
             "contradiction",
             Contradiction(
                 claim_a_id=c1_id,
@@ -300,6 +300,8 @@ def contradiction_detector(event, graph, ctx, *, settings: DiligenceSettings):
                 status="open",
             ).model_dump(),
         )
+        graph.add_relation(c1_id, contradiction.id, "has_contradiction")
+        graph.add_relation(c2_id, contradiction.id, "has_contradiction")
 
 
 @llm_behavior(

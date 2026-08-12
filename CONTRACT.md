@@ -2182,9 +2182,9 @@ Concretely, `activegraph.packs.diligence` provides:
 **Object types** (8): `company`, `document`, `question`, `claim`,
 `evidence`, `contradiction`, `risk`, `memo`.
 
-**Relation types** (6): `supports`, `contradicts`, `references`,
-`derived_from`, `addresses` (claim → question), `mitigates`
-(evidence → risk).
+**Relation types** (7): `supports`, `contradicts`, `has_contradiction`
+(claim → contradiction), `references`, `derived_from`, `addresses`
+(claim → question), `mitigates` (evidence → risk).
 
 **Behaviors** (7):
   - `company_planner` (deterministic — bootstraps a `company` object
@@ -2197,8 +2197,8 @@ Concretely, `activegraph.packs.diligence` provides:
   - `evidence_linker` (deterministic — safety net for evidence
     objects that lack a `supports` edge to their claim)
   - `contradiction_detector` (pattern subscription, deterministic)
-  - `risk_identifier` (LLM, `activate_after=8` so it fires once
-    claims have accumulated)
+  - `risk_identifier` (LLM, idempotent graph-state gate so only the first
+    risk batch per company materializes)
   - `memo_synthesizer` (LLM)
 
 **Tools** (3, all pack-scoped):
@@ -2243,6 +2243,12 @@ The contradiction **detector** (pattern subscription on
 `(c1:claim)-[r:contradicts]->(c2:claim)`) is in scope and creates
 `contradiction` objects. The contradiction **resolver** (an LLM
 behavior that picks a winning claim) is **deferred to v1.0**.
+
+Every created contradiction object receives exactly two
+`claim --has_contradiction--> contradiction` relations, using the object's
+stored real claim ids. `Graph.neighborhood(claim_id, depth=1)` is therefore the
+canonical traversal from either claim to its open review item. The relation is
+an index/discovery edge only; it does not resolve or rank either claim.
 
 Why: the resolver adds a second LLM loop with its own prompt, its
 own determinism story, and its own evaluation problem ("did it
@@ -2355,8 +2361,8 @@ shared reference for the pack format itself.
 The trace printer gains rendering for `pack.loaded` events:
 
 ```
-[pack.loaded]    diligence v0.1.0 (8 object_types, 6 relation_types,
-                 7 behaviors, 3 tools, 2 policies, 5 prompts)
+[pack.loaded]    diligence v0.1.0 (8 object_types, 7 relation_types,
+                 7 behaviors, 3 tools, 2 policies, 4 prompts)
 ```
 
 Trace causal chains follow `pack.loaded` provenance back to the
