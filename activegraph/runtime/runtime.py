@@ -61,6 +61,7 @@ import re
 import random as _random
 import time as _time
 import traceback
+from collections.abc import Mapping
 
 
 def _monotonic() -> float:
@@ -144,7 +145,14 @@ from activegraph.tools.errors import (
 from activegraph.tools.recorded import DirectToolInvoker
 
 from activegraph.observability.logging import get_logger, runtime_log_extra
-from activegraph.observability.metrics import Metrics, NoOpMetrics
+from activegraph.observability.metrics import (
+    Metrics,
+    NoOpMetrics,
+    normalize_llm_metric_reason,
+    normalize_metric_model,
+    normalize_metric_tool,
+    normalize_tool_metric_reason,
+)
 from activegraph.observability.status import (
     BehaviorInfo,
     BudgetSnapshot,
@@ -310,6 +318,48 @@ def _doc_url_for_reason(reason: str) -> str:
         if reason.startswith(prefix):
             return f"{DOCS_BASE_URL}/errors/{slug}"
     return f"{DOCS_BASE_URL}/errors/execution-error"
+
+
+def _metric_nonnegative_number(
+    value: object, *, allow_decimal_string: bool = False
+) -> Optional[float]:
+    """Return one finite nonnegative metric value without broad coercion.
+
+    Runtime event payloads use numeric token/latency fields and decimal strings
+    for costs. Booleans, numeric strings outside the cost field, negative
+    values, and non-finite values are malformed and therefore omitted.
+    """
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        if not allow_decimal_string:
+            return None
+        try:
+            decimal_value = Decimal(value)
+        except (ArithmeticError, TypeError, ValueError):
+            return None
+        if not decimal_value.is_finite() or decimal_value < 0:
+            return None
+        number = float(decimal_value)
+        return number if math.isfinite(number) else None
+    if not isinstance(value, (int, float, Decimal)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
+def _metric_nonnegative_integer(value: object) -> Optional[float]:
+    """Return an exact token-count payload value or omit malformed input."""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return float(value)
 
 
 class Runtime:
@@ -866,6 +916,7 @@ class Runtime:
             "activegraph_events_emitted_total",
             {"event_type": event.type},
         )
+        self._record_llm_tool_event_metrics(event)
         # CONTRACT v1.3 #4: promote applies its delta quiescently —
         # the events persist and project, but never enqueue for
         # behavior matching. The promote.applied marker is emitted
@@ -921,6 +972,95 @@ class Runtime:
                 event_id=event.id,
             ),
         )
+
+    def _record_llm_tool_event_metrics(self, event: Event) -> None:
+        """Map Runtime-owned LLM/tool events to the standard metric catalog.
+
+        Graph events remain the source of truth. This observer reads only the
+        four Runtime-owned event types and tolerates malformed public
+        ``Graph.emit`` payloads without changing or rejecting those events.
+        """
+
+        payload: Mapping[str, Any] = (
+            event.payload if isinstance(event.payload, Mapping) else {}
+        )
+        if event.type == "llm.requested":
+            tags = {"model": normalize_metric_model(payload.get("model"))}
+            self.metrics.counter("activegraph_llm_calls_total", tags)
+            if payload.get("cache_hit") is True:
+                self.metrics.counter("activegraph_llm_cache_hits_total", tags)
+            return
+
+        if event.type == "tool.requested":
+            tags = {"tool": normalize_metric_tool(payload.get("tool"))}
+            self.metrics.counter("activegraph_tools_calls_total", tags)
+            if payload.get("cache_hit") is True:
+                self.metrics.counter("activegraph_tools_cache_hits_total", tags)
+            return
+
+        if event.type == "llm.responded":
+            self._record_llm_response_metrics(payload)
+            return
+
+        if event.type == "tool.responded":
+            self._record_tool_response_metrics(payload)
+
+    def _record_llm_response_metrics(self, payload: Mapping[str, Any]) -> None:
+        error = payload.get("error")
+        if error is not None and not isinstance(error, Mapping):
+            return
+
+        tags = {"model": normalize_metric_model(payload.get("model"))}
+        if isinstance(error, Mapping):
+            self.metrics.counter(
+                "activegraph_llm_failed_total",
+                {
+                    **tags,
+                    "reason": normalize_llm_metric_reason(error.get("reason")),
+                },
+            )
+        else:
+            for field, metric_name in (
+                ("input_tokens", "activegraph_llm_tokens_in"),
+                ("output_tokens", "activegraph_llm_tokens_out"),
+            ):
+                value = _metric_nonnegative_integer(payload.get(field))
+                if value is not None:
+                    self.metrics.histogram(metric_name, tags, value)
+            cost = (
+                0.0
+                if payload.get("cache_hit") is True
+                else _metric_nonnegative_number(
+                    payload.get("cost_usd"), allow_decimal_string=True
+                )
+            )
+            if cost is not None:
+                self.metrics.histogram("activegraph_llm_cost_usd", tags, cost)
+
+    def _record_tool_response_metrics(self, payload: Mapping[str, Any]) -> None:
+        error = payload.get("error")
+        if error is not None and not isinstance(error, Mapping):
+            return
+
+        tags = {"tool": normalize_metric_tool(payload.get("tool"))}
+        if isinstance(error, Mapping):
+            self.metrics.counter(
+                "activegraph_tools_failed_total",
+                {
+                    **tags,
+                    "reason": normalize_tool_metric_reason(error.get("reason")),
+                },
+            )
+
+        duration = (
+            0.0
+            if payload.get("cache_hit") is True
+            else _metric_nonnegative_number(payload.get("latency_seconds"))
+        )
+        if duration is not None:
+            self.metrics.histogram(
+                "activegraph_tools_duration_seconds", tags, duration
+            )
 
     # ---------- public entry points ----------
 

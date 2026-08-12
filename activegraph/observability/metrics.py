@@ -21,6 +21,74 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 
+# ---- bounded labels derived from open event payloads ---------------------
+
+# These are metric-only values. Event payloads and diagnostic logs keep their
+# original model/tool/reason strings; only metric tags pass through this closed
+# normalization boundary.
+METRIC_UNKNOWN_MODEL = "unknown_model"
+METRIC_UNKNOWN_TOOL = "unknown_tool"
+METRIC_UNKNOWN_REASON = "unknown_reason"
+METRIC_LLM_OTHER_REASON = "llm.other"
+METRIC_TOOL_OTHER_REASON = "tool.other"
+
+LLM_METRIC_REASONS = frozenset(
+    {
+        "llm.parse_error",
+        "llm.schema_violation",
+        "llm.fixture_missing",
+        "llm.rate_limited",
+        "llm.network_error",
+        "llm.auth_error",
+        "llm.request_error",
+    }
+)
+
+TOOL_METRIC_REASONS = frozenset(
+    {
+        "tool.timeout",
+        "tool.network_error",
+        "tool.invalid_input",
+        "tool.invalid_output",
+        "tool.execution_error",
+        "tool.unknown_tool",
+        "tool.fixture_missing",
+        "tool.max_turns_exhausted",
+        "tool.unrecorded_external_io",
+        "budget.tool_calls_exhausted",
+        "budget.cost_exhausted",
+    }
+)
+
+
+def normalize_metric_model(value: object) -> str:
+    """Return an event model string or the stable metric-only fallback."""
+
+    return value if isinstance(value, str) else METRIC_UNKNOWN_MODEL
+
+
+def normalize_metric_tool(value: object) -> str:
+    """Return an event tool string or the stable metric-only fallback."""
+
+    return value if isinstance(value, str) else METRIC_UNKNOWN_TOOL
+
+
+def normalize_llm_metric_reason(value: object) -> str:
+    """Bound an open LLM event reason to the documented metric labels."""
+
+    if not isinstance(value, str):
+        return METRIC_UNKNOWN_REASON
+    return value if value in LLM_METRIC_REASONS else METRIC_LLM_OTHER_REASON
+
+
+def normalize_tool_metric_reason(value: object) -> str:
+    """Bound an open tool event reason to the documented metric labels."""
+
+    if not isinstance(value, str):
+        return METRIC_UNKNOWN_REASON
+    return value if value in TOOL_METRIC_REASONS else METRIC_TOOL_OTHER_REASON
+
+
 # ---- the protocol --------------------------------------------------------
 
 

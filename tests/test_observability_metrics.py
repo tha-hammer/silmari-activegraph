@@ -6,10 +6,12 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Callable
 
 import pytest
+from pydantic import BaseModel
 
 from activegraph import (
     Event,
@@ -17,16 +19,29 @@ from activegraph import (
     OverflowPolicy,
     Runtime,
     SinkConfig,
+    Tool,
     behavior,
     clear_registry,
+    llm_behavior,
 )
+from activegraph.llm import LLMBehaviorError, LLMResponse, ToolCall
 from activegraph.observability.metrics import (
+    LLM_METRIC_REASONS,
     METRIC_BY_NAME,
     METRIC_NAMES,
+    METRIC_UNKNOWN_MODEL,
+    METRIC_UNKNOWN_REASON,
+    METRIC_UNKNOWN_TOOL,
     Metrics,
     NoOpMetrics,
+    TOOL_METRIC_REASONS,
+    normalize_llm_metric_reason,
+    normalize_metric_model,
+    normalize_metric_tool,
+    normalize_tool_metric_reason,
     validate_cardinality_rule,
 )
+from tests._llm_helpers import Claim, ClaimList, ScriptedProvider
 
 
 class RecordingMetrics:
@@ -144,6 +159,43 @@ class TestStandardMetricTable:
                 assert spec.name.endswith("_usd"), (
                     f"cost histogram {spec.name} should end with _usd."
                 )
+
+    def test_llm_tool_metric_label_normalizers_are_closed(self):
+        assert METRIC_UNKNOWN_MODEL == "unknown_model"
+        assert METRIC_UNKNOWN_TOOL == "unknown_tool"
+        assert METRIC_UNKNOWN_REASON == "unknown_reason"
+        assert LLM_METRIC_REASONS == frozenset(
+            {
+                "llm.parse_error",
+                "llm.schema_violation",
+                "llm.fixture_missing",
+                "llm.rate_limited",
+                "llm.network_error",
+                "llm.auth_error",
+                "llm.request_error",
+            }
+        )
+        assert TOOL_METRIC_REASONS == frozenset(
+            {
+                "tool.timeout",
+                "tool.network_error",
+                "tool.invalid_input",
+                "tool.invalid_output",
+                "tool.execution_error",
+                "tool.unknown_tool",
+                "tool.fixture_missing",
+                "tool.max_turns_exhausted",
+                "tool.unrecorded_external_io",
+                "budget.tool_calls_exhausted",
+                "budget.cost_exhausted",
+            }
+        )
+        assert normalize_metric_model(7) == "unknown_model"
+        assert normalize_metric_tool(None) == "unknown_tool"
+        assert normalize_llm_metric_reason(None) == "unknown_reason"
+        assert normalize_llm_metric_reason("llm.user-controlled") == "llm.other"
+        assert normalize_tool_metric_reason(7) == "unknown_reason"
+        assert normalize_tool_metric_reason("tool.user-controlled") == "tool.other"
 
 
 class TestRuntimeEmitsExpectedMetrics:
@@ -266,6 +318,297 @@ def _check_plain_failure(metrics: RecordingMetrics) -> None:
         "activegraph_behaviors_failed_total",
         {"behavior": "metric_failure", "reason": "exception.ValueError"},
     ) == [1.0]
+
+
+def _metric_llm_behavior(name: str):
+    @llm_behavior(name=name, on=["goal.created"], output_schema=ClaimList)
+    def extract(event, graph, ctx, output):
+        return None
+
+    return extract
+
+
+def _drive_llm_live_success_and_cache(metrics: RecordingMetrics, tmp_path: Path) -> None:
+    extract = _metric_llm_behavior("metric_llm_cache")
+    provider = ScriptedProvider(
+        respond_fn=lambda messages, schema: ClaimList(
+            claims=[Claim(text="cached", confidence=1.0)]
+        ),
+        fixed_cost=Decimal("0.0012"),
+        default_model="metric-model",
+    )
+    runtime = Runtime(
+        Graph(),
+        behaviors=[extract],
+        llm_provider=provider,
+        metrics=metrics,
+        persist_to=str(tmp_path / "llm-metrics.db"),
+    )
+    runtime.run_goal("same prompt")
+    goal = next(event for event in runtime.graph.events if event.type == "goal.created")
+    cached_provider = ScriptedProvider(
+        respond_fn=lambda messages, schema: ClaimList(claims=[]),
+        default_model="metric-model",
+    )
+    fork = runtime.fork(
+        at_event=goal.id,
+        label="metric-cache",
+        llm_provider=cached_provider,
+        replay_llm_cache=True,
+        metrics=metrics,
+    )
+    fork.run_until_idle()
+    assert len(provider.call_log) == 1
+    assert cached_provider.call_log == []
+
+
+def _check_llm_live_success_and_cache(metrics: RecordingMetrics) -> None:
+    tags = {"model": "metric-model"}
+    assert metrics.values("counter", "activegraph_llm_calls_total", tags) == [1.0, 1.0]
+    assert metrics.values("counter", "activegraph_llm_cache_hits_total", tags) == [1.0]
+    assert metrics.values("histogram", "activegraph_llm_tokens_in", tags) == [42.0, 42.0]
+    assert metrics.values("histogram", "activegraph_llm_tokens_out", tags) == [11.0, 11.0]
+    assert metrics.values("histogram", "activegraph_llm_cost_usd", tags) == [0.0012, 0.0]
+
+
+class _FailsOnceProvider:
+    default_model = "metric-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def recognizes_model(self, name: str) -> bool:
+        return True
+
+    def complete(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise LLMBehaviorError(
+                "llm.network_error",
+                "temporary",
+                payload_extras={"retry_after_seconds": 0},
+            )
+        return LLMResponse(
+            raw_text='{"claims": []}',
+            parsed=ClaimList(claims=[]),
+            input_tokens=7,
+            output_tokens=3,
+            cost_usd=Decimal("0.002"),
+            latency_seconds=0.01,
+            model=kwargs["model"],
+            finish_reason="end_turn",
+        )
+
+    def estimate_cost(self, *, input_tokens, output_tokens, model):
+        return Decimal("0.002")
+
+    def count_tokens(self, *, system, messages, model):
+        return 7
+
+
+def _drive_llm_error_retry(metrics: RecordingMetrics, _tmp_path: Path) -> None:
+    extract = _metric_llm_behavior("metric_llm_retry")
+    provider = _FailsOnceProvider()
+    Runtime(
+        Graph(),
+        behaviors=[extract],
+        llm_provider=provider,
+        llm_retry_max_attempts=2,
+        llm_retry_initial_delay_seconds=0,
+        metrics=metrics,
+    ).run_goal("retry")
+    assert provider.calls == 2
+
+
+def _check_llm_error_retry(metrics: RecordingMetrics) -> None:
+    tags = {"model": "metric-model"}
+    assert metrics.values("counter", "activegraph_llm_calls_total", tags) == [1.0, 1.0]
+    assert metrics.values(
+        "counter",
+        "activegraph_llm_failed_total",
+        {"model": "metric-model", "reason": "llm.network_error"},
+    ) == [1.0]
+    assert metrics.values("histogram", "activegraph_llm_tokens_in", tags) == [7.0]
+    assert metrics.values("histogram", "activegraph_llm_tokens_out", tags) == [3.0]
+    assert metrics.values("histogram", "activegraph_llm_cost_usd", tags) == [0.002]
+
+
+class _MetricToolInput(BaseModel):
+    query: str
+
+
+class _MetricToolOutput(BaseModel):
+    answer: str
+
+
+class _ToolLoopProvider:
+    default_model = "metric-model"
+
+    def __init__(self, responses: list[LLMResponse]) -> None:
+        self.responses = list(responses)
+        self.calls = 0
+
+    def recognizes_model(self, name: str) -> bool:
+        return True
+
+    def complete(self, **kwargs):
+        self.calls += 1
+        return self.responses.pop(0)
+
+    def estimate_cost(self, *, input_tokens, output_tokens, model):
+        return Decimal("0")
+
+    def count_tokens(self, *, system, messages, model):
+        return 1
+
+
+def _tool_response(*, tool_calls=None, parsed=None) -> LLMResponse:
+    return LLMResponse(
+        raw_text="",
+        parsed=parsed,
+        input_tokens=2,
+        output_tokens=1,
+        cost_usd=Decimal("0"),
+        latency_seconds=0.01,
+        model="metric-model",
+        finish_reason="tool_use" if tool_calls else "end_turn",
+        tool_calls=tool_calls,
+    )
+
+
+def _metric_tool_behavior(name: str, metric_tool: Tool):
+    @llm_behavior(
+        name=name,
+        on=["goal.created"],
+        output_schema=ClaimList,
+        tools=[metric_tool],
+    )
+    def use_tool(event, graph, ctx, output):
+        return None
+
+    return use_tool
+
+
+def _drive_tool_live_success_and_cache(metrics: RecordingMetrics, tmp_path: Path) -> None:
+    metric_tool = Tool(
+        name="metric_tool",
+        fn=lambda args, ctx: _MetricToolOutput(answer=args.query),
+        input_schema=_MetricToolInput,
+        output_schema=_MetricToolOutput,
+        deterministic=True,
+    )
+    use_tool = _metric_tool_behavior("metric_tool_cache", metric_tool)
+    provider = _ToolLoopProvider(
+        [
+            _tool_response(
+                tool_calls=[
+                    ToolCall(
+                        id="metric-call",
+                        name="metric_tool",
+                        args={"query": "x"},
+                    )
+                ]
+            ),
+            _tool_response(parsed=ClaimList(claims=[])),
+        ]
+    )
+    runtime = Runtime(
+        Graph(),
+        behaviors=[use_tool],
+        tools=[metric_tool],
+        llm_provider=provider,
+        metrics=metrics,
+        persist_to=str(tmp_path / "tool-metrics.db"),
+    )
+    runtime.run_goal("same tool prompt")
+    goal = next(event for event in runtime.graph.events if event.type == "goal.created")
+    cached_provider = _ToolLoopProvider([])
+    fork = runtime.fork(
+        at_event=goal.id,
+        label="metric-tool-cache",
+        llm_provider=cached_provider,
+        replay_llm_cache=True,
+        replay_tool_cache=True,
+        tools=[metric_tool],
+        metrics=metrics,
+    )
+    fork.run_until_idle()
+    assert provider.calls == 2
+    assert cached_provider.calls == 0
+
+
+def _check_tool_live_success_and_cache(metrics: RecordingMetrics) -> None:
+    tags = {"tool": "metric_tool"}
+    assert metrics.values("counter", "activegraph_tools_calls_total", tags) == [1.0, 1.0]
+    assert metrics.values("counter", "activegraph_tools_cache_hits_total", tags) == [1.0]
+    durations = metrics.values("histogram", "activegraph_tools_duration_seconds", tags)
+    assert len(durations) == 2
+    assert durations[0] >= 0.0
+    assert durations[1] == 0.0
+
+
+def _one_tool_call_provider(tool_name: str, args: dict) -> _ToolLoopProvider:
+    return _ToolLoopProvider(
+        [
+            _tool_response(
+                tool_calls=[ToolCall(id="metric-error", name=tool_name, args=args)]
+            )
+        ]
+    )
+
+
+def _drive_tool_invalid_input_and_invoker_error(
+    metrics: RecordingMetrics, _tmp_path: Path
+) -> None:
+    invalid_tool = Tool(
+        name="invalid_metric_tool",
+        fn=lambda args, ctx: _MetricToolOutput(answer=args.query),
+        input_schema=_MetricToolInput,
+        output_schema=_MetricToolOutput,
+    )
+    invalid_behavior = _metric_tool_behavior("metric_tool_invalid", invalid_tool)
+    Runtime(
+        Graph(),
+        behaviors=[invalid_behavior],
+        tools=[invalid_tool],
+        llm_provider=_one_tool_call_provider("invalid_metric_tool", {"wrong": "x"}),
+        metrics=metrics,
+    ).run_goal("invalid")
+
+    def explode(args, ctx):
+        raise RuntimeError("tool exploded")
+
+    failing_tool = Tool(
+        name="failing_metric_tool",
+        fn=explode,
+        input_schema=_MetricToolInput,
+        output_schema=_MetricToolOutput,
+    )
+    failing_behavior = _metric_tool_behavior("metric_tool_invoker", failing_tool)
+    Runtime(
+        Graph(),
+        behaviors=[failing_behavior],
+        tools=[failing_tool],
+        llm_provider=_one_tool_call_provider("failing_metric_tool", {"query": "x"}),
+        metrics=metrics,
+    ).run_goal("failure")
+
+
+def _check_tool_invalid_input_and_invoker_error(metrics: RecordingMetrics) -> None:
+    for tool_name, reason in (
+        ("invalid_metric_tool", "tool.invalid_input"),
+        ("failing_metric_tool", "tool.execution_error"),
+    ):
+        tags = {"tool": tool_name}
+        assert metrics.values("counter", "activegraph_tools_calls_total", tags) == [1.0]
+        assert metrics.values(
+            "counter",
+            "activegraph_tools_failed_total",
+            {"tool": tool_name, "reason": reason},
+        ) == [1.0]
+        assert metrics.values(
+            "histogram", "activegraph_tools_duration_seconds", tags
+        ) == [0.0]
 
 
 class _MetricRecordingSink:
@@ -403,6 +746,44 @@ METRIC_PRODUCTION_CASES = (
         _check_plain_failure,
     ),
     MetricProductionCase(
+        "llm_live_success_and_cache",
+        frozenset(
+            {
+                "activegraph_llm_calls_total",
+                "activegraph_llm_cache_hits_total",
+                "activegraph_llm_tokens_in",
+                "activegraph_llm_tokens_out",
+                "activegraph_llm_cost_usd",
+            }
+        ),
+        _drive_llm_live_success_and_cache,
+        _check_llm_live_success_and_cache,
+    ),
+    MetricProductionCase(
+        "llm_error_retry",
+        frozenset({"activegraph_llm_failed_total"}),
+        _drive_llm_error_retry,
+        _check_llm_error_retry,
+    ),
+    MetricProductionCase(
+        "tool_live_success_and_cache",
+        frozenset(
+            {
+                "activegraph_tools_calls_total",
+                "activegraph_tools_cache_hits_total",
+                "activegraph_tools_duration_seconds",
+            }
+        ),
+        _drive_tool_live_success_and_cache,
+        _check_tool_live_success_and_cache,
+    ),
+    MetricProductionCase(
+        "tool_invalid_input_and_invoker_error",
+        frozenset({"activegraph_tools_failed_total"}),
+        _drive_tool_invalid_input_and_invoker_error,
+        _check_tool_invalid_input_and_invoker_error,
+    ),
+    MetricProductionCase(
         "sink_deliver_drop_error_depth",
         frozenset(
             {
@@ -421,16 +802,6 @@ METRIC_PRODUCTION_CASES = (
 # Removed slice-by-slice as later Phase 2 behaviors add executable cases.
 EXPECTED_METRIC_PRODUCTION_GAPS = frozenset(
     {
-        "activegraph_llm_calls_total",
-        "activegraph_llm_cache_hits_total",
-        "activegraph_llm_failed_total",
-        "activegraph_llm_tokens_in",
-        "activegraph_llm_tokens_out",
-        "activegraph_llm_cost_usd",
-        "activegraph_tools_calls_total",
-        "activegraph_tools_cache_hits_total",
-        "activegraph_tools_failed_total",
-        "activegraph_tools_duration_seconds",
         "activegraph_budget_cost_remaining_usd",
         "activegraph_budget_events_remaining",
         "activegraph_patterns_evaluated_total",
@@ -462,6 +833,151 @@ def test_metric_production_matrix_accounts_for_the_catalog() -> None:
     assert proved | EXPECTED_METRIC_PRODUCTION_GAPS == set(METRIC_BY_NAME), json.dumps(
         catalog_to_cases, sort_keys=True, indent=2
     )
+
+
+def _emit_public_metric_event(graph: Graph, type_: str, payload: dict) -> None:
+    graph.emit(
+        Event(
+            id=graph.ids.event(),
+            type=type_,
+            payload=payload,
+            timestamp=graph.clock.now(),
+        )
+    )
+
+
+def test_public_mapper_uses_each_llm_event_own_model() -> None:
+    """Public mapper robustness pins request/response label ownership."""
+
+    metrics = RecordingMetrics()
+    graph = Graph()
+    Runtime(graph, behaviors=[], metrics=metrics)
+    _emit_public_metric_event(
+        graph,
+        "llm.requested",
+        {"model": "request-model", "cache_hit": False},
+    )
+    _emit_public_metric_event(
+        graph,
+        "llm.responded",
+        {
+            "model": "response-model",
+            "error": None,
+            "input_tokens": 1,
+            "output_tokens": 2,
+            "cost_usd": "0.25",
+            "cache_hit": False,
+        },
+    )
+    assert metrics.values(
+        "counter", "activegraph_llm_calls_total", {"model": "request-model"}
+    ) == [1.0]
+    response_tags = {"model": "response-model"}
+    assert metrics.values("histogram", "activegraph_llm_tokens_in", response_tags) == [
+        1.0
+    ]
+    assert metrics.values(
+        "histogram", "activegraph_llm_tokens_out", response_tags
+    ) == [2.0]
+    assert metrics.values("histogram", "activegraph_llm_cost_usd", response_tags) == [
+        0.25
+    ]
+
+
+def test_public_llm_tool_event_mapper_is_robust_to_malformed_payloads() -> None:
+    """Public Graph.emit robustness, not a provider-production-path proof."""
+
+    metrics = RecordingMetrics()
+    graph = Graph()
+    Runtime(graph, behaviors=[], metrics=metrics)
+    malformed_events = (
+        ("llm.requested", {"cache_hit": 1}),
+        ("tool.requested", {"tool": 7, "cache_hit": "true"}),
+        (
+            "llm.responded",
+            {"error": {"reason": "llm.user-controlled"}, "cost_usd": "0"},
+        ),
+        (
+            "tool.responded",
+            {"error": {}, "latency_seconds": 0, "cache_hit": False},
+        ),
+        ("llm.responded", {"model": "m", "error": "not-a-mapping"}),
+        ("tool.responded", {"tool": "t", "error": ["bad"]}),
+        (
+            "llm.responded",
+            {
+                "model": "bad-numbers",
+                "error": None,
+                "input_tokens": True,
+                "output_tokens": -1,
+                "cost_usd": "NaN",
+            },
+        ),
+        (
+            "llm.responded",
+            {
+                "model": "bad-token-shapes",
+                "error": None,
+                "input_tokens": 1.5,
+                "output_tokens": "2",
+                "cost_usd": -1,
+            },
+        ),
+        (
+            "llm.responded",
+            {
+                "model": "bad-cost-string",
+                "error": None,
+                "cost_usd": "not-a-decimal",
+            },
+        ),
+        (
+            "tool.responded",
+            {
+                "tool": "bad-duration",
+                "error": None,
+                "latency_seconds": float("inf"),
+            },
+        ),
+    )
+    for type_, payload in malformed_events:
+        _emit_public_metric_event(graph, type_, payload)
+
+    assert metrics.values(
+        "counter", "activegraph_llm_calls_total", {"model": "unknown_model"}
+    ) == [1.0]
+    assert metrics.values(
+        "counter", "activegraph_tools_calls_total", {"tool": "unknown_tool"}
+    ) == [1.0]
+    assert metrics.values("counter", "activegraph_llm_cache_hits_total") == []
+    assert metrics.values("counter", "activegraph_tools_cache_hits_total") == []
+    assert metrics.values(
+        "counter",
+        "activegraph_llm_failed_total",
+        {"model": "unknown_model", "reason": "llm.other"},
+    ) == [1.0]
+    assert metrics.values(
+        "counter",
+        "activegraph_tools_failed_total",
+        {"tool": "unknown_tool", "reason": "unknown_reason"},
+    ) == [1.0]
+    assert metrics.values("histogram", "activegraph_llm_tokens_in") == []
+    assert metrics.values("histogram", "activegraph_llm_tokens_out") == []
+    assert metrics.values("histogram", "activegraph_llm_cost_usd") == []
+    assert metrics.values(
+        "histogram",
+        "activegraph_tools_duration_seconds",
+        {"tool": "unknown_tool"},
+    ) == [0.0]
+    assert metrics.values(
+        "histogram",
+        "activegraph_tools_duration_seconds",
+        {"tool": "bad-duration"},
+    ) == []
+    assert len(metrics.values("counter", "activegraph_events_emitted_total")) == len(
+        malformed_events
+    )
+    metrics.assert_standard_observations_match_catalog()
 
 
 class TestPrometheusMetricsOptional:
