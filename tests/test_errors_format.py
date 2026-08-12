@@ -1112,8 +1112,9 @@ def test_incompatible_runtime_state_fork_snapshot() -> None:
             "native primitives (SQLite uses a direct SQL copy under a "
             "single transaction). Postgres has a different transactional "
             "shape and an in-memory store has no copy primitive at all. "
-            "v0.8 deliberately scoped the fork command to SQLite first — "
-            "the limitation is documented in CONTRACT v0.8 #5."
+            "Runtime.fork() remains scoped to SQLite under CONTRACT v0.5 "
+            "#9; its durable atomicity is clarified by the 2026-08-12 "
+            "Set 4 amendment #2."
         ),
         how_to_fix=(
             "Migrate the run to a SQLite store first, then fork:\n"

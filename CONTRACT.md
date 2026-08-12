@@ -8577,3 +8577,20 @@ name (`memory`, `sqlite`, or `postgres`). The rejected append leaves the
 existing backend-native event and event count unchanged. Reusing the same
 event id in a distinct run remains legal. Encoding failures and all other
 driver/database failures retain their existing exception types.
+
+## 2026-08-12 Set 4 amendment #2 — durable fork atomicity
+
+This amendment extends v0.5 #9/#11/#12 and the v1.5 compaction-horizon
+rules. Absent concurrent mutation of the parent, a successful durable
+`fork_run` makes destination run metadata and the complete ordered event
+prefix through `at_event_id` visible together. On any failure, destination
+metadata and events are restored to their backend-native pre-call observable
+snapshot, and the parent is observably unchanged from its backend-native
+pre-call snapshot.
+
+SQLite enforces the stable-parent premise with `BEGIN IMMEDIATE`. The existing
+Postgres implementation uses separate cut and copy statements under READ
+COMMITTED without locking the parent; therefore this amendment does not promise
+a stable Postgres prefix during concurrent parent mutation. Shared conformance
+tests intentionally exclude concurrent parent mutation. This fork guarantee is
+distinct from v0.8 #5, which governs migration transactionality only.
