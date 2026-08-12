@@ -18,13 +18,7 @@ from typing import Any, Optional, cast
 
 from activegraph.core.event import Event
 from activegraph.core.graph import Graph, Object, Relation
-
-
-_LIFECYCLE_PREFIXES = ("behavior.", "relation_behavior.", "runtime.")
-
-
-def _is_lifecycle(e: Event) -> bool:
-    return any(e.type.startswith(p) for p in _LIFECYCLE_PREFIXES)
+from activegraph.runtime.event_policy import classify_event_type
 
 
 @dataclass
@@ -106,8 +100,12 @@ class Diff:
 
 
 def compute_diff(parent: Graph, fork: Graph, parent_run_id: str, fork_run_id: str) -> Diff:
-    parent_events = [e for e in parent.events if not _is_lifecycle(e)]
-    fork_events = [e for e in fork.events if not _is_lifecycle(e)]
+    parent_events = [
+        e for e in parent.events if classify_event_type(e.type).included_in_diff
+    ]
+    fork_events = [
+        e for e in fork.events if classify_event_type(e.type).included_in_diff
+    ]
 
     # Shared prefix: events that match by id, type AND payload. Same id with
     # different content means the fork already diverged (logical ids are

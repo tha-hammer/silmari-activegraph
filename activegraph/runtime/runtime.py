@@ -99,6 +99,7 @@ from activegraph.runtime.context_reads import (
     context_read_payload,
 )
 from activegraph.runtime.diff import Diff, compute_diff
+from activegraph.runtime.event_policy import classify_event_type
 from activegraph.runtime.dev_override import (
     DevOverride,
     authority_allows,
@@ -869,36 +870,9 @@ class Runtime:
         # BEFORE this flag is raised, so it alone is queue-visible.
         if self._promote_quiescent:
             return
-        # Don't enqueue our own lifecycle events for re-matching.
-        # v0.7 adds `llm.*`, `tool.*`, `pattern.*`, `behavior.scheduled`
-        # to the suppression list — they're internal to the runtime's
-        # bookkeeping. (User behaviors that want to audit LLM/tool
-        # activity can still subscribe via the registry's lookup.)
-        if (
-            event.type.startswith("behavior.")
-            or event.type.startswith("relation_behavior.")
-            or event.type.startswith("runtime.")
-            or event.type.startswith("llm.")
-            or event.type.startswith("tool.")
-            or event.type.startswith("pattern.")
-            # v0.9: approval bookkeeping is internal; CONTRACT v0.9 #13
-            # deliberately keeps `pack.loaded` queue-visible so pack-aware
-            # behaviors can subscribe, but `approval.*` is suppressed.
-            or event.type.startswith("approval.")
-            # v1.8 R3: an override is a trace marker/receipt, not behavior
-            # scheduling input or an ambient developer-mode switch.
-            or event.type.startswith("dev.")
-            # v1.9: authority ceiling changes and decisions are runtime
-            # bookkeeping — they persist, project, export, and replay,
-            # but never schedule behaviors (CONTRACT v1.9 #3).
-            or event.type.startswith("authority.")
-            # v1.10 #1: the batched read-trace marker is runtime
-            # bookkeeping like behavior.* — it persists, projects (as a
-            # no-op), exports through sinks, and replays, but never
-            # schedules behaviors or advances the tick. Exact match, not
-            # a `context.` prefix claim: only this one type is reserved.
-            or event.type == "context.read"
-        ):
+        # Runtime bookkeeping persists, projects, exports, and may remain
+        # replay/diff history, but it never enters behavior scheduling.
+        if not classify_event_type(event.type).schedules_behaviors:
             return
         self._queue.push(event)
         self._max_queue_depth_observed = max(
@@ -4127,7 +4101,9 @@ def _open_sqlite_store(path_or_url: str, run_id: str) -> Any:
 def _requeue_unfired(rt: "Runtime", events: list[Event]) -> None:
     """Push events that haven't yet triggered any behavior back into the queue.
 
-    See CONTRACT v0.5 diff #8 in CONTRACT.md for the rationale.
+    See CONTRACT v0.5 diff #8 and its event-policy amendment in CONTRACT.md
+    for the rationale. Resume considers only event types that could have been
+    scheduled live; it never manufactures queued runtime bookkeeping.
 
     INVARIANT: under the single-threaded, run-to-completion loop
     (CONTRACT #10), an event has either been popped — in which case ALL
@@ -4184,7 +4160,7 @@ def _requeue_unfired(rt: "Runtime", events: list[Event]) -> None:
             if eid:
                 fired_on.add(eid)
     for e in suffix:
-        if _is_lifecycle(e):
+        if not classify_event_type(e.type).schedules_behaviors:
             continue
         if e.id in fired_on:
             continue
@@ -4245,7 +4221,7 @@ def _verify_replay(
         e
         for e in recorded_events
         if e.caused_by is None
-        and not _is_lifecycle(e)
+        and classify_event_type(e.type).included_in_strict_replay
         and not e.type.startswith("embedding.")
         and not _is_promote_block(e)
     ]
@@ -4361,7 +4337,10 @@ def _verify_replay(
             )
             fresh.emit(replay_ev)
             continue
-        if not _is_lifecycle(e) and e.caused_by is not None:
+        if (
+            classify_event_type(e.type).included_in_strict_replay
+            and e.caused_by is not None
+        ):
             derivation_pending = True
     fresh_rt.run_until_idle()
 
@@ -4370,7 +4349,7 @@ def _verify_replay(
     rec_stream = [
         (e.id, e.type)
         for e in recorded_events
-        if not _is_lifecycle(e)
+        if classify_event_type(e.type).included_in_strict_replay
         and e.id not in non_replayable_llm_ids
         and e.id not in direct_embedding_ids
         and not _is_promote_block(e)
@@ -4378,7 +4357,7 @@ def _verify_replay(
     new_stream = [
         (e.id, e.type)
         for e in fresh.events
-        if not _is_lifecycle(e)
+        if classify_event_type(e.type).included_in_strict_replay
         and not _is_promote_block(e)
     ]
     for i, (rec, new) in enumerate(zip(rec_stream, new_stream)):
@@ -4498,18 +4477,6 @@ def _validate_embedding_vectors(
             normalized_vector.append(number)
         normalized.append(normalized_vector)
     return normalized
-
-
-def _is_lifecycle(e: Event) -> bool:
-    return (
-        e.type.startswith("behavior.")
-        or e.type.startswith("relation_behavior.")
-        or e.type.startswith("runtime.")
-        # v1.10 #1: context.read is per-execution bookkeeping. Strict
-        # replay excludes it from the compared streams so a verify pass
-        # (which runs with tracing off) never diverges on trace markers.
-        or e.type == "context.read"
-    )
 
 
 def _materialize_snapshot(graph: Graph, store: Any, snapshot_event: Event) -> None:

@@ -81,8 +81,12 @@ families:
   post-fork execution resumes.
 
 Custom event types from user code live alongside these and follow
-the same shape. Behaviors subscribe to either set with the same
-`on=` argument.
+the same shape. Behaviors subscribe with `on=`, but runtime bookkeeping
+families (`behavior.*`, `relation_behavior.*`, `runtime.*`, `llm.*`,
+`tool.*`, `pattern.*`, `approval.*`, `embedding.*`, `dev.*`,
+`authority.*`, and exact `context.read`) persist without entering live
+behavior scheduling. Other framework events, including `goal.created`,
+`object.created`, and `pack.loaded`, remain subscription inputs.
 
 ## Append-only and what that means
 

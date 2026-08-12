@@ -8563,3 +8563,37 @@ Tested against `claude-agent-sdk==0.2.135` and `claude` CLI `2.1.227`
 exactly — `_load_sdk_bindings()` checks the installed SDK version at
 call time and refuses (terminal `llm.request_error`) to run against
 any other.
+
+## v1.11 #2. Event types have purpose-specific runtime policy
+
+Event classification has four independent decisions owned by
+`activegraph.runtime.event_policy`: whether a type may schedule behaviors,
+whether it may trigger a pattern-only behavior, whether it is included in a
+structural diff, and whether it is included in strict replay comparison.
+These decisions MUST NOT be collapsed into a single "lifecycle" predicate.
+
+`behavior.*`, `relation_behavior.*`, `runtime.*`, `llm.*`, `tool.*`,
+`pattern.*`, `approval.*`, `embedding.*`, `dev.*`, and `authority.*` never
+schedule behaviors and never trigger pattern-only behaviors. Exact
+`context.read` has the same scheduling rule; this is not a `context.*`
+reservation. Diff continues to exclude only the three structural families
+(`behavior.*`, `relation_behavior.*`, and `runtime.*`). Strict replay excludes
+those three families plus exact `context.read`; it retains LLM, tool, pattern,
+approval, behavior-derived embedding, developer-override, and authority
+history. Direct operator embedding pairs retain their separate replay carveout.
+
+This amendment narrows and supersedes v0.5 #8 and its v0.6 #18 fork extension:
+load/fork recovery may requeue only post-drain suffix events whose types are
+eligible for live behavior scheduling. The last `runtime.idle` remains the
+drain high-water mark; the `behavior.started` fired-on check,
+`runtime.budget_exhausted` recovery, and `actor="promote:*"` exclusion remain
+unchanged.
+
+Treating `embedding.*` as non-scheduling bookkeeping is a new compatibility
+decision. v1.8 #6 established runtime ownership, caching, and the distinction
+between direct and behavior-derived embedding replay, but did not previously
+guarantee that embedding events could not schedule a subscriber or advance the
+queue tick. This amendment adds that guarantee. It also supersedes v0.6 #1's
+historical statement that `llm.*` events flow through the behavior queue:
+current v0.7-and-later LLM and tool bookkeeping suppression remains the
+authoritative live-dispatch behavior.

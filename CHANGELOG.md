@@ -44,6 +44,15 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
   `AnthropicProvider` now also sources from (additive, behavior-
   preserving — its own test suite is unmodified).
 
+### Changed
+
+- Runtime event scheduling now uses one purpose-specific event policy across
+  live dispatch, pattern-only matching, resume, diff, and strict replay.
+  `embedding.*` request/response records are newly treated like LLM/tool
+  bookkeeping: they persist and remain meaningful replay/diff history, but no
+  longer schedule subscribers or advance the behavior queue tick. Resume also
+  no longer requeues bookkeeping events that live dispatch would suppress.
+
 ## [1.10.0] — 2026-07-12
 
 Runtime legibility and cooperative-host round (CONTRACT v1.10 #1–#3): the behavior-frame

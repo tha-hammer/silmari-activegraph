@@ -19,6 +19,7 @@ from typing import Any, Iterable, Union
 from activegraph.behaviors.base import Behavior, RelationBehavior
 from activegraph.core.event import Event
 from activegraph.core.graph import Graph, Relation, evaluate_where
+from activegraph.runtime.event_policy import classify_event_type
 
 
 BehaviorLike = Union[Behavior, RelationBehavior]
@@ -52,7 +53,10 @@ class Registry:
                 continue
             # Suppress lifecycle events for pattern-only behaviors so a
             # pattern doesn't fire on behavior.started, etc.
-            if not b.on and _is_lifecycle(event):
+            if (
+                not b.on
+                and not classify_event_type(event.type).triggers_pattern_only
+            ):
                 continue
             pattern_matches: list[Any] = []
             if b.pattern_matcher is not None:
@@ -68,19 +72,6 @@ class Registry:
                     continue
                 out.append((b, [], pattern_matches))
         return out
-
-
-def _is_lifecycle(event: Event) -> bool:
-    return (
-        event.type.startswith("behavior.")
-        or event.type.startswith("relation_behavior.")
-        or event.type.startswith("runtime.")
-        or event.type.startswith("llm.")
-        or event.type.startswith("tool.")
-        or event.type.startswith("embedding.")
-        or event.type.startswith("dev.")
-    )
-
 
 def _matching_relations(
     rb: RelationBehavior, event: Event, graph: Graph
