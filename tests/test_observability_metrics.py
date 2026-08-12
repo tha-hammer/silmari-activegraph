@@ -15,8 +15,11 @@ from pydantic import BaseModel
 
 from activegraph import (
     Event,
+    FrozenClock,
     Graph,
+    InvalidRuntimeConfiguration,
     OverflowPolicy,
+    ReplayDivergenceError,
     Runtime,
     SinkConfig,
     Tool,
@@ -25,7 +28,12 @@ from activegraph import (
     llm_behavior,
     relation_behavior,
 )
-from activegraph.llm import LLMBehaviorError, LLMResponse, ToolCall
+from activegraph.llm import (
+    ClaudeCodeProvider,
+    LLMBehaviorError,
+    LLMResponse,
+    ToolCall,
+)
 from activegraph.observability.metrics import (
     LLM_METRIC_REASONS,
     METRIC_BY_NAME,
@@ -289,7 +297,201 @@ class TestRuntimeEmitsExpectedMetrics:
         g = Graph()
         rt = Runtime(g, metrics=m)
         rt.run_goal("x")
-        assert any(n == "activegraph_queue_depth" for n, _, _ in m.gauges)
+        values = m.values("gauge", "activegraph_queue_depth")
+        assert values
+        assert values[-1] == float(rt.status().queue_depth) == 0.0
+
+
+def test_finite_budget_direct_constructor_and_external_mutation_staleness() -> None:
+    metrics = RecordingMetrics()
+    runtime = Runtime(
+        Graph(run_id="run_finite_direct"),
+        behaviors=[],
+        budget={"max_events": 3, "max_cost_usd": "1.25"},
+        metrics=metrics,
+    )
+
+    event_tags = {"run_id": "run_finite_direct"}
+    assert metrics.values(
+        "gauge", "activegraph_budget_events_remaining", event_tags
+    ) == [3.0]
+    assert metrics.values(
+        "gauge", "activegraph_budget_cost_remaining_usd", event_tags
+    ) == [1.25]
+
+    runtime.budget.consume("max_events")
+    runtime.budget.add_cost(Decimal("0.25"))
+    assert runtime.budget.used["max_events"] == 1.0
+    assert runtime.budget.cost_used == Decimal("0.25")
+    assert metrics.values(
+        "gauge", "activegraph_budget_events_remaining", event_tags
+    ) == [3.0]
+    assert metrics.values(
+        "gauge", "activegraph_budget_cost_remaining_usd", event_tags
+    ) == [1.25]
+
+
+def test_load_activates_metrics_after_recovery_and_tracks_only_continuation(
+    tmp_path: Path,
+) -> None:
+    @behavior(name="metric_recovery_chain", on=["object.created"])
+    def chain(event, graph, ctx):
+        data = event.payload["object"]["data"]
+        if data["ordinal"] == 0:
+            graph.add_object("metric_unit", {"ordinal": 1})
+
+    path = str(tmp_path / "metric-recovery.db")
+    original = Runtime(
+        Graph(run_id="run_metric_recovery", clock=FrozenClock()),
+        behaviors=[chain],
+        persist_to=path,
+    )
+    original.graph.add_object("metric_unit", {"ordinal": 0})
+    original.run_quantum(max_queue_events=1)
+    original.graph.store.close()
+
+    metrics = RecordingMetrics()
+    loaded = Runtime.load(
+        path,
+        run_id="run_metric_recovery",
+        behaviors=[chain],
+        budget={"max_events": 5, "max_cost_usd": "2.00"},
+        metrics=metrics,
+        sinks=[SinkConfig(_MetricRecordingSink(), name="metric_recovered")],
+    )
+    try:
+        tags = {"run_id": "run_metric_recovery"}
+        assert loaded.status().queue_depth == 1
+        assert metrics.values("gauge", "activegraph_queue_depth") == [1.0]
+        assert metrics.values(
+            "gauge", "activegraph_budget_events_remaining", tags
+        ) == [5.0]
+        assert metrics.values(
+            "gauge", "activegraph_budget_cost_remaining_usd", tags
+        ) == [2.0]
+        assert metrics.values("counter", "activegraph_events_emitted_total") == []
+
+        loaded.run_until_idle()
+        assert loaded.flush_sinks(timeout=2.0)
+        assert loaded.status().queue_depth == 0
+        assert metrics.values("gauge", "activegraph_queue_depth")[-1] == 0.0
+        assert metrics.values(
+            "gauge", "activegraph_budget_events_remaining", tags
+        )[-1] == 4.0
+        assert metrics.values(
+            "counter",
+            "activegraph_sink_events_delivered_total",
+            {"sink": "metric_recovered"},
+        )
+    finally:
+        loaded.close_sinks(timeout=2.0)
+        loaded.graph.store.close()
+
+
+def test_unlimited_fork_reports_recovered_queue_without_budget_gauges(
+    tmp_path: Path,
+) -> None:
+    path = str(tmp_path / "metric-fork.db")
+    parent = Runtime(
+        Graph(run_id="run_metric_fork_parent", clock=FrozenClock()),
+        behaviors=[],
+        persist_to=path,
+    )
+    parent.graph.add_object("metric_seed", {})
+    at_event = parent.graph.events[-1].id
+    metrics = RecordingMetrics()
+    fork = parent.fork(at_event=at_event, behaviors=[], metrics=metrics)
+    try:
+        assert fork.status().queue_depth == 1
+        assert metrics.values("gauge", "activegraph_queue_depth") == [1.0]
+        assert metrics.values("gauge", "activegraph_budget_events_remaining") == []
+        assert metrics.values("gauge", "activegraph_budget_cost_remaining_usd") == []
+        assert metrics.values("counter", "activegraph_events_emitted_total") == []
+        fork.run_until_idle()
+        assert fork.status().queue_depth == 0
+        assert metrics.values("gauge", "activegraph_queue_depth")[-1] == 0.0
+    finally:
+        fork.graph.store.close()
+        parent.graph.store.close()
+
+
+def test_constructor_capability_failure_emits_no_gauges_and_leaves_no_listener() -> None:
+    @llm_behavior(
+        name="metric_capability_failure",
+        on=["goal.created"],
+        output_schema=ClaimList,
+    )
+    def extract(event, graph, ctx, output):
+        return None
+
+    metrics = RecordingMetrics()
+    graph = Graph(run_id="run_metric_invalid")
+    with pytest.raises(InvalidRuntimeConfiguration):
+        Runtime(
+            graph,
+            behaviors=[extract],
+            llm_provider=ClaudeCodeProvider(
+                allow_unenforced_generation_controls=True
+            ),
+            budget={"max_events": 2, "max_cost_usd": "1.00"},
+            metrics=metrics,
+        )
+    graph.add_object("after_failure", {})
+    assert metrics.gauges == []
+    assert metrics.counters == []
+
+
+def test_strict_load_failure_emits_no_queue_or_budget_ghost_gauges(
+    tmp_path: Path,
+) -> None:
+    toggle = {"first": True}
+
+    @behavior(name="metric_strict_divergence", on=["goal.created"])
+    def diverge(event, graph, ctx):
+        graph.add_object("metric_a" if toggle["first"] else "metric_b", {})
+        if toggle["first"]:
+            graph.add_object("metric_a", {})
+
+    path = str(tmp_path / "metric-strict.db")
+    original = Runtime(
+        Graph(run_id="run_metric_strict", clock=FrozenClock()),
+        behaviors=[diverge],
+        persist_to=path,
+    )
+    original.run_goal("strict")
+    original.graph.store.close()
+    toggle["first"] = False
+
+    metrics = RecordingMetrics()
+    with pytest.raises(ReplayDivergenceError):
+        Runtime.load(
+            path,
+            run_id="run_metric_strict",
+            behaviors=[diverge],
+            replay_strict=True,
+            budget={"max_events": 2, "max_cost_usd": "1.00"},
+            metrics=metrics,
+        )
+    assert metrics.values("gauge", "activegraph_queue_depth") == []
+    assert metrics.values("gauge", "activegraph_budget_events_remaining") == []
+    assert metrics.values("gauge", "activegraph_budget_cost_remaining_usd") == []
+
+
+def test_shared_backend_queue_gauge_is_last_writer_not_aggregate() -> None:
+    metrics = RecordingMetrics()
+    first_graph = Graph(run_id="run_metric_first")
+    second_graph = Graph(run_id="run_metric_second")
+    first = Runtime(first_graph, behaviors=[], metrics=metrics)
+    second = Runtime(second_graph, behaviors=[], metrics=metrics)
+
+    first_graph.add_object("metric", {"runtime": 1})
+    second_graph.add_object("metric", {"runtime": 2, "n": 1})
+    second_graph.add_object("metric", {"runtime": 2, "n": 2})
+    first.run_quantum(max_queue_events=1)
+
+    assert first.status().queue_depth == 0
+    assert second.status().queue_depth == 2
+    assert metrics.values("gauge", "activegraph_queue_depth")[-1] == 0.0
 
 
 def test_llm_handler_behavior_metrics_cover_success_and_failure() -> None:
@@ -435,6 +637,32 @@ def _check_runtime_plain_queue_success(metrics: RecordingMetrics) -> None:
     )
     assert len(durations) == 1 and durations[0] >= 0
     assert metrics.values("gauge", "activegraph_queue_depth")
+
+
+def _drive_finite_budget_metrics(metrics: RecordingMetrics, _tmp_path: Path) -> None:
+    extract = _metric_llm_behavior("metric_finite_budget")
+    provider = ScriptedProvider(
+        respond_fn=lambda messages, schema: ClaimList(claims=[]),
+        fixed_cost=Decimal("0.0012"),
+        default_model="metric-model",
+    )
+    Runtime(
+        Graph(run_id="run_metric_budget"),
+        behaviors=[extract],
+        llm_provider=provider,
+        budget={"max_events": 2, "max_cost_usd": "0.01"},
+        metrics=metrics,
+    ).run_goal("metrics")
+
+
+def _check_finite_budget_metrics(metrics: RecordingMetrics) -> None:
+    tags = {"run_id": "run_metric_budget"}
+    assert metrics.values(
+        "gauge", "activegraph_budget_events_remaining", tags
+    ) == [2.0, 1.0]
+    assert metrics.values(
+        "gauge", "activegraph_budget_cost_remaining_usd", tags
+    ) == pytest.approx([0.01, 0.0088])
 
 
 def _drive_plain_failure(metrics: RecordingMetrics, _tmp_path: Path) -> None:
@@ -907,6 +1135,17 @@ METRIC_PRODUCTION_CASES = (
         _check_runtime_plain_queue_success,
     ),
     MetricProductionCase(
+        "finite_budget",
+        frozenset(
+            {
+                "activegraph_budget_events_remaining",
+                "activegraph_budget_cost_remaining_usd",
+            }
+        ),
+        _drive_finite_budget_metrics,
+        _check_finite_budget_metrics,
+    ),
+    MetricProductionCase(
         "plain_failure",
         frozenset({"activegraph_behaviors_failed_total"}),
         _drive_plain_failure,
@@ -980,8 +1219,6 @@ METRIC_PRODUCTION_CASES = (
 # Removed slice-by-slice as later Phase 2 behaviors add executable cases.
 EXPECTED_METRIC_PRODUCTION_GAPS = frozenset(
     {
-        "activegraph_budget_cost_remaining_usd",
-        "activegraph_budget_events_remaining",
         "activegraph_replay_divergence_detected_total",
     }
 )

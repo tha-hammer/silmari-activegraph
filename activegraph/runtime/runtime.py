@@ -507,9 +507,13 @@ class Runtime:
         if self.frame is not None and self.frame.id is None:
             self.frame.id = graph.ids.frame()
 
-        # v0.8: observability — metrics defaults to NoOp so the runtime
-        # is fully functional without any metrics backend configured.
-        self.metrics: Metrics = metrics if metrics is not None else NoOpMetrics()
+        # Keep the requested backend dormant until every constructor
+        # validation succeeds. Load/fork also rely on this seam so replay and
+        # queue recovery cannot publish history as fresh observations.
+        requested_metrics: Metrics = (
+            metrics if metrics is not None else NoOpMetrics()
+        )
+        self.metrics: Metrics = NoOpMetrics()
         self._log = get_logger("activegraph.runtime")
 
         self._queue = EventQueue()
@@ -522,7 +526,6 @@ class Runtime:
         # Stash for tool result message between _invoke_tool and the
         # turn-loop caller. Always cleared after consumption.
         self._last_tool_result_message: Optional[LLMMessage] = None
-        graph.add_listener(self._on_event)
         self._idle_emitted = False
 
         # ---- v0.5: persistence wiring ----
@@ -596,12 +599,16 @@ class Runtime:
             _resolve_and_validate_llm_capabilities(source, self.llm_provider, self.budget)
         from activegraph.runtime._live import track_runtime
 
+        graph.add_listener(self._on_event)
+        self.metrics = requested_metrics
         try:
             self._attach_sink_configs(initial_sink_configs)
+            track_runtime(self)
+            self._record_initial_metric_snapshot()
         except Exception:
             graph._remove_listener(self._on_event)  # noqa: SLF001
+            self.metrics = NoOpMetrics()
             raise
-        track_runtime(self)
 
     def _attach_sink_configs(self, configs: Iterable[SinkConfig]) -> None:
         """Attach prevalidated configs atomically from the caller's view."""
@@ -621,6 +628,48 @@ class Runtime:
             for attached_sink in attached_sinks:
                 self.graph.remove_sink(attached_sink, timeout=1.0)
             raise
+
+    def _record_queue_depth(self) -> None:
+        """Publish this runtime's current queue depth (last-writer gauge)."""
+
+        depth = len(self._queue)
+        self._max_queue_depth_observed = max(self._max_queue_depth_observed, depth)
+        self.metrics.gauge("activegraph_queue_depth", {}, float(depth))
+
+    def _record_budget_events_remaining(self) -> None:
+        limit = self.budget.limits["max_events"]
+        if math.isfinite(limit):
+            remaining = max(0.0, limit - self.budget.used["max_events"])
+            self.metrics.gauge(
+                "activegraph_budget_events_remaining",
+                {"run_id": self.run_id},
+                float(remaining),
+            )
+
+    def _record_budget_cost_remaining(self) -> None:
+        if self.budget.cost_limit is not None:
+            remaining = max(
+                Decimal("0"), self.budget.cost_limit - self.budget.cost_used
+            )
+            self.metrics.gauge(
+                "activegraph_budget_cost_remaining_usd",
+                {"run_id": self.run_id},
+                float(remaining),
+            )
+
+    def _record_initial_metric_snapshot(self) -> None:
+        self._record_queue_depth()
+        self._record_budget_events_remaining()
+        self._record_budget_cost_remaining()
+
+    def _consume_budget(self, key: str, amount: float = 1.0) -> None:
+        self.budget.consume(key, amount)
+        if key == "max_events":
+            self._record_budget_events_remaining()
+
+    def _add_budget_cost(self, amount: Decimal) -> None:
+        self.budget.add_cost(amount)
+        self._record_budget_cost_remaining()
 
     # ---------- public surface ----------
 
@@ -956,12 +1005,7 @@ class Runtime:
         ):
             return
         self._queue.push(event)
-        self._max_queue_depth_observed = max(
-            self._max_queue_depth_observed, len(self._queue)
-        )
-        self.metrics.gauge(
-            "activegraph_queue_depth", {}, float(len(self._queue))
-        )
+        self._record_queue_depth()
         # New activity → we're not idle anymore.
         self._idle_emitted = False
         # INFO: one log line per enqueued event. High-volume; operators
@@ -1437,7 +1481,8 @@ class Runtime:
             if self._queue:
                 event = self._queue.pop()
                 assert event is not None
-                self.budget.consume("max_events")
+                self._record_queue_depth()
+                self._consume_budget("max_events")
                 self._tick += 1
                 matches = cast(Registry, self.registry).match(event, self.graph)
                 for b, rels, p_matches in matches:
@@ -1553,7 +1598,7 @@ class Runtime:
     # ---------- invocation ----------
 
     def _invoke(self, b: Behavior, event: Event, matches: Optional[list[Any]] = None) -> None:
-        self.budget.consume("max_behavior_calls")
+        self._consume_budget("max_behavior_calls")
         # v1.10 #1: one recorder per execution when tracing is on; None
         # keeps the wrapper and view byte-identical to pre-v1.10.
         recorder = ReadRecorder() if self.trace_context_reads else None
@@ -1664,8 +1709,8 @@ class Runtime:
           behavior.completed
         """
 
-        self.budget.consume("max_behavior_calls")
-        self.budget.consume("max_llm_calls")
+        self._consume_budget("max_behavior_calls")
+        self._consume_budget("max_llm_calls")
         self.metrics.counter(
             "activegraph_behaviors_invoked_total", {"behavior": b.name}
         )
@@ -2059,7 +2104,7 @@ class Runtime:
                     self._llm_cache.record(
                         turn_hash, turn_response, requesting_event_id=requested_evt.id
                     )
-                self.budget.add_cost(turn_response.cost_usd)
+                self._add_budget_cost(turn_response.cost_usd)
                 break
 
             if turn_response is None:
@@ -2284,7 +2329,7 @@ class Runtime:
         import logging
         import uuid
 
-        self.budget.consume("max_tool_calls")
+        self._consume_budget("max_tool_calls")
         args_hash = hash_tool_call(tool_name=tool.name, args=call.args)
 
         # Validate input
@@ -2412,7 +2457,7 @@ class Runtime:
             self._tool_cache.record(
                 args_hash, tool_response, requesting_event_id=req_evt.id
             )
-            self.budget.add_cost(tool_response.cost_usd)
+            self._add_budget_cost(tool_response.cost_usd)
 
         # Validate output (if schema)
         validated_output = tool_response.output
@@ -2691,7 +2736,7 @@ class Runtime:
         event: Event,
         matches: Optional[list[Any]] = None,
     ) -> None:
-        self.budget.consume("max_behavior_calls")
+        self._consume_budget("max_behavior_calls")
         self.metrics.counter(
             "activegraph_behaviors_invoked_total", {"behavior": b.name}
         )
@@ -3488,6 +3533,9 @@ class Runtime:
         Recorded ``context.read`` events replay like any other event
         either way, and strict replay never diverges on them.
         """
+        requested_metrics: Metrics = (
+            metrics if metrics is not None else NoOpMetrics()
+        )
         sink_configs = _normalize_sink_configs(sinks)
         chosen = run_id or _most_recent_run_id(path)
         if chosen is None:
@@ -3536,7 +3584,7 @@ class Runtime:
             replay_tool_cache=replay_tool_cache,
             tool_cache=tcache,
             replay_reinvoke_deterministic=replay_reinvoke_deterministic,
-            metrics=metrics,
+            metrics=NoOpMetrics(),
             sinks=None,
             native_structured_output=native_structured_output,
             embedding_provider=embedding_provider,
@@ -3575,7 +3623,14 @@ class Runtime:
                 native_structured_output=native_structured_output,
             )
 
-        rt._attach_sink_configs(sink_configs)
+        rt.metrics = requested_metrics
+        try:
+            rt._attach_sink_configs(sink_configs)
+            rt._record_initial_metric_snapshot()
+        except Exception:
+            graph._remove_listener(rt._on_event)  # noqa: SLF001
+            rt.metrics = NoOpMetrics()
+            raise
         return rt
 
     def fork(
@@ -3613,6 +3668,9 @@ class Runtime:
         an external graph database. The fork's event log remains the source
         of truth — this only changes where the projection is materialized.
         """
+        requested_metrics: Metrics = (
+            metrics if metrics is not None else NoOpMetrics()
+        )
         sink_configs = _normalize_sink_configs(sinks)
         from activegraph.store.sqlite import SQLiteEventStore
 
@@ -3737,7 +3795,7 @@ class Runtime:
             replay_tool_cache=replay_tool_cache,
             tool_cache=tcache,
             replay_reinvoke_deterministic=replay_reinvoke_deterministic,
-            metrics=metrics,
+            metrics=NoOpMetrics(),
             sinks=None,
             # CONTRACT v1.3 #1: forks inherit the parent's mode posture
             # so pre-populated caches stay reachable.
@@ -3765,7 +3823,14 @@ class Runtime:
         # v1.4: the fork inherits approvals still pending at the fork
         # point, rebuilt from its copied log.
         _rebuild_pending_approvals(rt, events)
-        rt._attach_sink_configs(sink_configs)
+        rt.metrics = requested_metrics
+        try:
+            rt._attach_sink_configs(sink_configs)
+            rt._record_initial_metric_snapshot()
+        except Exception:
+            fork_graph._remove_listener(rt._on_event)  # noqa: SLF001
+            rt.metrics = NoOpMetrics()
+            raise
         return rt
 
     def diff(self, other: "Runtime") -> Diff:
@@ -4362,6 +4427,7 @@ def _requeue_unfired(rt: "Runtime", events: list[Event]) -> None:
             drain_idx = i
     suffix = events[drain_idx + 1:]
     if not suffix:
+        rt._record_queue_depth()  # noqa: SLF001 — recovery bookkeeping
         return
     fired_on: set[str] = set()
     for e in suffix:
@@ -4385,6 +4451,7 @@ def _requeue_unfired(rt: "Runtime", events: list[Event]) -> None:
         if (e.actor or "").startswith("promote:"):
             continue
         rt._queue.push(e)  # noqa: SLF001 — internal seam by design
+    rt._record_queue_depth()  # noqa: SLF001 — publish once after recovery batch
     if rt._queue:
         rt._idle_emitted = False
 
