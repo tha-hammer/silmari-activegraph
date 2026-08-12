@@ -10,7 +10,17 @@ import pytest
 from click.testing import CliRunner
 from pydantic import BaseModel
 
-from activegraph import Graph, Runtime, behavior, clear_registry
+from activegraph import (
+    CorruptMigrationEvent,
+    CorruptedEventPayloadError,
+    Event,
+    Graph,
+    RunRecord,
+    Runtime,
+    behavior,
+    clear_registry,
+    register_migration_backend,
+)
 from activegraph.cli.main import (
     EXIT_CODES,
     EXIT_CORRUPTION,
@@ -62,6 +72,63 @@ def _seed_memo_run(path: str) -> str:
 class _CliSettings(BaseModel):
     n: int = 1
     enabled: bool = True
+
+
+class _FakeMigrationBackend:
+    def __init__(self, provider, endpoint: str) -> None:
+        self.provider = provider
+        self.endpoint = endpoint
+        self.closed = False
+
+    def list_runs(self):
+        return [record for record, _ in self.provider.data[self.endpoint].values()]
+
+    def iter_run(self, run_id):
+        yield from self.provider.data[self.endpoint][run_id][1]
+
+    def write_run_transactionally(self, record, events):
+        if record.run_id == self.provider.fail_run:
+            raise RuntimeError("configured fake transaction failure")
+        endpoint_data = self.provider.data[self.endpoint]
+        prior = endpoint_data.get(record.run_id)
+        existing = list(prior[1]) if prior is not None else []
+        existing_ids = {event.id for event in existing if isinstance(event, Event)}
+        added = [event for event in events if event.id not in existing_ids]
+        endpoint_data[record.run_id] = (record, existing + added)
+        return len(added)
+
+    def close(self):
+        if not self.closed:
+            self.closed = True
+            self.provider.closes[self.endpoint] = self.provider.closes.get(
+                self.endpoint, 0
+            ) + 1
+
+
+class _FakeMigrationProvider:
+    schemes = ("fake-migrate",)
+    capabilities = frozenset({"read", "write"})
+
+    def __init__(self) -> None:
+        self.data = {"src": {}, "dst": {}}
+        self.closes = {}
+        self.fail_run = None
+
+    def validate_url(self, url: str) -> None:
+        assert url.startswith("fake-migrate://")
+
+    def open(self, url: str):
+        return _FakeMigrationBackend(self, url.split("://", 1)[1])
+
+
+def _migration_event(event_id: str, n: int) -> Event:
+    return Event(
+        id=event_id,
+        type="test.event",
+        payload={"n": n},
+        actor="test",
+        timestamp=f"2026-01-01T00:00:0{n}+00:00",
+    )
 
 
 @pytest.fixture
@@ -632,6 +699,112 @@ class TestExportTrace:
 
 
 class TestMigrate:
+    def test_registered_third_party_provider_crosses_real_cli_boundary(self, runner):
+        provider = _FakeMigrationProvider()
+        run_a = RunRecord("run_a", None, None, None, "2026-01-01", "a", None)
+        run_b = RunRecord("run_b", None, None, None, "2026-01-02", "b", None)
+        corrupt_error = CorruptedEventPayloadError(
+            "fake corrupt payload",
+            what_failed="The fake provider found one corrupt row.",
+            why="The test fixture deliberately represents corruption.",
+            how_to_fix="Run migration with --skip-corrupted.",
+        )
+        provider.data["src"] = {
+            "run_a": (
+                run_a,
+                [
+                    _migration_event("evt_a1", 1),
+                    CorruptMigrationEvent("evt_bad", corrupt_error),
+                    _migration_event("evt_a2", 2),
+                ],
+            ),
+            "run_b": (run_b, [_migration_event("evt_b1", 3)]),
+        }
+        registration = register_migration_backend(provider)
+        try:
+            result = runner.invoke(
+                cli,
+                [
+                    "migrate",
+                    "--from",
+                    "fake-migrate://src",
+                    "--to",
+                    "fake-migrate://dst",
+                    "--skip-corrupted",
+                    "--json",
+                ],
+            )
+            assert result.exit_code == EXIT_OK, result.output
+            report = json.loads(result.output)
+            assert [run["run_id"] for run in report["runs"]] == ["run_a", "run_b"]
+            assert report["runs"][0]["events_migrated"] == 2
+            assert report["runs"][0]["skipped_events"] == ["evt_bad"]
+            assert report["runs"][1]["events_migrated"] == 1
+            assert provider.closes == {"dst": 1, "src": 1}
+
+            destination = provider.open("fake-migrate://dst")
+            try:
+                assert [event.id for event in destination.iter_run("run_a")] == [
+                    "evt_a1",
+                    "evt_a2",
+                ]
+                assert [event.id for event in destination.iter_run("run_b")] == [
+                    "evt_b1"
+                ]
+            finally:
+                destination.close()
+
+            rerun = runner.invoke(
+                cli,
+                [
+                    "migrate",
+                    "--from",
+                    "fake-migrate://src",
+                    "--to",
+                    "fake-migrate://dst",
+                    "--skip-corrupted",
+                    "--json",
+                ],
+            )
+            assert rerun.exit_code == EXIT_OK, rerun.output
+            assert [run["events_migrated"] for run in json.loads(rerun.output)["runs"]] == [0, 0]
+        finally:
+            registration.unregister()
+
+    def test_third_party_transaction_failure_rolls_back_and_continues(self, runner):
+        provider = _FakeMigrationProvider()
+        run_a = RunRecord("run_a", None, None, None, "2026-01-01", "a", None)
+        run_b = RunRecord("run_b", None, None, None, "2026-01-02", "b", None)
+        provider.data["src"] = {
+            "run_a": (run_a, [_migration_event("evt_a1", 1)]),
+            "run_b": (run_b, [_migration_event("evt_b1", 2)]),
+        }
+        provider.fail_run = "run_a"
+        registration = register_migration_backend(provider)
+        try:
+            result = runner.invoke(
+                cli,
+                [
+                    "migrate",
+                    "--from",
+                    "fake-migrate://src",
+                    "--to",
+                    "fake-migrate://dst",
+                    "--json",
+                ],
+            )
+            assert result.exit_code == EXIT_GENERIC_ERROR
+            reports = {run["run_id"]: run for run in json.loads(result.output)["runs"]}
+            assert reports["run_a"]["status"] == "failed"
+            assert "configured fake transaction failure" in reports["run_a"]["error"]
+            assert reports["run_b"]["status"] == "ok"
+            assert "run_a" not in provider.data["dst"]
+            assert [event.id for event in provider.data["dst"]["run_b"][1]] == [
+                "evt_b1"
+            ]
+        finally:
+            registration.unregister()
+
     def test_sqlite_to_sqlite_happy_path(self, temp_db, runner, tmp_path):
         run_id = _seed_run(temp_db)
         dst = str(tmp_path / "dst.db")

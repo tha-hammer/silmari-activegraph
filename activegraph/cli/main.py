@@ -1079,18 +1079,32 @@ def cmd_migrate(
     the whole run. The destination run is partial; the operator is
     on notice.
     """
-    from activegraph.observability.migration import migrate
-    from activegraph.store.url import InvalidStoreURL, parse_store_url
+    from activegraph.store.errors import (
+        MigrationBackendConflictError,
+        MigrationBackendLoadError,
+        UnsupportedMigrationBackendError,
+        UnsupportedMigrationCapabilityError,
+    )
+    from activegraph.store.migration import migrate
+    from activegraph.store.url import InvalidStoreURL
 
     try:
-        parse_store_url(src)
-        parse_store_url(dst)
-    except InvalidStoreURL as e:
+        only = list(run_id) if run_id else None
+        report = migrate(
+            src,
+            dst,
+            only_run_ids=only,
+            skip_corrupted=skip_corrupted,
+        )
+    except (
+        InvalidStoreURL,
+        MigrationBackendConflictError,
+        MigrationBackendLoadError,
+        UnsupportedMigrationBackendError,
+        UnsupportedMigrationCapabilityError,
+    ) as e:
         click.echo(str(e), err=True)
         raise SystemExit(EXIT_USAGE_ERROR)
-
-    only = list(run_id) if run_id else None
-    report = migrate(src, dst, only_run_ids=only, skip_corrupted=skip_corrupted)
 
     if as_json:
         out = {

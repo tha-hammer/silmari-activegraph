@@ -44,6 +44,7 @@ are file-level helpers.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from typing import Any, Iterator, Optional
 
 from activegraph.core.event import Event
@@ -196,6 +197,122 @@ def _row_to_run(row: sqlite3.Row) -> RunRecord:
         goal=row["goal"],
         frame_id=row["frame_id"],
     )
+
+
+class SQLiteMigrationBackend:
+    """One URL-owned SQLite migration session."""
+
+    def __init__(self, path: str) -> None:
+        self._conn: sqlite3.Connection | None = sqlite3.connect(
+            path, isolation_level=None
+        )
+        self._conn.row_factory = sqlite3.Row
+        _ensure_schema(self._conn)
+
+    def _connection(self) -> sqlite3.Connection:
+        if self._conn is None:
+            raise RuntimeError("SQLite migration backend is closed")
+        return self._conn
+
+    def list_runs(self) -> list[RunRecord]:
+        rows = self._connection().execute(
+            "SELECT * FROM runs ORDER BY created_at"
+        ).fetchall()
+        return [_row_to_run(row) for row in rows]
+
+    def iter_run(self, run_id: str) -> Iterator[Any]:
+        from activegraph.store.migration import CorruptMigrationEvent
+
+        cursor = self._connection().execute(
+            "SELECT * FROM events WHERE run_id = ? ORDER BY seq", (run_id,)
+        )
+        try:
+            for row in cursor:
+                try:
+                    yield _row_to_event(row)
+                except Exception as exc:
+                    from activegraph.store.errors import CorruptedEventPayloadError
+
+                    if not isinstance(exc, CorruptedEventPayloadError):
+                        raise
+                    yield CorruptMigrationEvent(str(row["id"]), exc)
+        finally:
+            cursor.close()
+
+    def write_run_transactionally(
+        self, record: RunRecord, events: Sequence[Event]
+    ) -> int:
+        from activegraph.store import serde
+
+        conn = self._connection()
+        inserted = 0
+        try:
+            conn.execute("BEGIN")
+            conn.execute(
+                """
+                INSERT INTO runs
+                    (run_id, parent_run_id, forked_at_event_id, label,
+                     created_at, goal, frame_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO NOTHING
+                """,
+                (
+                    record.run_id,
+                    record.parent_run_id,
+                    record.forked_at_event_id,
+                    record.label,
+                    record.created_at,
+                    record.goal,
+                    record.frame_id,
+                ),
+            )
+            for event in events:
+                row = serde.encode_event(event)
+                cursor = conn.execute(
+                    """
+                    INSERT INTO events
+                        (id, type, actor, payload, frame_id, caused_by,
+                         timestamp, run_id)
+                    VALUES
+                        (:id, :type, :actor, :payload, :frame_id, :caused_by,
+                         :timestamp, :run_id)
+                    ON CONFLICT(id, run_id) DO NOTHING
+                    """,
+                    {**row, "run_id": record.run_id},
+                )
+                if cursor.rowcount > 0:
+                    inserted += 1
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return inserted
+
+    def close(self) -> None:
+        conn = self._conn
+        if conn is not None:
+            conn.close()
+            self._conn = None
+
+
+class SQLiteMigrationBackendProvider:
+    """Migration provider for ``sqlite`` URLs."""
+
+    schemes = ("sqlite",)
+    capabilities = frozenset({"read", "write"})
+
+    def validate_url(self, url: str) -> None:
+        from activegraph.store.url import parse_store_url
+
+        parsed = parse_store_url(url)
+        if parsed.scheme != "sqlite":
+            raise ValueError("SQLite migration provider requires sqlite:// URL")
+
+    def open(self, url: str) -> SQLiteMigrationBackend:
+        from activegraph.store.url import parse_store_url
+
+        parsed = parse_store_url(url)
+        return SQLiteMigrationBackend(parsed.sqlite_path or "")
 
 
 class SQLiteEventStore:

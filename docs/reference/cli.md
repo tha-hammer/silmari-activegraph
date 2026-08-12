@@ -259,6 +259,12 @@ transaction; a failure mid-run rolls back that run's destination
 state. Writes use `INSERT ... ON CONFLICT DO NOTHING` on
 `(id, run_id)` so re-running after a failure is safe.
 
+SQLite and Postgres are built in. Migration-only backends registered through
+the `activegraph.migration_backends` entry-point group use the same command;
+the CLI preflights source `read` and destination `write` capabilities before
+opening either URL. This extension does not make the backend available to
+ordinary `open_store()` runtime operations.
+
 `--skip-corrupted` is the recovery primitive for runs containing
 [`CorruptedEventPayloadError`](errors/corrupted-event-payload-error.md).
 Without the flag, a corrupted event in any run causes that run

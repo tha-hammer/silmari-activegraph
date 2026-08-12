@@ -167,6 +167,13 @@ Migration semantics:
 - Migration is **not bidirectional**. There is no `sync` mode and no
   rollback. To go back, migrate the other direction.
 
+The canonical library API is `activegraph.store.migration`. SQLite and
+Postgres providers ship with the framework. A third-party backend can join the
+same CLI path through `activegraph.migration_backends` entry points or
+`register_migration_backend()` without changing the central migrator. Source
+`read` and destination `write` capability/URL validation completes before
+either session opens; every opened session is closed destination-first.
+
 When migration is the right tool: you are graduating a run from a
 laptop SQLite file to a shared Postgres database, or moving a
 historical archive between Postgres instances. When it is the wrong

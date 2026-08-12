@@ -15,6 +15,10 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
 
 ## [Unreleased]
 
+- Moved canonical migration ownership to `activegraph.store.migration` and
+  added migration-only backend providers, explicit registration, lazy
+  `activegraph.migration_backends` discovery, capability preflight, and typed
+  resolution/cleanup errors. The observability import remains compatible.
 - Added deterministic `Runtime.close()` and context-manager sink ownership.
   Closing delegates to the existing graph-wide sink lifecycle, preserves
   ordinary timeout/partial-failure results as `False`, and rejects later

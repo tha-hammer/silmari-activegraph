@@ -38,6 +38,9 @@ from activegraph import (
     InvalidStoreURL,
     InvalidToolRegistration,
     LLMBehaviorError,
+    MigrationBackendCloseError,
+    MigrationBackendConflictError,
+    MigrationBackendLoadError,
     MissingOptionalDependency,
     MissingProviderError,
     MissingToolError,
@@ -59,6 +62,8 @@ from activegraph import (
     ToolNotFoundError,
     UnknownToolError,
     UnsupportedPatternError,
+    UnsupportedMigrationBackendError,
+    UnsupportedMigrationCapabilityError,
 )
 from activegraph.errors import GITHUB_NEW_ISSUE_URL, internal_bug_fields
 
@@ -460,6 +465,11 @@ def test_storage_leaves_inherit_from_storage_error() -> None:
         SchemaVersionMismatch,
         EventNotFoundError,
         DuplicateEventError,
+        MigrationBackendCloseError,
+        MigrationBackendConflictError,
+        MigrationBackendLoadError,
+        UnsupportedMigrationBackendError,
+        UnsupportedMigrationCapabilityError,
     ):
         assert issubclass(cls, StorageError), cls
         assert issubclass(cls, ActiveGraphError), cls

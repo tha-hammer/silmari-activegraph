@@ -17,16 +17,37 @@ from activegraph.store.errors import (
     CorruptedEventPayloadError,
     DuplicateEventError,
     EventNotFoundError,
+    MigrationBackendCloseError,
+    MigrationBackendConflictError,
+    MigrationBackendLoadError,
     SchemaVersionMismatch,
+    UnsupportedMigrationBackendError,
+    UnsupportedMigrationCapabilityError,
 )
 from activegraph.store.falkordb import FalkorDBGraphStore
 from activegraph.store.memory import InMemoryEventStore
 from activegraph.store.serde import NonSerializableEventError
 from activegraph.store.sqlite import SQLiteEventStore
+from activegraph.store.migration import (
+    BackendRegistration,
+    CorruptMigrationEvent,
+    MigrationBackend,
+    MigrationBackendProvider,
+    MigrationCapability,
+    MigrationItem,
+    MigrationReport,
+    MigrationRunReport,
+    clear_migration_backend_cache,
+    migrate,
+    register_migration_backend,
+    resolve_migration_backend,
+)
 from activegraph.store.url import InvalidStoreURL, StoreURL, open_store, parse_store_url
 
 __all__ = [
     "CorruptedEventPayloadError",
+    "BackendRegistration",
+    "CorruptMigrationEvent",
     "DuplicateEventError",
     "EventNotFoundError",
     "EventStore",
@@ -35,12 +56,27 @@ __all__ = [
     "InMemoryEventStore",
     "InMemoryGraphStore",
     "InvalidStoreURL",
+    "MigrationBackend",
+    "MigrationBackendCloseError",
+    "MigrationBackendConflictError",
+    "MigrationBackendLoadError",
+    "MigrationBackendProvider",
+    "MigrationCapability",
+    "MigrationItem",
+    "MigrationReport",
+    "MigrationRunReport",
     "NonSerializableEventError",
     "RunRecord",
     "SQLiteEventStore",
     "SchemaVersionMismatch",
     "StoreURL",
+    "UnsupportedMigrationBackendError",
+    "UnsupportedMigrationCapabilityError",
+    "clear_migration_backend_cache",
+    "migrate",
     "open_store",
     "parse_store_url",
     "replay_into",
+    "register_migration_backend",
+    "resolve_migration_backend",
 ]

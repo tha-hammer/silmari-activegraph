@@ -8592,3 +8592,27 @@ exception-free `False` result; status stays queryable and no automatic retry is
 performed. Only if close unexpectedly raises while a user exception is active
 does the user exception remain primary with the close exception attached as
 its `__context__`.
+
+# Unreleased — Store-owned extensible migration boundary
+
+`activegraph.store.migration` is the canonical administrative data-movement
+module. `activegraph.observability.migration` remains an identity-preserving
+compatibility shim. Migration does not widen the deliberately per-run
+`EventStore` protocol or the built-in-only `open_store()` dispatcher.
+
+Migration providers declare unique normalized URL schemes, a `read`/`write`
+capability frozenset, pure `validate_url()`, and `open()`. Both endpoints and
+required capabilities are resolved before either backend opens. Built-in
+SQLite/Postgres providers are registered directly; third parties use explicit
+`register_migration_backend()` calls or one
+`activegraph.migration_backends` entry point per alias. Duplicate claims fail
+closed, requested entry-point load failures are typed, and unrelated broken
+plugins are not loaded.
+
+Each opened backend is one URL-owned session. Central orchestration preserves
+provider run order, owns strict/skip-corrupted policy, and closes destination
+then source on every exit. A sole cleanup failure raises
+`MigrationBackendCloseError`; cleanup failures during another exception are
+attached as diagnostics without replacing the primary error. Backend adapters
+own schema setup, raw corruption recovery, and transactional SQL; central
+migration contains only provider-neutral policy and reports.
