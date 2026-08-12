@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import io
 import json
 import logging
@@ -26,6 +27,54 @@ def captured_stream():
 
 
 class TestLogSchema:
+    @pytest.mark.parametrize(
+        "use_helper", [True, False], ids=["helper", "stdlib-extra"]
+    )
+    def test_explicit_payload_is_detached_and_redacted(self, use_helper):
+        stream = io.StringIO()
+        original = {
+            "public": "kept",
+            "nested": {"secret": "do-not-log", "items": ["unchanged"]},
+        }
+        original_snapshot = copy.deepcopy(original)
+        callback_inputs = []
+
+        def redact(detached):
+            callback_inputs.append(detached)
+            detached["nested"]["secret"] = "[REDACTED]"
+            detached["nested"]["items"].append("callback-only")
+            return detached
+
+        configure_logging(
+            level="INFO",
+            json_output=True,
+            stream=stream,
+            payload_redactor=redact,
+        )
+        log = get_logger("activegraph.test")
+        extra = (
+            runtime_log_extra(payload=original)
+            if use_helper
+            else {"payload": original}
+        )
+        log.info("explicit payload", extra=extra)
+
+        lines = stream.getvalue().splitlines()
+        assert len(callback_inputs) == 1
+        assert callback_inputs[0] is not original
+        assert callback_inputs[0]["nested"] is not original["nested"]
+        assert len(lines) == 1
+        decoded = json.loads(lines[0])
+        assert decoded["payload"] == {
+            "public": "kept",
+            "nested": {
+                "secret": "[REDACTED]",
+                "items": ["unchanged", "callback-only"],
+            },
+        }
+        assert "do-not-log" not in lines[0]
+        assert original == original_snapshot
+
     def test_every_line_is_valid_json(self, captured_stream):
         log = get_logger("activegraph.test")
         log.info("hello", extra=runtime_log_extra(run_id="run_x"))
@@ -102,6 +151,8 @@ class TestLogSchema:
             "error_message",
             # v1.0.3 #3 addition.
             "doc_url",
+            # v1.11 addition.
+            "payload",
         )
 
 
