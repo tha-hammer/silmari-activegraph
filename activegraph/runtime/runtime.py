@@ -435,6 +435,12 @@ class Runtime:
         # v0.7: tool plumbing
         self._explicit_tools = list(tools) if tools is not None else None
         self.tool_registry: dict[str, Tool] = {}
+        # Rebuilt on every _ensure_registry pass. Keyed by object identity
+        # because Behavior dataclasses are unhashable and names are not the
+        # ownership boundary for an effective registration.
+        self._behavior_tool_bindings: dict[
+            int, tuple[LLMBehavior, tuple[Tool, ...]]
+        ] = {}
         self.replay_tool_cache: bool = replay_tool_cache
         from activegraph.tools.cache import ToolCache as _ToolCache
         self._tool_cache = tool_cache if tool_cache is not None else _ToolCache()
@@ -999,16 +1005,16 @@ class Runtime:
         # be registered under their short name if `export_globally=True`.
         if self._pack_tools:
             tools_source = tools_source + list(self._pack_tools)
-        # LLM behaviors may also bring their own tools via tools=[...] on
-        # the decorator; pull those in too so the name lookup is unified.
+        # LLM behaviors may also bring Tool objects via tools=[...]. Pull
+        # those into the registry by identity; authoring strings remain
+        # references and are resolved after the complete registry exists.
         for b in source:
             if isinstance(b, LLMBehavior):
                 for t in b.tools:
-                    if isinstance(t, Tool) and t not in tools_source:
+                    if isinstance(t, Tool) and not any(
+                        registered is t for registered in tools_source
+                    ):
                         tools_source = list(tools_source) + [t]
-        # CONTRACT v0.7 #2: each LLM behavior with tools= must reference
-        # registered tools by Tool object or by name string. Names are
-        # resolved against the merged registry. Missing → MissingToolError.
         self.tool_registry = {}
         for t in tools_source:
             if not isinstance(t, Tool):
@@ -1023,17 +1029,124 @@ class Runtime:
                 short = getattr(t, "_short_name", None) or t.name.split(".", 1)[-1]
                 if short != t.name:
                     self.tool_registry[short] = t
+        # Resolve exactly once per registry pass. The mutable authoring
+        # lists stay public; every execution consumer reads this immutable
+        # homogeneous tuple until the next public drain rebuilds it.
+        self._behavior_tool_bindings = {}
         for b in source:
-            if not isinstance(b, LLMBehavior):
-                continue
-            for t in b.tools:
-                name = t.name if isinstance(t, Tool) else str(t)
-                if name not in self.tool_registry:
-                    raise MissingToolError(
-                        name,
-                        behavior_name=b.name,
-                        registered=tuple(self.tool_registry.keys()),
-                    )
+            if isinstance(b, LLMBehavior):
+                resolved = tuple(
+                    self._resolve_behavior_tool_ref(b, ref) for ref in b.tools
+                )
+                self._behavior_tool_bindings[id(b)] = (b, resolved)
+
+    def _resolve_behavior_tool_ref(self, b: LLMBehavior, ref: Any) -> Tool:
+        """Resolve one authoring ToolRef with behavior-owner precedence."""
+        if isinstance(ref, Tool):
+            resolved = self.tool_registry.get(ref.name)
+            if resolved is not None:
+                return resolved
+            name = ref.name
+        else:
+            name = str(ref)
+
+        if "." in name:
+            resolved = self.tool_registry.get(name)
+            if resolved is not None:
+                return resolved
+            raise MissingToolError(
+                name,
+                behavior_name=b.name,
+                registered=tuple(self.tool_registry.keys()),
+            )
+
+        owner = getattr(b, "_pack_owner", None)
+        if owner is not None:
+            owned = self.tool_registry.get(f"{owner}.{name}")
+            if owned is not None:
+                return owned
+
+        # An exact undotted Tool.name is a real global declaration. A
+        # pack export alias has key=name but canonical Tool.name=pack.name,
+        # so it deliberately does not satisfy this precedence step.
+        global_tool = self.tool_registry.get(name)
+        if global_tool is not None and global_tool.name == name:
+            return global_tool
+
+        pack_candidates: list[tuple[str, Tool]] = []
+        if self._pack_state is not None:
+            for canonical, pack_owner in self._pack_state.tool_owners.items():
+                if canonical.endswith(f".{name}") and pack_owner != owner:
+                    candidate = self.tool_registry.get(canonical)
+                    if candidate is not None:
+                        pack_candidates.append((pack_owner, candidate))
+        distinct = {
+            candidate.name: (pack_owner, candidate)
+            for pack_owner, candidate in pack_candidates
+        }
+        if len(distinct) == 1:
+            return next(iter(distinct.values()))[1]
+        if len(distinct) > 1:
+            from activegraph.runtime.registration_errors import AmbiguousToolError
+
+            raise AmbiguousToolError(
+                name,
+                packs=tuple(pack_owner for pack_owner, _ in distinct.values()),
+            )
+        raise MissingToolError(
+            name,
+            behavior_name=b.name,
+            registered=tuple(self.tool_registry.keys()),
+        )
+
+    def _bound_tools_for(self, b: LLMBehavior) -> tuple[Tool, ...]:
+        entry = self._behavior_tool_bindings.get(id(b))
+        if entry is None or entry[0] is not b:
+            raise RuntimeError(
+                f"no runtime Tool binding for LLM behavior {b.name!r}; "
+                "_ensure_registry() must run before invocation"
+            )
+        return entry[1]
+
+    def _canonicalize_tool_response(
+        self,
+        b: LLMBehavior,
+        response: Any,
+        bound_tools: tuple[Tool, ...],
+    ) -> Any:
+        """Copy a tool-call response and canonicalize every call name."""
+        calls = getattr(response, "tool_calls", None)
+        if not calls:
+            return response
+        declared_names = tuple(tool.name for tool in bound_tools)
+        exact = set(declared_names)
+        canonical_calls: list[ToolCall] = []
+        for call in calls:
+            canonical_name: Optional[str] = None
+            if call.name in exact:
+                canonical_name = call.name
+            elif "." not in call.name:
+                suffix_matches = {
+                    name for name in exact if name.rsplit(".", 1)[-1] == call.name
+                }
+                if len(suffix_matches) == 1:
+                    canonical_name = next(iter(suffix_matches))
+            if canonical_name is None:
+                raise UnknownToolError(
+                    f"LLM called tool {call.name!r}, which does not resolve "
+                    f"to one distinct tool declared by behavior {b.name!r}",
+                    tool_name=call.name,
+                    behavior_name=b.name,
+                    declared_tools=declared_names,
+                )
+            canonical_calls.append(
+                replace(call, name=canonical_name, args=dict(call.args))
+            )
+        return replace(
+            response,
+            provider_meta=dict(response.provider_meta),
+            tool_calls=canonical_calls,
+        )
 
     def _start_budget(self) -> None:
         """Start live timing or the clock-free strict-replay budget."""
@@ -1580,22 +1693,11 @@ class Runtime:
         read-trace commit (v1.10 #1) wraps every one of its returns
         without restructuring the loop's failure exits."""
 
-        # v0.7: resolve tool objects (decorator may have stored names or
-        # objects). Build the provider-facing tool definitions list.
-        tools_for_call: list[Tool] = []
-        for t in b.tools:
-            name = t.name if isinstance(t, Tool) else str(t)
-            tool_obj = self.tool_registry.get(name)
-            if tool_obj is None:
-                self._emit_behavior_failed(
-                    b.name,
-                    event.id,
-                    MissingToolError(name, registered=tuple(self.tool_registry.keys())),
-                    reason="tool.unknown_tool",
-                    extras={"tool": name},
-                )
-                return
-            tools_for_call.append(tool_obj)
+        # _ensure_registry resolves the mutable authoring list once for
+        # this pass. Provider definitions, authorization, and dispatch all
+        # consume the same homogeneous tuple.
+        tools_for_call = self._bound_tools_for(b)
+        tools_by_name = {tool.name: tool for tool in tools_for_call}
         tool_defs = [t.to_definition() for t in tools_for_call] if tools_for_call else None
         tool_request_event_ids: list[str] = []
 
@@ -1893,19 +1995,41 @@ class Runtime:
                     )
                     return
                 successful_llm_request_id = requested_evt.id
-                self._llm_cache.record(
-                    turn_hash, turn_response, requesting_event_id=requested_evt.id
-                ) if self._llm_cache is not None else None
-                if self._llm_cache is None:
-                    self._llm_cache = LLMCache()
-                    self._llm_cache.record(
-                        turn_hash, turn_response, requesting_event_id=requested_evt.id
-                    )
-                self.budget.add_cost(turn_response.cost_usd)
                 break
 
             if turn_response is None:
                 return
+
+            # A provider call is billable even when its returned tool name
+            # fails our authorization boundary below. Cache hits are not.
+            if cached is None:
+                self.budget.add_cost(turn_response.cost_usd)
+
+            # A custom/recorded provider may return an authored short name
+            # even though it was offered canonical definitions. Normalize
+            # before any cache, event, message, hash, or dispatch boundary.
+            try:
+                turn_response = self._canonicalize_tool_response(
+                    b, turn_response, tools_for_call
+                )
+            except UnknownToolError as e:
+                self._emit_behavior_failed(
+                    b.name,
+                    event.id,
+                    e,
+                    reason="tool.unknown_tool",
+                    extras={"tool": e.tool_name},
+                )
+                return
+
+            if cached is None:
+                if self._llm_cache is None:
+                    self._llm_cache = LLMCache()
+                self._llm_cache.record(
+                    turn_hash,
+                    turn_response,
+                    requesting_event_id=requested_evt.id,
+                )
 
             # ---- Emit llm.responded ---------------------------------------
             responded_payload = turn_response.to_dict() | {
@@ -1969,16 +2093,11 @@ class Runtime:
                         extras={"tool": call.name},
                     )
                     return
-                # Tool must have been declared by the behavior.
-                if not any(
-                    (isinstance(t, Tool) and t.name == call.name)
-                    or (isinstance(t, str) and t == call.name)
-                    for t in b.tools
-                ):
-                    declared = tuple(
-                        t if isinstance(t, str) else getattr(t, "name", repr(t))
-                        for t in (b.tools or [])
-                    )
+                # Canonicalization above is the authorization boundary;
+                # this lookup is a defensive invariant check before dispatch.
+                tool_obj = tools_by_name.get(call.name)
+                if tool_obj is None:
+                    declared = tuple(t.name for t in tools_for_call)
                     self._emit_behavior_failed(
                         b.name, event.id,
                         UnknownToolError(
@@ -1992,7 +2111,6 @@ class Runtime:
                         extras={"tool": call.name},
                     )
                     return
-                tool_obj = self.tool_registry[call.name]
                 tr_id = self._invoke_tool(
                     behavior=b,
                     event=event,

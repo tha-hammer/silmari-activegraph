@@ -168,6 +168,16 @@ def test_short_name_lookup(diligence_runtime):
     assert b.name == "diligence.question_generator"
 
 
+def test_diligence_llm_tool_refs_are_canonical_runtime_tools(diligence_runtime):
+    researcher = diligence_runtime.get_behavior("diligence.document_researcher")
+    expected = [
+        diligence_runtime.get_tool("diligence.fetch_company_docs"),
+        diligence_runtime.get_tool("diligence.summarize_document"),
+    ]
+    assert researcher.tools == expected
+    assert all(actual is wanted for actual, wanted in zip(researcher.tools, expected))
+
+
 def test_killer_demo_script_runs():
     """The full killer demo is the executable contract."""
     import subprocess

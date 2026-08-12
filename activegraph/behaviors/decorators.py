@@ -20,6 +20,7 @@ from activegraph.behaviors.base import (
     Behavior,
     LLMBehavior,
     RelationBehavior,
+    ToolRef,
     _llm_behavior_fn_placeholder,
 )
 
@@ -232,7 +233,7 @@ def llm_behavior(
     priority: int = 0,
     pattern: Optional[str] = None,
     activate_after: Any = None,
-    tools: Optional[list[Any]] = None,
+    tools: Optional[list[ToolRef]] = None,
     max_tool_turns: int = 6,
 ) -> Callable[[Callable[..., None]], LLMBehavior]:
     """Decorate a function as an LLM-driven behavior.

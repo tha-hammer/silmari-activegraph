@@ -60,6 +60,7 @@ from activegraph.behaviors.base import (
     Behavior,
     LLMBehavior,
     RelationBehavior,
+    ToolRef,
     _llm_behavior_fn_placeholder,
 )
 from activegraph.tools.base import Tool
@@ -147,12 +148,14 @@ class PackNotFoundError(RegistrationError, LookupError):
 
 
 class PackValidationError(RegistrationError, PackError):
-    """A `Pack(...)` constructor argument failed validation.
+    """A Pack declaration failed validation.
 
-    Raised at construction time, not at load time. Covers things like
-    duplicate behavior names, an invalid pack name, an unhashable
-    settings_schema, etc. Multi-inherits RegistrationError (v1.0 PR-E)
-    and PackError (v0.9 base).
+    Raised by ``Pack(...)`` and defensively by ``Runtime.load_pack()``
+    when mutable declarations changed after construction. Covers things
+    like duplicate behavior names, an invalid pack name, an unhashable
+    settings schema, or a behavior referencing a pack-local Tool that is
+    not the same object declared by that Pack. Multi-inherits
+    RegistrationError (v1.0 PR-E) and PackError (v0.9 base).
     """
 
     _doc_slug = "pack-validation-error"
@@ -634,6 +637,7 @@ class Pack:
                     f"Pack {self.name!r}: tool {t.name!r} was not declared via "
                     f"activegraph.packs.tool (use activegraph.packs.tool, not activegraph.tool)"
                 )
+        _validate_pack_tool_membership(self)
 
         # v1.4: capabilities are CapabilityDecl entries with a valid
         # risk class; (provider, capability) pairs unique within the
@@ -702,6 +706,28 @@ def _check_unique(names: list[str], kind: str, pack_name: str) -> None:
                 f"Pack {pack_name!r}: duplicate {kind} name {n!r}"
             )
         seen.add(n)
+
+
+def _validate_pack_tool_membership(pack: Pack) -> None:
+    """Reject foreign pack-local Tool objects by identity.
+
+    Pack and behavior containers are intentionally shallow/mutable, so
+    the loader calls this again before touching Runtime state.
+    """
+    declared = tuple(pack.tools)
+    for behavior_obj in pack.behaviors:
+        if not isinstance(behavior_obj, LLMBehavior):
+            continue
+        for ref in behavior_obj.tools:
+            if not isinstance(ref, Tool) or not getattr(ref, "_pack_local", False):
+                continue
+            if any(ref is tool_obj for tool_obj in declared):
+                continue
+            raise PackValidationError(
+                f"Pack {pack.name!r}: LLM behavior {behavior_obj.name!r} "
+                f"references pack-local tool {ref.name!r}, but that Tool "
+                f"is not the same object as a tool declared by the same Pack"
+            )
 
 
 # ----------------------------------------------------- pack-aware decorators
@@ -795,7 +821,7 @@ def llm_behavior(
     priority: int = 0,
     pattern: Optional[str] = None,
     activate_after: Any = None,
-    tools: Optional[list[Any]] = None,
+    tools: Optional[list[ToolRef]] = None,
     max_tool_turns: int = 6,
 ) -> Callable[[Callable[..., None]], LLMBehavior]:
     """Pack-aware `@llm_behavior`. Does not register globally."""

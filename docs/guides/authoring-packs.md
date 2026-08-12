@@ -191,8 +191,10 @@ convenience.
   - prompts have unique names within the pack
   - `settings_schema` is a Pydantic `BaseModel` subclass
 
-Validation failures raise `PackValidationError` at construction —
-not at load.
+Validation failures normally raise `PackValidationError` at
+construction. Because an `LLMBehavior.tools` list remains mutable for
+authoring, `Runtime.load_pack()` defensively revalidates pack-local Tool
+membership before changing any runtime, graph, or event state.
 
 ---
 
@@ -282,10 +284,14 @@ rt.get_behavior("claim_extractor")           # works when unambiguous
 rt.get_behavior("diligence.claim_extractor") # always works
 ```
 
-Same rule for tools (`diligence.fetch_company_docs`). LLM behaviors
-with `tools=["fetch_company_docs"]` resolve the short name through
-the same rule — short forms work when only one pack declares the
-tool.
+Same public lookup rule for tools (`diligence.fetch_company_docs`). An
+LLM behavior's declaration is resolved with behavior ownership in mind:
+a dotted name is exact; a pack behavior tries its own `pack.short`, then
+an exact global declaration, then a unique tool from another pack; a
+global behavior tries the exact global declaration before a unique pack
+tool. Use a dotted declaration whenever multiple cross-pack tools share
+a short name. This declaration precedence deliberately does not change
+the pack-first short-name behavior of `Runtime.get_tool()`.
 
 Why this asymmetry: the canonical form is what shows up in
 operational artifacts where ambiguity is dangerous (a trace, a
@@ -319,6 +325,28 @@ def public_helper(args, ctx):
 intended for infrastructure packs that explicitly provide tools for
 other packs to use. The default is scoped so that pack tools cannot
 silently collide with each other or with user-defined tools.
+
+### Authoring references and runtime bindings
+
+`@llm_behavior(tools=[...])` accepts Tool objects and name strings, in
+any combination. The list remains mutable: edits made between public
+runtime drains take effect on the next drain, and declaration order and
+duplicates are preserved because they contribute to prompt identity.
+
+At each drain the runtime resolves that flexible authoring list once to
+canonical Tool objects. A pack-local object reference must be the same
+object listed in that Pack's `tools`; borrowing a Tool object created by
+another pack is a `PackValidationError`. The loaded behavior exposes the
+canonical runtime copies, so code inspecting it should compare
+`tool.name`, not Tool object identity across disable/reload cycles.
+
+Provider definitions, authorization, dispatch, cache entries, events,
+assistant/tool messages, and replay all use canonical names. If a custom
+provider returns an undotted call name, the runtime copies the response
+and rewrites it only when that suffix identifies one distinct declared
+canonical Tool. A missing or ambiguous returned name fails as
+`UnknownToolError` before it can enter the successful-response cache or
+event stream.
 
 ---
 

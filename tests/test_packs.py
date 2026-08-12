@@ -19,6 +19,7 @@ Covers:
 from __future__ import annotations
 
 import textwrap
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,7 @@ from activegraph import (
     ObjectType,
     RelationType,
     Runtime,
+    Tool,
     behavior as user_behavior,
     clear_registry,
     clear_tool_registry,
@@ -46,7 +48,9 @@ from activegraph import (
     get_tool_registry,
     load_by_name,
     load_prompts_from_dir,
+    tool as user_tool,
 )
+from activegraph.llm import LLMResponse
 from activegraph.packs import (
     EmptySettings,
     PackPrompt,
@@ -289,6 +293,32 @@ def _fresh_runtime():
     return Runtime(Graph())
 
 
+class _FinalProvider:
+    """Capture provider-facing tool definitions and return a final turn."""
+
+    def __init__(self):
+        self.tool_names: list[list[str]] = []
+
+    def complete(self, **kwargs):
+        self.tool_names.append([t["name"] for t in kwargs.get("tools") or []])
+        return LLMResponse(
+            raw_text="done",
+            parsed=None,
+            input_tokens=1,
+            output_tokens=1,
+            cost_usd=Decimal("0"),
+            latency_seconds=0,
+            model=kwargs["model"],
+            finish_reason="end_turn",
+        )
+
+    def estimate_cost(self, **kwargs):
+        return Decimal("0")
+
+    def count_tokens(self, **kwargs):
+        return 1
+
+
 def test_load_pack_emits_pack_loaded_event():
     @behavior(name="ping", on=["goal.created"])
     def ping(event, graph, ctx):
@@ -481,6 +511,226 @@ def test_behavior_short_name_lookup_ambiguous():
     # Fully qualified always works.
     assert rt.get_behavior("a.ping").name == "a.ping"
     assert rt.get_behavior("b.ping").name == "b.ping"
+
+
+# ---------------------------------------------------- runtime Tool bindings
+
+
+def test_pack_local_tool_objects_share_one_canonical_runtime_identity():
+    @tool(name="lookup")
+    def lookup(args, ctx):
+        return {"ok": True}
+
+    @llm_behavior(name="first", on=["goal.created"], tools=[lookup])
+    def first(event, graph, ctx, out):
+        pass
+
+    @llm_behavior(name="second", on=["never"], tools=[lookup])
+    def second(event, graph, ctx, out):
+        pass
+
+    original_name = lookup.name
+    original_meta = dict(lookup.fn.__pack_meta__)
+    original_first_refs = list(first.tools)
+    pack = Pack(
+        name="identity",
+        version="1.0",
+        behaviors=(first, second),
+        tools=(lookup,),
+    )
+    original_hash = hash(pack)
+
+    provider = _FinalProvider()
+    rt = Runtime(Graph(), llm_provider=provider)
+    rt.load_pack(pack)
+    rt.run_goal("bind")
+
+    canonical = rt.get_tool("identity.lookup")
+    loaded_first = rt.get_behavior("identity.first")
+    loaded_second = rt.get_behavior("identity.second")
+    assert loaded_first.tools == [canonical]
+    assert loaded_second.tools == [canonical]
+    assert loaded_first.tools[0] is canonical
+    assert loaded_second.tools[0] is canonical
+    assert provider.tool_names == [["identity.lookup"]]
+
+    assert first.tools == original_first_refs
+    assert first.tools[0] is lookup
+    assert lookup.name == original_name
+    assert lookup.fn.__pack_meta__ == original_meta
+    assert hash(pack) == original_hash
+    assert pack == Pack(
+        name="identity",
+        version="1.0",
+        behaviors=(first, second),
+        tools=(lookup,),
+    )
+
+
+def test_pack_rejects_foreign_pack_local_tool_by_identity():
+    @tool(name="owned")
+    def owned(args, ctx):
+        return {"ok": True}
+
+    @tool(name="owned")
+    def foreign(args, ctx):
+        return {"ok": True}
+
+    @llm_behavior(name="worker", tools=[foreign])
+    def worker(event, graph, ctx, out):
+        pass
+
+    with pytest.raises(PackValidationError, match="owned.*same Pack"):
+        Pack(
+            name="membership",
+            version="1.0",
+            behaviors=(worker,),
+            tools=(owned,),
+        )
+
+
+def test_load_pack_revalidates_mutated_tool_membership_atomically():
+    @tool(name="owned")
+    def owned(args, ctx):
+        return {"ok": True}
+
+    @tool(name="owned")
+    def foreign(args, ctx):
+        return {"ok": True}
+
+    @llm_behavior(name="worker", tools=[owned])
+    def worker(event, graph, ctx, out):
+        pass
+
+    pack = Pack(
+        name="atomic",
+        version="1.0",
+        behaviors=(worker,),
+        tools=(owned,),
+    )
+    worker.tools[:] = [foreign]
+    rt = Runtime(Graph(), llm_provider=_FinalProvider())
+    rt.load_pack(Pack(name="already_loaded", version="1.0"))
+    state = rt._pack_state
+    state_before = {
+        key: value.copy() if isinstance(value, (dict, list, set)) else value
+        for key, value in vars(state).items()
+    }
+    before = {
+        "pack_state": state,
+        "pack_behaviors": list(rt._pack_behaviors),
+        "pack_tools": list(rt._pack_tools),
+        "registry": rt.registry,
+        "tool_registry": dict(rt.tool_registry),
+        "events": list(rt.graph.events),
+        "ids": dict(vars(rt.graph.ids)),
+    }
+
+    with pytest.raises(PackValidationError, match="owned.*same Pack"):
+        rt.load_pack(pack)
+
+    assert rt._pack_state is before["pack_state"]
+    assert vars(rt._pack_state) == state_before
+    assert rt._pack_behaviors == before["pack_behaviors"]
+    assert rt._pack_tools == before["pack_tools"]
+    assert rt.registry is before["registry"]
+    assert rt.tool_registry == before["tool_registry"]
+    assert rt.graph.events == before["events"]
+    assert vars(rt.graph.ids) == before["ids"]
+
+
+def test_owner_aware_tool_short_precedence_and_public_lookup_unchanged():
+    @user_tool(name="shared")
+    def global_shared(args, ctx):
+        return {"owner": "global"}
+
+    @tool(name="shared")
+    def pack_shared(args, ctx):
+        return {"owner": "pack"}
+
+    @llm_behavior(name="pack_worker", on=["pack.trigger"], tools=["shared"])
+    def pack_worker(event, graph, ctx, out):
+        pass
+
+    pack = Pack(
+        name="owner",
+        version="1.0",
+        behaviors=(pack_worker,),
+        tools=(pack_shared,),
+    )
+
+    @user_behavior(name="seed", on=["goal.created"])
+    def seed(event, graph, ctx):
+        graph.emit("pack.trigger", {})
+
+    from activegraph import llm_behavior as global_llm_behavior
+
+    @global_llm_behavior(name="global_worker", on=["goal.created"], tools=["shared"])
+    def global_worker(event, graph, ctx, out):
+        pass
+
+    provider = _FinalProvider()
+    rt = Runtime(Graph(), llm_provider=provider)
+    rt.load_pack(pack)
+    rt.run_goal("precedence")
+
+    assert provider.tool_names == [["shared"], ["owner.shared"]]
+    assert rt.get_tool("shared") is rt.get_tool("owner.shared")
+    assert rt.get_tool("shared") is not global_shared
+
+
+def test_pack_tool_strings_fall_back_to_unique_cross_pack_and_report_ambiguity():
+    def make_tool_pack(name):
+        @tool(name="lookup")
+        def lookup(args, ctx):
+            return {"pack": name}
+
+        return Pack(name=name, version="1.0", tools=(lookup,))
+
+    @llm_behavior(name="consumer", on=["goal.created"], tools=["lookup"])
+    def consumer(event, graph, ctx, out):
+        pass
+
+    consumer_pack = Pack(name="consumer", version="1.0", behaviors=(consumer,))
+    provider = _FinalProvider()
+    rt = Runtime(Graph(), llm_provider=provider)
+    rt.load_pack(consumer_pack)
+    rt.load_pack(make_tool_pack("provider_a"))
+    rt.run_goal("unique")
+    assert provider.tool_names == [["provider_a.lookup"]]
+
+    rt.load_pack(make_tool_pack("provider_b"))
+    from activegraph import AmbiguousToolError
+
+    with pytest.raises(AmbiguousToolError):
+        rt.run_until_idle()
+
+
+def test_tool_bindings_rebuild_between_drains_preserving_order_and_duplicates():
+    @user_tool(name="first")
+    def first(args, ctx):
+        return {"ok": True}
+
+    @user_tool(name="second")
+    def second(args, ctx):
+        return {"ok": True}
+
+    from activegraph import llm_behavior as global_llm_behavior
+
+    @global_llm_behavior(name="mutable", on=["goal.created"], tools=["first"])
+    def mutable(event, graph, ctx, out):
+        pass
+
+    provider = _FinalProvider()
+    rt = Runtime(Graph(), llm_provider=provider)
+    rt.run_goal("first pass")
+    mutable.tools[:] = ["second", "first", "second"]
+    rt.run_goal("second pass")
+
+    assert provider.tool_names == [
+        ["first"],
+        ["second", "first", "second"],
+    ]
 
 
 # ---------------------------------------------------- runtime execution

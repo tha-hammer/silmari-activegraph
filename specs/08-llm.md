@@ -164,8 +164,10 @@ canonical-name     ::= [ pack-name "." ] identifier
 completion-response ::= LLMResponse( raw_text , parsed , input_tokens , output_tokens ,
                                      cost_usd , latency_seconds , model , finish_reason ,
                                      seed , cache_hit , provider_meta , tool_calls )
-tool-call          ::= ToolCall( id , canonical-name , args-dict )
-                       (* names are ALWAYS canonical on return — wire.py restores *)
+tool-call          ::= ToolCall( id , returned-name , args-dict )
+returned-name      ::= canonical-name | identifier
+                       (* shipped adapters restore canonical names; the runtime
+                          canonicalizes custom-provider short names before persistence *)
 
 completion-failure ::= LLMBehaviorError( reason , message , payload_extras )
 reason             ::= terminal-reason | transient-reason
@@ -187,6 +189,18 @@ mode-resolution    ::= "native"  when runtime.native_structured_output
                                   and getattr(provider,"supports_native_structured_output")(model)
                                   and native_schema_compatible( schema_to_json(output_schema) )
                      | "prompt"  otherwise     (* silent, debug-logged, audited *)
+
+tool-ref             ::= Tool | string
+bound-tools          ::= tuple( resolve( tool-ref , behavior-owner ) )
+                         (* rebuilt once per registry pass; declaration order and
+                            duplicate entries are preserved *)
+undotted-resolution  ::= own-pack-tool , exact-global-tool , unique-cross-pack-tool
+                          when behavior-owner is a pack
+                        | exact-global-tool , unique-pack-tool
+                          when behavior-owner is global
+returned-resolution  ::= exact-bound-canonical-name
+                        | unique-bound-canonical-suffix
+                        | UnknownToolError
 ```
 
 **Contract notes.**
@@ -201,6 +215,17 @@ mode-resolution    ::= "native"  when runtime.native_structured_output
 - No streaming, no multi-model orchestration (`provider.py:32-33`). Tool-loop ownership is the
   runtime's: the provider returns `tool_calls`, the runtime invokes the tools and re-calls
   `complete()` with a `role="tool"` message (`provider.py:33-36`).
+- `LLMBehavior.tools` is the mutable authoring surface (`Tool | str`). On each registry pass the
+  runtime resolves it once to a homogeneous `tuple[Tool, ...]`, preserving order and duplicates.
+  Provider definitions, authorization, and dispatch consume that same tuple. Pack-local object
+  refs become the exact canonical Tool copies owned by the loaded runtime; foreign pack-local
+  object identity fails validation before pack state mutates.
+- Returned tool calls cross a second runtime boundary immediately after provider/cache retrieval.
+  Exact declared canonical names remain unchanged; an undotted suffix is copied to the one
+  distinct matching bound canonical name after duplicate declarations collapse. Zero or multiple
+  matches raise `UnknownToolError` before the response can be cached, successfully emitted,
+  appended to messages, hashed into another turn, or dispatched. Provider cost is still charged
+  for a live rejected response; cache hits are not charged.
 - `count_tokens` is called **only** when `cached is None and self.budget.has_cost_limit()`
   (`runtime.py:1657-1659`); a raise there becomes `behavior.failed` with
   `reason="llm.network_error", extras={"phase":"count_tokens"}` (`runtime.py:1665-1672`).
