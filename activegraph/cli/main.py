@@ -18,6 +18,7 @@ Exit codes (CONTRACT v0.8 #13):
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json as _json
 import sys
 from typing import Any, Optional
@@ -55,24 +56,37 @@ EXIT_CODES = {
 # ---- shared helpers -----------------------------------------------------
 
 
+@contextmanager
+def _schema_mismatch_as_corruption():
+    """Render typed schema mismatches once at a CLI store boundary."""
+    from activegraph.store import SchemaVersionMismatch
+
+    try:
+        yield
+    except SchemaVersionMismatch as e:
+        click.echo(str(e), err=True)
+        raise SystemExit(EXIT_CORRUPTION) from None
+
+
 def _open_store_or_die(url: str, run_id: str):
     """Open a store at URL+run_id, mapping common errors to exit codes."""
     from activegraph.store import open_store, InvalidStoreURL
 
-    try:
-        return open_store(url, run_id=run_id)
-    except InvalidStoreURL as e:
-        click.echo(str(e), err=True)
-        raise SystemExit(EXIT_USAGE_ERROR)
-    except FileNotFoundError as e:
-        click.echo(str(e), err=True)
-        raise SystemExit(EXIT_NOT_FOUND)
-    except RuntimeError as e:
-        if "schema_version" in str(e):
+    with _schema_mismatch_as_corruption():
+        try:
+            return open_store(url, run_id=run_id)
+        except InvalidStoreURL as e:
             click.echo(str(e), err=True)
-            raise SystemExit(EXIT_CORRUPTION)
-        click.echo(str(e), err=True)
-        raise SystemExit(EXIT_GENERIC_ERROR)
+            raise SystemExit(EXIT_USAGE_ERROR)
+        except FileNotFoundError as e:
+            click.echo(str(e), err=True)
+            raise SystemExit(EXIT_NOT_FOUND)
+        except RuntimeError as e:
+            if "schema_version" in str(e):
+                click.echo(str(e), err=True)
+                raise SystemExit(EXIT_CORRUPTION)
+            click.echo(str(e), err=True)
+            raise SystemExit(EXIT_GENERIC_ERROR)
 
 
 def _most_recent_run_id_or_die(url: str) -> str:
@@ -85,21 +99,26 @@ def _most_recent_run_id_or_die(url: str) -> str:
     except InvalidStoreURL as e:
         click.echo(str(e), err=True)
         raise SystemExit(EXIT_USAGE_ERROR)
-    try:
-        if parsed.scheme == "sqlite":
-            from activegraph.store.sqlite import SQLiteEventStore
+    with _schema_mismatch_as_corruption():
+        try:
+            if parsed.scheme == "sqlite":
+                from activegraph.store.sqlite import SQLiteEventStore
 
-            rid = SQLiteEventStore.most_recent_run_id(parsed.sqlite_path or "")
-        else:
-            from activegraph.store.postgres import PostgresEventStore
+                rid = SQLiteEventStore.most_recent_run_id(parsed.sqlite_path or "")
+            else:
+                from activegraph.store.postgres import PostgresEventStore
 
-            rid = PostgresEventStore.most_recent_run_id(parsed.raw)
-    except (sqlite3.OperationalError, FileNotFoundError) as e:
-        click.echo(f"{url}: {e}", err=True)
-        raise SystemExit(EXIT_NOT_FOUND)
-    except RuntimeError as e:
-        click.echo(str(e), err=True)
-        raise SystemExit(EXIT_CORRUPTION if "schema_version" in str(e) else EXIT_GENERIC_ERROR)
+                rid = PostgresEventStore.most_recent_run_id(parsed.raw)
+        except (sqlite3.OperationalError, FileNotFoundError) as e:
+            click.echo(f"{url}: {e}", err=True)
+            raise SystemExit(EXIT_NOT_FOUND)
+        except RuntimeError as e:
+            click.echo(str(e), err=True)
+            raise SystemExit(
+                EXIT_CORRUPTION
+                if "schema_version" in str(e)
+                else EXIT_GENERIC_ERROR
+            )
     if rid is None:
         click.echo(f"no runs found in {url}", err=True)
         raise SystemExit(EXIT_NOT_FOUND)
@@ -114,13 +133,14 @@ def _list_runs_or_die(url: str):
     except InvalidStoreURL as e:
         click.echo(str(e), err=True)
         raise SystemExit(EXIT_USAGE_ERROR)
-    if parsed.scheme == "sqlite":
-        from activegraph.store.sqlite import SQLiteEventStore
+    with _schema_mismatch_as_corruption():
+        if parsed.scheme == "sqlite":
+            from activegraph.store.sqlite import SQLiteEventStore
 
-        return SQLiteEventStore.list_runs(parsed.sqlite_path or "")
-    from activegraph.store.postgres import PostgresEventStore
+            return SQLiteEventStore.list_runs(parsed.sqlite_path or "")
+        from activegraph.store.postgres import PostgresEventStore
 
-    return PostgresEventStore.list_runs(parsed.raw)
+        return PostgresEventStore.list_runs(parsed.raw)
 
 
 # ---- click group --------------------------------------------------------
@@ -273,14 +293,15 @@ def cmd_inspect(
         raise SystemExit(EXIT_USAGE_ERROR)
 
     rid = run_id or _most_recent_run_id_or_die(url)
-    try:
-        # Load without behaviors. Loading replays the event log but
-        # registers an empty registry (no behaviors fire on the
-        # re-queued events because the loop is never run).
-        rt = Runtime.load(url, run_id=rid)
-    except FileNotFoundError as e:
-        click.echo(str(e), err=True)
-        raise SystemExit(EXIT_NOT_FOUND)
+    with _schema_mismatch_as_corruption():
+        try:
+            # Load without behaviors. Loading replays the event log but
+            # registers an empty registry (no behaviors fire on the
+            # re-queued events because the loop is never run).
+            rt = Runtime.load(url, run_id=rid)
+        except FileNotFoundError as e:
+            click.echo(str(e), err=True)
+            raise SystemExit(EXIT_NOT_FOUND)
 
     if event_id:
         _print_event(rt, event_id, as_json)
@@ -512,14 +533,15 @@ def cmd_replay(url: str, run_id: str, as_json: bool) -> None:
     """Rebuild the graph from a run's event log (no behaviors fire)."""
     from activegraph.runtime.runtime import Runtime
 
-    try:
-        rt = Runtime.load(url, run_id=run_id)
-    except FileNotFoundError as e:
-        click.echo(str(e), err=True)
-        raise SystemExit(EXIT_NOT_FOUND)
-    except __import__("sqlite3").OperationalError as e:
-        click.echo(f"{url}: {e}", err=True)
-        raise SystemExit(EXIT_NOT_FOUND)
+    with _schema_mismatch_as_corruption():
+        try:
+            rt = Runtime.load(url, run_id=run_id)
+        except FileNotFoundError as e:
+            click.echo(str(e), err=True)
+            raise SystemExit(EXIT_NOT_FOUND)
+        except __import__("sqlite3").OperationalError as e:
+            click.echo(f"{url}: {e}", err=True)
+            raise SystemExit(EXIT_NOT_FOUND)
 
     summary = {
         "run_id": run_id,
@@ -623,32 +645,33 @@ def cmd_fork(
             raise SystemExit(EXIT_USAGE_ERROR)
 
     new_run_id = IDGen().run()
-    try:
-        if parsed.scheme == "sqlite":
-            from activegraph.store.sqlite import SQLiteEventStore
+    with _schema_mismatch_as_corruption():
+        try:
+            if parsed.scheme == "sqlite":
+                from activegraph.store.sqlite import SQLiteEventStore
 
-            n = SQLiteEventStore.fork_run(
-                parsed.sqlite_path or "",
-                parent_run_id=run_id,
-                new_run_id=new_run_id,
-                at_event_id=at_event,
-                label=label,
-                created_at=_now_iso(),
-            )
-        else:
-            from activegraph.store.postgres import PostgresEventStore
+                n = SQLiteEventStore.fork_run(
+                    parsed.sqlite_path or "",
+                    parent_run_id=run_id,
+                    new_run_id=new_run_id,
+                    at_event_id=at_event,
+                    label=label,
+                    created_at=_now_iso(),
+                )
+            else:
+                from activegraph.store.postgres import PostgresEventStore
 
-            n = PostgresEventStore.fork_run(
-                parsed.raw,
-                parent_run_id=run_id,
-                new_run_id=new_run_id,
-                at_event_id=at_event,
-                label=label,
-                created_at=_now_iso(),
-            )
-    except KeyError as e:
-        click.echo(str(e), err=True)
-        raise SystemExit(EXIT_NOT_FOUND)
+                n = PostgresEventStore.fork_run(
+                    parsed.raw,
+                    parent_run_id=run_id,
+                    new_run_id=new_run_id,
+                    at_event_id=at_event,
+                    label=label,
+                    created_at=_now_iso(),
+                )
+        except KeyError as e:
+            click.echo(str(e), err=True)
+            raise SystemExit(EXIT_NOT_FOUND)
 
     override_event_ids: list[str] = []
     if parsed_overrides:
@@ -794,7 +817,8 @@ def _record_fork_settings_overrides(
     from activegraph.core.event import Event
     from activegraph.runtime.runtime import Runtime
 
-    rt = Runtime.load(url, run_id=run_id)
+    with _schema_mismatch_as_corruption():
+        rt = Runtime.load(url, run_id=run_id)
     event_ids: list[str] = []
     for pack, data in overrides.items():
         event = Event(
@@ -828,15 +852,16 @@ def cmd_diff(url: str, run_a: str, run_b: str, as_json: bool) -> None:
     from activegraph.runtime.diff import compute_diff
     from activegraph.runtime.runtime import Runtime
 
-    try:
-        rt_a = Runtime.load(url, run_id=run_a)
-        rt_b = Runtime.load(url, run_id=run_b)
-    except FileNotFoundError as e:
-        click.echo(str(e), err=True)
-        raise SystemExit(EXIT_NOT_FOUND)
-    except __import__("sqlite3").OperationalError as e:
-        click.echo(f"{url}: {e}", err=True)
-        raise SystemExit(EXIT_NOT_FOUND)
+    with _schema_mismatch_as_corruption():
+        try:
+            rt_a = Runtime.load(url, run_id=run_a)
+            rt_b = Runtime.load(url, run_id=run_b)
+        except FileNotFoundError as e:
+            click.echo(str(e), err=True)
+            raise SystemExit(EXIT_NOT_FOUND)
+        except __import__("sqlite3").OperationalError as e:
+            click.echo(f"{url}: {e}", err=True)
+            raise SystemExit(EXIT_NOT_FOUND)
 
     diff = compute_diff(rt_a.graph, rt_b.graph, run_a, run_b)
     summary = {
@@ -916,15 +941,16 @@ def cmd_promote(
             )
             raise SystemExit(EXIT_NOT_FOUND)
 
-    try:
-        parent = Runtime.load(url, run_id=run_id)
-        fork = Runtime.load(url, run_id=from_run)
-    except FileNotFoundError as e:
-        click.echo(str(e), err=True)
-        raise SystemExit(EXIT_NOT_FOUND)
-    except __import__("sqlite3").OperationalError as e:
-        click.echo(f"{url}: {e}", err=True)
-        raise SystemExit(EXIT_NOT_FOUND)
+    with _schema_mismatch_as_corruption():
+        try:
+            parent = Runtime.load(url, run_id=run_id)
+            fork = Runtime.load(url, run_id=from_run)
+        except FileNotFoundError as e:
+            click.echo(str(e), err=True)
+            raise SystemExit(EXIT_NOT_FOUND)
+        except __import__("sqlite3").OperationalError as e:
+            click.echo(f"{url}: {e}", err=True)
+            raise SystemExit(EXIT_NOT_FOUND)
 
     try:
         outcome = parent.promote(fork, dry_run=dry_run)
@@ -1007,14 +1033,15 @@ def cmd_export_trace(url: str, run_id: str, fmt: str, out_path: Optional[str]) -
     """Dump a run's event log as text or JSONL."""
     from activegraph.runtime.runtime import Runtime
 
-    try:
-        rt = Runtime.load(url, run_id=run_id)
-    except FileNotFoundError as e:
-        click.echo(str(e), err=True)
-        raise SystemExit(EXIT_NOT_FOUND)
-    except __import__("sqlite3").OperationalError as e:
-        click.echo(f"{url}: {e}", err=True)
-        raise SystemExit(EXIT_NOT_FOUND)
+    with _schema_mismatch_as_corruption():
+        try:
+            rt = Runtime.load(url, run_id=run_id)
+        except FileNotFoundError as e:
+            click.echo(str(e), err=True)
+            raise SystemExit(EXIT_NOT_FOUND)
+        except __import__("sqlite3").OperationalError as e:
+            click.echo(f"{url}: {e}", err=True)
+            raise SystemExit(EXIT_NOT_FOUND)
 
     if fmt == "jsonl":
         lines = (_json.dumps(e.to_dict()) for e in rt.graph.events)
@@ -1108,8 +1135,16 @@ def cmd_migrate(
         click.echo(str(e), err=True)
         raise SystemExit(EXIT_USAGE_ERROR)
 
+    # Validate source first so an incompatible source cannot create or
+    # initialize a destination as a side effect.  A valid source is followed
+    # by a destination preflight; for a fresh store this intentionally creates
+    # only the current schema and metadata before migration starts.
+    _list_runs_or_die(src)
+    _list_runs_or_die(dst)
+
     only = list(run_id) if run_id else None
-    report = migrate(src, dst, only_run_ids=only, skip_corrupted=skip_corrupted)
+    with _schema_mismatch_as_corruption():
+        report = migrate(src, dst, only_run_ids=only, skip_corrupted=skip_corrupted)
 
     if as_json:
         out = {

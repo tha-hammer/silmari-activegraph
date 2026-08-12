@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 
 import pytest
@@ -19,6 +20,9 @@ from activegraph.cli.main import (
     EXIT_NOT_FOUND,
     EXIT_OK,
     EXIT_USAGE_ERROR,
+    _list_runs_or_die,
+    _most_recent_run_id_or_die,
+    _open_store_or_die,
     cli,
 )
 from activegraph.packs import Pack, PackSettingsMissingError
@@ -35,7 +39,33 @@ def _seed_run(path: str) -> str:
     rt = Runtime(g, persist_to=path)
     rt.run_goal("test")
     rt.save_state()
-    return rt.run_id
+    run_id = rt.run_id
+    assert rt.graph.store is not None
+    rt.graph.store.close()
+    return run_id
+
+
+def _mismatched_sqlite(path: str) -> tuple[str, str, str]:
+    """Create a real run, close its store, then alter only schema metadata."""
+    run_id = _seed_run(path)
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT id FROM events WHERE run_id = ? ORDER BY seq LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        assert row is not None
+        event_id = str(row[0])
+        conn.execute(
+            "UPDATE meta SET value = 'future' WHERE key = 'schema_version'"
+        )
+    return f"sqlite:///{path}", run_id, event_id
+
+
+def _assert_schema_mismatch_exit(result) -> None:
+    assert result.exit_code == EXIT_CORRUPTION, result.output
+    assert result.output.count("SchemaVersionMismatch:") == 1
+    assert "schema_version" in result.output
+    assert "Traceback" not in result.output
 
 
 def _seed_memo_run(path: str) -> str:
@@ -90,6 +120,119 @@ class TestExitCodes:
         assert EXIT_CODES["not_found"] == 3
         assert EXIT_CODES["corruption"] == 4
         assert EXIT_CODES["divergence"] == 5
+
+
+class TestSchemaVersionMismatchExit:
+    @pytest.mark.parametrize(
+        "helper,args",
+        [
+            (_open_store_or_die, ("{url}", "{run_id}")),
+            (_most_recent_run_id_or_die, ("{url}",)),
+            (_list_runs_or_die, ("{url}",)),
+        ],
+        ids=("open-store", "most-recent-run", "list-runs"),
+    )
+    def test_private_store_helpers_map_exact_typed_mismatch_once(
+        self, temp_db, capsys, helper, args
+    ):
+        url, run_id, _ = _mismatched_sqlite(temp_db)
+        rendered_args = tuple(
+            value.format(url=url, run_id=run_id) for value in args
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            helper(*rendered_args)
+
+        assert excinfo.value.code == EXIT_CORRUPTION
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err.count("SchemaVersionMismatch:") == 1
+        assert "schema_version" in captured.err
+        assert "Traceback" not in captured.err
+
+    def test_open_store_preserves_legacy_schema_runtime_error_mapping(
+        self, monkeypatch, capsys
+    ):
+        import activegraph.store
+
+        def legacy_open_store(url, run_id):
+            raise RuntimeError("custom backend schema_version mismatch")
+
+        monkeypatch.setattr(activegraph.store, "open_store", legacy_open_store)
+
+        with pytest.raises(SystemExit) as excinfo:
+            _open_store_or_die("legacy://store", "run_legacy")
+
+        assert excinfo.value.code == EXIT_CORRUPTION
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == "custom backend schema_version mismatch\n"
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ("inspect", "{url}"),
+            ("inspect", "{url}", "--run-id", "{run_id}"),
+            ("replay", "{url}", "--run-id", "{run_id}"),
+            (
+                "fork",
+                "{url}",
+                "--run-id",
+                "{run_id}",
+                "--at-event",
+                "{event_id}",
+            ),
+            (
+                "fork",
+                "{url}",
+                "--run-id",
+                "{run_id}",
+                "--at-event",
+                "{event_id}",
+                "--set",
+                "demo.n=2",
+            ),
+            (
+                "diff",
+                "{url}",
+                "--run-a",
+                "{run_id}",
+                "--run-b",
+                "{run_id}",
+            ),
+            (
+                "promote",
+                "{url}",
+                "--run-id",
+                "{run_id}",
+                "--from-run",
+                "{run_id}",
+            ),
+            ("export-trace", "{url}", "--run-id", "{run_id}"),
+        ],
+        ids=(
+            "inspect-recent",
+            "inspect-explicit",
+            "replay",
+            "fork",
+            "fork-set-discovery",
+            "diff",
+            "promote-list",
+            "export-trace",
+        ),
+    )
+    def test_mounted_store_boundaries_map_typed_mismatch_once(
+        self, temp_db, runner, argv
+    ):
+        url, run_id, event_id = _mismatched_sqlite(temp_db)
+        rendered = [
+            value.format(url=url, run_id=run_id, event_id=event_id)
+            for value in argv
+        ]
+
+        result = runner.invoke(cli, rendered)
+
+        _assert_schema_mismatch_exit(result)
 
 
 class TestInspect:
@@ -582,6 +725,88 @@ class TestMigrate:
             cli, ["migrate", "--from", temp_db, "--to", dst]
         )
         assert result.exit_code == EXIT_USAGE_ERROR, result.output
+
+    def test_source_schema_mismatch_fails_before_touching_fresh_destination(
+        self, temp_db, runner, tmp_path
+    ):
+        src_url, _, _ = _mismatched_sqlite(temp_db)
+        dst = tmp_path / "untouched.db"
+
+        result = runner.invoke(
+            cli,
+            ["migrate", "--from", src_url, "--to", f"sqlite:///{dst}"],
+        )
+
+        _assert_schema_mismatch_exit(result)
+        assert not dst.exists()
+        assert not (tmp_path / "untouched.db-wal").exists()
+        assert not (tmp_path / "untouched.db-shm").exists()
+
+    def test_destination_schema_mismatch_fails_before_migration_report(
+        self, temp_db, runner, tmp_path
+    ):
+        _seed_run(temp_db)
+        dst = str(tmp_path / "mismatched-destination.db")
+        dst_url, _, _ = _mismatched_sqlite(dst)
+        with sqlite3.connect(dst) as conn:
+            before = (
+                conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0],
+                conn.execute("SELECT COUNT(*) FROM events").fetchone()[0],
+                conn.execute(
+                    "SELECT value FROM meta WHERE key = 'schema_version'"
+                ).fetchone()[0],
+            )
+
+        result = runner.invoke(
+            cli,
+            [
+                "migrate",
+                "--from",
+                f"sqlite:///{temp_db}",
+                "--to",
+                dst_url,
+            ],
+        )
+
+        _assert_schema_mismatch_exit(result)
+        assert "write failure:" not in result.output
+        assert "summary:" not in result.output
+        with sqlite3.connect(dst) as conn:
+            after = (
+                conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0],
+                conn.execute("SELECT COUNT(*) FROM events").fetchone()[0],
+                conn.execute(
+                    "SELECT value FROM meta WHERE key = 'schema_version'"
+                ).fetchone()[0],
+            )
+        assert after == before
+
+    def test_empty_source_eagerly_initializes_fresh_destination_schema(
+        self, temp_db, runner, tmp_path
+    ):
+        from activegraph.store.sqlite import SCHEMA_VERSION, SQLiteEventStore
+
+        assert SQLiteEventStore.list_runs(temp_db) == []
+        dst = tmp_path / "initialized-destination.db"
+
+        result = runner.invoke(
+            cli,
+            [
+                "migrate",
+                "--from",
+                f"sqlite:///{temp_db}",
+                "--to",
+                f"sqlite:///{dst}",
+            ],
+        )
+
+        assert result.exit_code == EXIT_OK, result.output
+        with sqlite3.connect(dst) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT value FROM meta WHERE key = 'schema_version'"
+            ).fetchone()[0] == SCHEMA_VERSION
 
     def test_skip_corrupted_recovers_partial_run(self, temp_db, runner, tmp_path):
         """v1.0 CLI follow-on: --skip-corrupted lets a migration recover the

@@ -480,6 +480,9 @@ def test_storage_leaves_preserve_legacy_base_classes() -> None:
     assert issubclass(EventNotFoundError, KeyError)
     # DuplicateEventError multi-inherits ValueError for the same reason.
     assert issubclass(DuplicateEventError, ValueError)
+    # SchemaVersionMismatch is a framework storage leaf, not the stale
+    # RuntimeError shape that older CLI helpers used to string-match.
+    assert not issubclass(SchemaVersionMismatch, RuntimeError)
 
 
 def test_invalid_store_url_bare_path_snapshot() -> None:

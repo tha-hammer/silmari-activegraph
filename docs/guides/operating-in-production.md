@@ -152,6 +152,13 @@ activegraph migrate --from sqlite:///path/to/dev.db \
 
 Migration semantics:
 
+- The CLI preflights the source schema first, then the destination.
+  Either mismatch prints `SchemaVersionMismatch` once and exits 4
+  before a migration report or run write. A source mismatch does not
+  touch a fresh destination.
+- With a compatible source, preflighting a fresh destination eagerly
+  creates only its current schema and metadata. This validates
+  compatibility; it is not a cross-version schema reader.
 - Each run in the source migrates in **a single transaction** against
   the destination. If a run fails partway, that run's destination
   state is unchanged (Postgres rolls back).
@@ -609,6 +616,11 @@ when source events have corrupted JSON payloads instead of failing
 the whole run; the skipped event ids appear in the per-run report's
 `skipped_events`. The resulting destination run is partial — the
 operator is on notice.
+
+The command's source-first schema preflight is intentionally fail-closed.
+For a schema-incompatible source, use a build that can read that source
+and any required staged migration path; this command does not bypass the
+store's version guard.
 
 ---
 
