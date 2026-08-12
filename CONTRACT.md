@@ -8597,3 +8597,17 @@ queue tick. This amendment adds that guarantee. It also supersedes v0.6 #1's
 historical statement that `llm.*` events flow through the behavior queue:
 current v0.7-and-later LLM and tool bookkeeping suppression remains the
 authoritative live-dispatch behavior.
+
+## v1.11 #3. Prompt identity has one canonical byte owner
+
+`activegraph.llm.prompt_identity` owns the base prompt fields, canonical JSON
+(`sort_keys=True`, compact separators, UTF-8), and SHA-256 operation used by
+public prompt inspection, runtime turn/cache identity, and recorded fixtures.
+The public `AssembledPrompt.hash()` domain continues to omit the `tools` key.
+Runtime-turn and fixture identities explicitly include it; both `tools=None`
+and `tools=[]` normalize to JSON `null`, while non-empty tool definitions
+participate in the hash. `structured_output_mode` remains omit-when-prompt and
+is included only as `"native"`. Message serialization continues to omit
+`tool_calls` when absent and preserve it when present. These domain distinctions
+are intentional; the shared owner does not make the public and per-turn hashes
+interchangeable.

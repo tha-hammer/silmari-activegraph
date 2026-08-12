@@ -83,6 +83,7 @@ from activegraph.llm.embedding import EmbeddingProvider
 from activegraph.llm.embedding_cache import EmbeddingCache, hash_embedding_request
 from activegraph.llm.errors import LLMBehaviorError, MissingProviderError
 from activegraph.llm.provider import LLMProvider
+from activegraph.llm import prompt_identity
 from activegraph.llm.types import LLMMessage, ToolCall
 from activegraph.policy import Policy
 from activegraph.runtime.authority import (
@@ -3984,28 +3985,22 @@ def _hash_turn_prompt(
     tool loop produces a distinct hash; same shape as v0.6's
     prompt.hash() otherwise.
     """
-    import hashlib
-    import json as _json
-
-    payload = {
-        "model": prompt.model,
-        "system": prompt.system,
-        "messages": [m.to_dict() for m in messages],
-        "output_schema_name": prompt.output_schema_name,
-        "output_schema_json": prompt.output_schema_json,
-        "max_tokens": int(prompt.max_tokens),
-        "temperature": float(prompt.temperature),
-        "top_p": float(prompt.top_p),
-        "deterministic": bool(prompt.deterministic),
-        "tools": list(tool_defs) if tool_defs else None,
-    }
-    # CONTRACT v1.3 #1 #7: mode is part of prompt identity; the field is
-    # emitted only when native so every pre-v1.3 hash stays
-    # byte-identical.
-    if getattr(prompt, "structured_output_mode", "prompt") == "native":
-        payload["structured_output_mode"] = "native"
-    canonical = _json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    payload = prompt_identity.build_prompt_identity_payload(
+        model=prompt.model,
+        system=prompt.system,
+        messages=messages,
+        output_schema_name=prompt.output_schema_name,
+        output_schema_json=prompt.output_schema_json,
+        max_tokens=prompt.max_tokens,
+        temperature=prompt.temperature,
+        top_p=prompt.top_p,
+        deterministic=prompt.deterministic,
+        tools=tool_defs,
+        structured_output_mode=getattr(
+            prompt, "structured_output_mode", "prompt"
+        ),
+    )
+    return prompt_identity.hash_prompt_payload(payload)
 
 
 def _maybe_object_id(event: Event) -> Optional[str]:

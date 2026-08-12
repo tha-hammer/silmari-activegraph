@@ -42,14 +42,15 @@ when fixtures drift.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
+from activegraph.llm import prompt_identity
 from activegraph.llm.errors import LLMBehaviorError
+from activegraph.llm.prompt import schema_to_json
 from activegraph.llm.provider import LLMProvider
 from activegraph.llm.types import LLMMessage, LLMResponse, ToolCall
 
@@ -60,50 +61,6 @@ def _now_iso() -> str:
         .isoformat(timespec="seconds")
         .replace("+00:00", "Z")
     )
-
-
-def _canonical_prompt_payload(
-    *,
-    model: str,
-    system: str,
-    messages: list[LLMMessage],
-    output_schema: Optional[type],
-    max_tokens: int,
-    temperature: float,
-    top_p: float,
-    deterministic: bool,
-    tools: Optional[list[dict[str, Any]]] = None,
-    structured_output_mode: str = "prompt",
-) -> dict[str, Any]:
-    from activegraph.llm.prompt import schema_to_json
-
-    payload: dict[str, Any] = {
-        "model": model,
-        "system": system,
-        "messages": [m.to_dict() for m in messages],
-        "output_schema_name": (
-            getattr(output_schema, "__name__", None) if output_schema else None
-        ),
-        "output_schema_json": schema_to_json(output_schema),
-        "max_tokens": int(max_tokens),
-        "temperature": float(temperature),
-        "top_p": float(top_p),
-        "deterministic": bool(deterministic),
-        # v0.7: tool definitions contribute to the prompt hash so a
-        # behavior gaining or losing a tool produces a different key.
-        "tools": list(tools) if tools else None,
-    }
-    # CONTRACT v1.3 #1 #7: the mode is part of prompt identity, but only
-    # contributes when native (omit-when-absent, the v1.0.3 #4 pattern)
-    # so every pre-v1.3 fixture hash stays byte-identical.
-    if structured_output_mode == "native":
-        payload["structured_output_mode"] = "native"
-    return payload
-
-
-def _hash_payload(payload: dict[str, Any]) -> str:
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 # ---------- RecordedLLMProvider ---------------------------------------------
@@ -164,11 +121,14 @@ class RecordedLLMProvider(LLMProvider):
         tools: Optional[list[dict[str, Any]]] = None,
         structured_output_mode: str = "prompt",
     ) -> LLMResponse:
-        payload = _canonical_prompt_payload(
+        payload = prompt_identity.build_prompt_identity_payload(
             model=model,
             system=system,
             messages=messages,
-            output_schema=output_schema,
+            output_schema_name=(
+                getattr(output_schema, "__name__", None) if output_schema else None
+            ),
+            output_schema_json=schema_to_json(output_schema),
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
@@ -176,7 +136,7 @@ class RecordedLLMProvider(LLMProvider):
             tools=tools,
             structured_output_mode=structured_output_mode,
         )
-        prompt_hash = _hash_payload(payload)
+        prompt_hash = prompt_identity.hash_prompt_payload(payload)
         path = os.path.join(self._dir, f"{prompt_hash}.json")
         if not os.path.exists(path):
             raise LLMBehaviorError(
@@ -335,11 +295,14 @@ class RecordingLLMProvider(LLMProvider):
             tools=tools,
             **inner_kwargs,
         )
-        payload = _canonical_prompt_payload(
+        payload = prompt_identity.build_prompt_identity_payload(
             model=model,
             system=system,
             messages=messages,
-            output_schema=output_schema,
+            output_schema_name=(
+                getattr(output_schema, "__name__", None) if output_schema else None
+            ),
+            output_schema_json=schema_to_json(output_schema),
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
@@ -347,7 +310,7 @@ class RecordingLLMProvider(LLMProvider):
             tools=tools,
             structured_output_mode=structured_output_mode,
         )
-        prompt_hash = _hash_payload(payload)
+        prompt_hash = prompt_identity.hash_prompt_payload(payload)
         fixture = {
             "prompt_hash": prompt_hash,
             "recorded_at": _now_iso(),
