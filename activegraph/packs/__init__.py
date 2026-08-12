@@ -433,8 +433,9 @@ class RelationType:
 class PackPolicy:
     """A policy declared by a pack.
 
-    `requires_approval`: tuple of object type names whose `add_object`
-    is gated until `runtime.approve(...)` is called.
+    ``requires_approval`` lists object types for which this policy supplies
+    pack-owner attribution when behavior code explicitly calls
+    ``Context.propose_object``. It does not intercept ``Graph.add_object``.
     """
 
     name: str
@@ -1084,15 +1085,15 @@ def load_by_name(name: str) -> Pack:
 
 # ----------------------------------------------------- approval primitives
 #
-# v0.9 ships a minimal approval surface so the diligence pack's
-# memo_approval / risk_approval policies have something to gate on.
+# v0.9 ships a minimal explicit approval surface used by the diligence pack's
+# memo_approval / risk_approval policies for proposal-owner attribution.
 # A pending approval is a value object held in the runtime; user
 # code (or a CLI subcommand) calls runtime.approve(id).
 
 
 @dataclass(frozen=True)
 class PendingApproval:
-    """An object creation that's gated behind a policy approval.
+    """An explicitly proposed object creation awaiting a decision.
 
     The `id` is unique within the runtime instance and is reused as
     the eventual object id once approved. `kind` is "object" in
@@ -1105,7 +1106,7 @@ class PendingApproval:
     object_type: str
     data: dict[str, Any]
     reason: str
-    pack: str  # the pack whose policy gated this
+    pack: str  # pack attributed by the first matching loaded policy, if any
 
 
 __all__ = [

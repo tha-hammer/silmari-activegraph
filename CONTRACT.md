@@ -8563,3 +8563,31 @@ Tested against `claude-agent-sdk==0.2.135` and `claude` CLI `2.1.227`
 exactly — `_load_sdk_bindings()` checks the installed SDK version at
 call time and refuses (terminal `llm.request_error`) to run against
 any other.
+
+## v1.11 #2. Object approval is explicit; policy attributes ownership
+
+This clause is an append-only correction to two inaccurate historical
+descriptions. It supersedes only v0.9 #15's statements that
+`memo_approval` means "memo writes require approval" and `risk_approval`
+means "risk objects require approval", plus v1.4 #3's statement that a
+disabled pack's "gating policies stop gating". The original clauses remain
+in place as history.
+
+1. `Graph.add_object` is always an immediate write. It emits
+   `object.created` and returns the materialized object regardless of loaded
+   `Policy` or `PackPolicy` declarations. No declaration intercepts or
+   rewrites this call.
+2. `Context.propose_object` is the only object-approval entry point. It
+   always creates a pending approval and emits `approval.proposed`; the
+   object is absent until `Runtime.approve` materializes it and emits
+   `object.created`. There is no runtime auto-grant setting.
+3. `PackPolicy.requires_approval` supplies owner attribution for explicit
+   proposals. The loader records matching canonical policy names; the first
+   matching loaded policy determines `PendingApproval.pack` and the `pack`
+   field of `approval.proposed`. No policy id or route is stored on the
+   approval. Per-behavior `Policy.requires_approval` is audit metadata and
+   likewise does not intercept writes.
+4. Disabling a pack removes its attribution from future explicit proposals.
+   Existing pending approvals and their durable events remain unchanged and
+   may still be approved or denied. This correction changes no approval or
+   object event schema.

@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from activegraph import (
     Graph,
+    Object,
     Pack,
     PackConflictError,
     PackError,
@@ -87,6 +88,92 @@ def test_pack_basic_construction():
     assert p.version == "0.1.0"
     assert isinstance(p.object_types, tuple)
     assert isinstance(p.behaviors, tuple)
+
+
+def test_requires_approval_attributes_only_explicit_proposals():
+    """``requires_approval`` does not intercept ``Graph.add_object``.
+
+    The pack policy supplies owner attribution only when behavior code
+    explicitly chooses ``Context.propose_object``.
+    """
+    proposal_ids: list[str] = []
+
+    @behavior(name="proposer", on=["goal.created"])
+    def proposer(event, graph, ctx):
+        proposal_ids.append(
+            ctx.propose_object(
+                "secret",
+                {"value": "proposed"},
+                reason="operator review",
+            )
+        )
+
+    pack = Pack(
+        name="approval_explicit",
+        version="0.1.0",
+        behaviors=(proposer,),
+        policies=(
+            PackPolicy(
+                name="secret_approval",
+                requires_approval=("secret",),
+            ),
+        ),
+    )
+    rt = _fresh_runtime()
+    rt.load_pack(pack)
+
+    before = list(rt.graph.all_objects())
+    direct = rt.graph.add_object("secret", {"value": "direct"})
+
+    assert isinstance(direct, Object)
+    assert len(rt.graph.all_objects()) == len(before) + 1
+    assert rt.graph.get_object(direct.id).data == {"value": "direct"}
+    assert rt.pending_approvals() == []
+    direct_event = next(
+        event
+        for event in rt.graph.events
+        if event.type == "object.created" and event.payload["id"] == direct.id
+    )
+    assert direct_event.payload["object"]["data"] == {"value": "direct"}
+
+    object_snapshot = [
+        (obj.id, obj.type, obj.data) for obj in rt.graph.all_objects()
+    ]
+    rt.run_goal("propose the reviewed value")
+
+    assert proposal_ids == ["approval_001"]
+    assert [
+        (obj.id, obj.type, obj.data) for obj in rt.graph.all_objects()
+    ] == object_snapshot
+    pending = rt.pending_approvals()
+    assert [approval.id for approval in pending] == proposal_ids
+    assert pending[0].pack == "approval_explicit"
+    assert pending[0].object_type == "secret"
+    assert pending[0].data == {"value": "proposed"}
+    proposed_event = next(
+        event
+        for event in rt.graph.events
+        if event.type == "approval.proposed"
+    )
+    assert proposed_event.payload["approval_id"] == proposal_ids[0]
+    assert proposed_event.payload["pack"] == "approval_explicit"
+
+    assert rt.disable_pack("approval_explicit") is True
+    before_disabled_add = len(rt.graph.all_objects())
+    after_disable = rt.graph.add_object("secret", {"value": "after disable"})
+    assert isinstance(after_disable, Object)
+    assert len(rt.graph.all_objects()) == before_disabled_add + 1
+    assert rt.graph.get_object(after_disable.id).data == {
+        "value": "after disable"
+    }
+    assert [approval.id for approval in rt.pending_approvals()] == proposal_ids
+
+    approved_object_id = rt.approve(proposal_ids[0], approved_by="operator")
+    assert rt.pending_approvals() == []
+    approved = rt.graph.get_object(approved_object_id)
+    assert approved is not None
+    assert approved.type == "secret"
+    assert approved.data == {"value": "proposed"}
 
 
 def test_pack_is_frozen():

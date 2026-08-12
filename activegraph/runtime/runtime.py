@@ -195,15 +195,13 @@ class Context:
         *,
         reason: str = "",
     ) -> str:
-        """Defer creation of an object behind a policy approval.
+        """Explicitly defer object creation for operator approval.
 
-        Returns the proposal id. The object materializes when
-        `runtime.approve(id)` is called. Intended for use by behaviors
-        whose pack policy gates `object_type` writes.
-
-        Convenience: behaviors can just call `graph.add_object` if their
-        pack settings say auto-approval is on; this helper is the
-        explicit path when gating is enabled.
+        This call always creates a pending approval and returns its id. The
+        object materializes only when ``runtime.approve(id)`` is called.
+        Direct ``Graph.add_object`` calls remain immediate regardless of
+        loaded policies. A matching pack policy supplies pack-owner
+        attribution for the proposal; it does not decide whether to defer.
         """
         if self._runtime is None:
             from activegraph.runtime.exec_errors import RuntimeContextRequiredError
@@ -3047,7 +3045,8 @@ class Runtime:
         from activegraph.packs.loader import _ensure_pack_state
 
         state = _ensure_pack_state(self)
-        # Find the pack that gates this object type, if any.
+        # Attribute the first matching loaded policy's pack, if any. Policies
+        # do not intercept writes; Context.propose_object chose this path.
         gating = state.gated_object_types.get(object_type, [])
         owner_pack = gating[0].split(".", 1)[0] if gating else ""
         n = state._next_approval_n

@@ -1,25 +1,24 @@
 # Policies
 
-A policy is a runtime-attached rule that gates changes to the graph
-before they land. A behavior proposing a graph mutation under a
-policy doesn't get a direct apply — the change becomes an
-**approval** in `proposed` state. An operator (or an auto-approve
-setting) then approves the proposal, and the change lands.
+A policy declares governance metadata for a pack or behavior. Object
+approval is an explicit workflow: behavior code calls
+`Context.propose_object`, the runtime creates an **approval** in
+`proposed` state, and an operator decides whether the object lands.
+Policies never intercept a direct `Graph.add_object` call.
 
-Policies are how the framework lets an operator sit in the loop
-without rewriting the behavior. The behavior says "I want to add
-this memo"; the policy says "memos require explicit approval"; the
-operator says "yes, approve it." The same behavior runs in dev
-(auto-approve) and prod (explicit-approve) without code changes.
+Policies let the event and pending-approval record identify the pack that
+owns the review convention. The behavior still chooses between an
+immediate write and an operator-reviewed proposal. If pack settings make
+that choice configurable, the behavior must branch explicitly; the runtime
+does not switch or auto-approve the proposal path.
 
-## What gets gated
+## What uses the approval lifecycle
 
-Two operations can be policy-gated:
+These proposal lifecycles are explicit:
 
 - **Object proposals via `ctx.propose_object(type, data, reason)`.**
-  Instead of an immediate `add_object`, the framework creates a
-  pending approval and emits `approval.proposed`. The object
-  lands only when the approval is granted.
+  The framework always creates a pending approval and emits
+  `approval.proposed`. The object lands only when the approval is granted.
 - **Patches.** A patch declared as policy-gated takes the same
   proposed-and-approved path, except the patch lifecycle lives in
   the patch event types (`patch.proposed` / `patch.applied`)
@@ -27,15 +26,13 @@ Two operations can be policy-gated:
   for the patch state machine.
 
 Object proposals are the more common shape. The diligence pack's
-`memo_approval` and `risk_approval` policies are the canonical
-examples: the pack declares which object types require approval,
-the operator decides per-instance.
+`memo_approval` and `risk_approval` policies are the canonical examples:
+the declarations attribute explicit memo and risk proposals to that pack.
 
-Not every change is policy-gated. Direct `graph.add_object`,
+Direct `graph.add_object`,
 `graph.patch_object`, and `graph.emit` calls land immediately;
-they're for changes the behavior author decided don't need
-operator review. The behavior chooses by calling the proposal
-method instead of the direct method.
+they are not rewritten by policy declarations. The behavior chooses
+operator review by calling the proposal method instead of the direct method.
 
 ## The approval lifecycle
 
@@ -56,7 +53,7 @@ Each transition emits an event:
 
 - `approval.proposed` — carries the proposal kind (`object` /
   `patch`), the type, the data, the reason from the proposing
-  behavior, and the pack that owns the gating policy.
+  behavior, and the pack attributed by the first matching loaded policy.
 - `approval.granted` — carries the approval id, the approver
   identity, and the resulting object id (or applied patch id).
 - `approval.denied` — carries the approval id, the denier
@@ -80,7 +77,6 @@ pack = Pack(
         PackPolicy(
             name="memo_approval",
             requires_approval=["memo"],
-            settings_key="auto_approve_memos",
         ),
         ...
     ],
@@ -88,17 +84,15 @@ pack = Pack(
 )
 ```
 
-`requires_approval` lists the object types the policy gates.
-`settings_key` names the pack-settings boolean that controls
-auto-approve behavior; when `True`, the framework approves every
-proposal automatically and the behavior runs as if the policy
-weren't there. When `False`, every proposal pauses until an
-operator decides.
+`requires_approval` lists the object types for which the policy supplies
+proposal-owner attribution. If multiple loaded policies list the same type,
+the first loaded policy supplies the pack name. The declaration does not
+gate `Graph.add_object` and does not create a proposal by itself.
 
-The pack ships with the policies; the runtime instance decides
-auto-approve via its `DiligenceSettings(auto_approve_memos=...)`.
-That separation lets one pack run in different approval modes
-across environments.
+A pack may expose a setting such as
+`DiligenceSettings(auto_approve_memos=...)`, but behavior code owns its
+meaning: it must choose a direct add or an explicit proposal. The runtime
+does not inspect that setting or automatically grant proposals.
 
 ## How a behavior proposes
 
@@ -116,10 +110,8 @@ def memo_synthesizer(event, graph, ctx):
     )
 ```
 
-The propose call returns an approval id. The runtime decides
-whether to apply immediately (auto-approve setting is `True`) or
-queue the proposal (setting is `False`). Either way, the behavior
-body completes; the approval lifecycle continues independently.
+The propose call always queues the proposal and returns its approval id.
+The behavior body completes; the approval lifecycle continues independently.
 
 If the behavior tries `ctx.propose_object` outside a
 runtime-bound context — typically a test fixture or a refactored
@@ -128,7 +120,7 @@ helper — it raises
 
 ## The operator-facing recovery
 
-When auto-approve is off, the operator drives the lifecycle:
+Once a proposal is pending, the operator drives the lifecycle:
 
 ```python
 for pa in rt.pending_approvals():

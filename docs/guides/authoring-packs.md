@@ -499,17 +499,21 @@ policies = [
 ]
 ```
 
-Loaded policies modify how `graph.add_object` behaves: objects of
-the listed types are emitted as `object.proposed` (not
-`object.created`) and require `rt.approve(id)` before becoming
-visible in the projected graph.
+`requires_approval` supplies pack-owner attribution when behavior code
+explicitly calls `ctx.propose_object` for a listed type. The call emits
+`approval.proposed`; `rt.approve(id)` later materializes the object and
+emits `object.created`.
+
+Loaded policies do not modify `graph.add_object`. A direct add is immediate,
+emits `object.created`, and creates no pending approval. The behavior author
+chooses the operator-review path by calling `Context.propose_object`.
 
 Policy names are pack-scoped via the same prefixing rule:
 `diligence.memo_approval`.
 
-`DiligenceSettings.auto_approve_memos: bool = True` (default true so
-the demo flows without manual intervention) lets the pack flip the
-gating off. Set to `False` to see the approval flow.
+If a pack setting selects between immediate and reviewed operation, behavior
+code must branch on that setting and call the appropriate API. The runtime
+does not turn `requires_approval` into an automatic interception or grant.
 
 ---
 
