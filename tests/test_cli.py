@@ -255,6 +255,33 @@ class TestInspect:
         assert "budget" in obj
         assert "recent_events" in obj
 
+    def test_inspect_is_dormant_observation_not_a_liveness_probe(
+        self, temp_db, runner
+    ):
+        runtime = Runtime(Graph(), persist_to=temp_db, behaviors=[])
+        runtime.graph.add_object("pending", {"work": True})
+        run_id = runtime.run_id
+        assert runtime.status().queue_depth == 1
+        assert runtime.status().state == "stopped"
+        assert runtime.graph.store is not None
+        runtime.graph.store.close()
+
+        result = runner.invoke(
+            cli,
+            [
+                "inspect",
+                f"sqlite:///{temp_db}",
+                "--run-id",
+                run_id,
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == EXIT_OK, result.output
+        snapshot = json.loads(result.output)
+        assert snapshot["queue_depth"] == 1
+        assert snapshot["state"] == "stopped"
+
     def test_not_found_for_missing_store(self, temp_db, runner):
         result = runner.invoke(
             cli, ["inspect", "sqlite:////nonexistent/path.db"]

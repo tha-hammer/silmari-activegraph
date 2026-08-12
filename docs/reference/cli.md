@@ -92,6 +92,13 @@ the full status. Combining them is a usage error (exit 2).
 
 **JSON shape (default)**: `{run_id, state, queue_depth, events_processed, frame, budget, registered_behaviors, recent_events}`. With a selector, the shape narrows to that selector's payload (one event, one behaviors list, one packs list, one memo list, or one search-results list).
 
+`inspect` reconstructs a new, dormant Runtime from the store. Its state
+is therefore log-derived (`stopped`, `idle`, or `exhausted`), even when
+pending work makes `queue_depth` nonzero. The process-local `running`
+state is observable only by calling `status()` on the same live Runtime
+instance during an active drain; this command is not a cross-process
+liveness probe.
+
 Exits: 0 on success, 3 if the store / run / event id doesn't exist, 2 on bad selector combination.
 
 ---

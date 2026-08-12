@@ -278,12 +278,13 @@ serialization   ::= status_to_dict( RuntimeStatus ) -> json-object   (* tuples �
 
 Contract notes (CONTRACT v0.8 #11):
 
-1. **Cheap to call**: "No graph traversal beyond a tail-slice of the event log" — `runtime/runtime.py:2593-2597`. In practice `status()` *does* walk the log backwards to derive `state` (`runtime/runtime.py:2645-2653`) — bounded by the distance to the last terminal lifecycle event, not O(1). See Open question 5.
+1. **Cheap to call**: no graph traversal; outside a local drain, `status()` walks the log backwards only to the latest terminal lifecycle event. During a local drain the active-count overlay avoids that scan.
 2. **All returned data is immutable** — every dataclass is `frozen=True`; collections are tuples — `observability/status.py:24-73`.
 3. **There is deliberately no `last_error` field.** "Errors are events; filter `recent_events` for type `behavior.failed`… Convenience accessors that look the same as the source of truth but mean different things are bug-bait" — `observability/status.py:9-12`.
 4. `recent < 0` raises `InvalidRuntimeConfiguration` rather than coercing — `runtime/runtime.py:2601-2632`.
-5. `state` is **log-derived**, so a freshly loaded runtime and the runtime that saved the log agree — `runtime/runtime.py:2643-2645`. Default `"stopped"`; only `runtime.budget_exhausted` → `"exhausted"` and `runtime.idle` → `"idle"` are recognized.
-6. `registered_behaviors` is empty when `self.registry is None` (pre-run) — the intended operator signal, not a bug — `runtime/runtime.py:2665-2668`.
+5. `state` is log-derived while no local public drain is active: default `"stopped"`; `runtime.budget_exhausted` → `"exhausted"`; `runtime.idle` → `"idle"`. A lock-protected, non-persisted active-drain reference count temporarily takes precedence as `"running"`. Nested drains count independently and unwind in `finally`. The count lock does not make Runtime mutation thread-safe.
+6. Same-instance observers may see `"running"`; freshly loaded runtimes and `activegraph inspect` remain dormant/log-derived. Live-versus-loaded equality applies outside active drains.
+7. `registered_behaviors` is empty when `self.registry is None` (pre-run) — the intended operator signal, not a bug.
 
 ### A4. observability.migration -> store
 
@@ -778,10 +779,10 @@ sequenceDiagram
    This is the largest gap between the declared operator contract and the implementation; treat
    `METRIC_NAMES` as a *declared catalog*, not a guaranteed emission set.
 
-2. **`RuntimeState` declares `"running"` but `status()` can never return it.**
-   `observability/status.py:20` includes `"running"` in the Literal, but the derivation at
-   `runtime/runtime.py:2643-2653` only ever produces `"stopped"` (default), `"exhausted"`, or
-   `"idle"`. Either dead state or an unimplemented case.
+2. **Resolved — `running` is a process-local active-drain overlay.** All four public drains use a
+   lock-protected reference count, so same-instance observers see `running`, nested
+   `run_goal -> run_until_idle` cannot clear the outer state, and exceptional unwind restores the
+   exact dormant log-derived state. The count is not persisted; CLI inspection remains dormant.
 
 3. **`activegraph inspect --runs` is referenced but does not exist.** The `promote` not-found
    error tells the operator `"(activegraph inspect {url} --runs lists them)"` (`cli/main.py:915`),

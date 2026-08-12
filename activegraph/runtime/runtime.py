@@ -59,8 +59,10 @@ import json
 import math
 import re
 import random as _random
+import threading
 import time as _time
 import traceback
+from contextlib import contextmanager
 
 
 def _monotonic() -> float:
@@ -68,7 +70,17 @@ def _monotonic() -> float:
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, Optional, Union, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Iterable,
+    Iterator,
+    NamedTuple,
+    Optional,
+    Union,
+    cast,
+)
 
 from activegraph.behaviors.base import Behavior, LLMBehavior, RelationBehavior
 from activegraph.behaviors.decorators import get_registry
@@ -151,6 +163,7 @@ from activegraph.observability.status import (
     EventSummary,
     FrameSnapshot,
     RuntimeStatus,
+    RuntimeState,
 )
 
 
@@ -384,6 +397,11 @@ class Runtime:
                     f"sink name {sink_name!r} is already attached to this graph"
                 )
         self.graph = graph
+        # Same-process liveness overlay for status(). This count is guarded
+        # independently from Runtime mutation: the lock makes observation
+        # coherent but does not make concurrent drains safe.
+        self._active_drain_count = 0
+        self._active_drain_lock = threading.Lock()
         self.frame = frame
         self.policy = policy
         self.budget = Budget(budget or {})
@@ -1155,6 +1173,17 @@ class Runtime:
             read_wall_clock=self._strict_wall_stop_sequence is None
         )
 
+    @contextmanager
+    def _active_drain(self) -> Iterator[None]:
+        """Overlay ``running`` while one public drain is on the stack."""
+        with self._active_drain_lock:
+            self._active_drain_count += 1
+        try:
+            yield
+        finally:
+            with self._active_drain_lock:
+                self._active_drain_count -= 1
+
     def _budget_remaining(self) -> bool:
         """Evaluate limits, reproducing a recorded wall stop when installed."""
 
@@ -1168,33 +1197,37 @@ class Runtime:
         return True
 
     def run_goal(self, goal: str, *, actor: str = "user") -> None:
-        self._ensure_registry()
-        # Stamp the run row's goal (best-effort; only meaningful with a store).
-        if self.graph.store is not None and hasattr(self.graph.store, "upsert_run"):
-            self.graph.store.upsert_run(
-                created_at=_now_iso(),
-                goal=goal,
+        with self._active_drain():
+            self._ensure_registry()
+            # Stamp the run row's goal (best-effort; only meaningful with a store).
+            if self.graph.store is not None and hasattr(
+                self.graph.store, "upsert_run"
+            ):
+                self.graph.store.upsert_run(
+                    created_at=_now_iso(),
+                    goal=goal,
+                    frame_id=self.frame.id if self.frame else None,
+                )
+            ev = Event(
+                id=self.graph.ids.event(),
+                type="goal.created",
+                payload={"goal": goal},
+                actor=actor,
                 frame_id=self.frame.id if self.frame else None,
+                caused_by=None,
+                timestamp=self.graph.clock.now(),
             )
-        ev = Event(
-            id=self.graph.ids.event(),
-            type="goal.created",
-            payload={"goal": goal},
-            actor=actor,
-            frame_id=self.frame.id if self.frame else None,
-            caused_by=None,
-            timestamp=self.graph.clock.now(),
-        )
-        self._start_budget()
-        self.graph.emit(ev)
-        self.run_until_idle()
+            self._start_budget()
+            self.graph.emit(ev)
+            self.run_until_idle()
 
     def run_until_idle(self) -> None:
-        self._ensure_registry()
-        if self.budget._start is None:
-            self._start_budget()
-        self._loop(stop=lambda: False)
-        self._emit_idle_or_exhausted()
+        with self._active_drain():
+            self._ensure_registry()
+            if self.budget._start is None:
+                self._start_budget()
+            self._loop(stop=lambda: False)
+            self._emit_idle_or_exhausted()
 
     def run_quantum(
         self,
@@ -1220,38 +1253,42 @@ class Runtime:
         if not math.isfinite(float(max_seconds)) or float(max_seconds) <= 0:
             raise ValueError("max_seconds must be finite and > 0")
 
-        self._ensure_registry()
-        if self.budget._start is None:
-            self._start_budget()
-        started = _monotonic()
-        start_tick = self._tick
-        deadline = started + float(max_seconds)
-        self._loop(
-            stop=lambda: (
-                self._tick - start_tick >= max_queue_events
-                or _monotonic() >= deadline
+        with self._active_drain():
+            self._ensure_registry()
+            if self.budget._start is None:
+                self._start_budget()
+            started = _monotonic()
+            start_tick = self._tick
+            deadline = started + float(max_seconds)
+            self._loop(
+                stop=lambda: (
+                    self._tick - start_tick >= max_queue_events
+                    or _monotonic() >= deadline
+                )
             )
-        )
-        exhausted = not self._budget_remaining()
-        idle = not self._queue and not self._delayed
-        if exhausted or idle:
-            self._emit_idle_or_exhausted()
-        return RunQuantumResult(
-            queue_events_processed=self._tick - start_tick,
-            elapsed_seconds=_monotonic() - started,
-            queue_depth=len(self._queue),
-            max_queue_depth=max(self._max_queue_depth_observed, len(self._queue)),
-            delayed_depth=len(self._delayed),
-            idle=idle,
-            budget_exhausted=exhausted,
-        )
+            exhausted = not self._budget_remaining()
+            idle = not self._queue and not self._delayed
+            if exhausted or idle:
+                self._emit_idle_or_exhausted()
+            return RunQuantumResult(
+                queue_events_processed=self._tick - start_tick,
+                elapsed_seconds=_monotonic() - started,
+                queue_depth=len(self._queue),
+                max_queue_depth=max(
+                    self._max_queue_depth_observed, len(self._queue)
+                ),
+                delayed_depth=len(self._delayed),
+                idle=idle,
+                budget_exhausted=exhausted,
+            )
 
     def run_until(self, predicate: Callable[[Graph], bool]) -> None:
-        self._ensure_registry()
-        if self.budget._start is None:
-            self._start_budget()
-        self._loop(stop=lambda: predicate(self.graph))
-        self._emit_idle_or_exhausted()
+        with self._active_drain():
+            self._ensure_registry()
+            if self.budget._start is None:
+                self._start_budget()
+            self._loop(stop=lambda: predicate(self.graph))
+            self._emit_idle_or_exhausted()
 
     def embed(
         self,
@@ -2709,8 +2746,9 @@ class Runtime:
     def status(self, recent: int = 20) -> RuntimeStatus:
         """Frozen snapshot of the runtime. CONTRACT v0.8 #11.
 
-        Cheap to call. No graph traversal beyond a tail-slice of the
-        event log. Returns immutable data; mutating any field raises.
+        Cheap to call. It performs no graph traversal and scans backward
+        only to the latest terminal runtime event when no local drain is
+        active. Returns immutable data; mutating any field raises.
 
         ``recent`` controls the length of the ``recent_events`` tail.
         The CLI's ``inspect --tail N`` passes through.
@@ -2755,19 +2793,21 @@ class Runtime:
             exhausted_by=self.budget.exhausted_by(),
         )
 
-        # State derivation: log-based, so a freshly loaded runtime and
-        # the runtime that saved the log agree. Walk back through the
-        # event log for the most recent terminal lifecycle event.
-        # CONTRACT v0.8 #11.
-        state: str = "stopped"
-        for ev in reversed(self.graph.events):
-            t = ev.type
-            if t == "runtime.budget_exhausted":
-                state = "exhausted"
-                break
-            if t == "runtime.idle":
-                state = "idle"
-                break
+        # A process-local active drain temporarily overlays the dormant,
+        # log-derived state. The reference count handles run_goal's nested
+        # run_until_idle call without an inner exit clearing the outer guard.
+        with self._active_drain_lock:
+            active_drain_count = self._active_drain_count
+        state: RuntimeState = "running" if active_drain_count > 0 else "stopped"
+        if active_drain_count == 0:
+            for ev in reversed(self.graph.events):
+                t = ev.type
+                if t == "runtime.budget_exhausted":
+                    state = "exhausted"
+                    break
+                if t == "runtime.idle":
+                    state = "idle"
+                    break
 
         frame_snap: Optional[FrameSnapshot] = None
         if self.frame is not None:
@@ -2808,7 +2848,7 @@ class Runtime:
 
         return RuntimeStatus(
             run_id=self.graph.run_id,
-            state=state,  # type: ignore[arg-type]
+            state=state,
             queue_depth=len(self._queue),
             events_processed=len(events),
             budget=budget_snap,

@@ -1653,13 +1653,16 @@ does not ship adapters.
 `status(recent: int = 20)` — single parameter controls the tail
 length. The CLI's `inspect --tail N` passes through.
 
-State is derived **from the event log**, not from in-memory
-bookkeeping. This means a freshly-loaded runtime and the runtime that
-saved the log agree on state. Walk back through events: if the most
-recent terminal lifecycle event is `runtime.budget_exhausted` →
-`exhausted`; if it's `runtime.idle` → `idle`; otherwise `stopped`.
-`running` is reserved for cross-thread observation of an in-progress
-loop (single-threaded today; documented for future async use).
+While no public drain is active, state is derived **from the event
+log**: walk back through events; if the most recent terminal lifecycle
+event is `runtime.budget_exhausted` → `exhausted`; if it is
+`runtime.idle` → `idle`; otherwise `stopped`. A lock-protected,
+process-local reference count around `run_goal`, `run_until_idle`,
+`run_until`, and `run_quantum` temporarily overlays that dormant state
+with `running`. The count, including nested drains, is always cleared
+in `finally`; it is neither an event nor persisted state. Same-instance
+cross-thread observers can see the overlay, but the lock protects only
+the count, not concurrent Runtime mutation.
 
 There is **no `last_error` field**. Errors are events; filter
 `recent_events` for type `behavior.failed`, or query the event store
@@ -2302,12 +2305,13 @@ the same layout for reproducible demos.
 
 ## v0.9 #20. runtime.status() is log-derived (re-affirm)
 
-Already true for v0.8 but worth pinning here: `runtime.status()` is
+Already true for v0.8 outside active drains: dormant terminal state is
 computed from the event log, not from in-memory caches. After
-`load_pack`, status reflects the `pack.loaded` event. Live runtime
-and `activegraph inspect` see identical state because both read from
-the same source of truth. This is the property that lets operators
-trust the dashboard.
+`load_pack`, status reflects the `pack.loaded` event. A live Runtime and
+`activegraph inspect` therefore agree when the live instance has no
+active drain. During a drain, only the same process and instance can see
+the non-persisted `running` overlay; `inspect` loads a separate dormant
+Runtime and is not a cross-process liveness probe.
 
 The operator guide gets a short section on this property.
 
