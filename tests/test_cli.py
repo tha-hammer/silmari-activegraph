@@ -537,6 +537,13 @@ class TestDiff:
 
 
 class TestExportTrace:
+    @staticmethod
+    def _expected_text(path: str, run_id: str) -> str:
+        from activegraph.trace.printer import Trace
+
+        trace = Trace(Runtime.load(f"sqlite:///{path}", run_id=run_id).graph)
+        return "".join(f"{line}\n" for line in trace.lines())
+
     def test_jsonl_format_writes_one_event_per_line(self, temp_db, runner, tmp_path):
         run_id = _seed_run(temp_db)
         out_file = tmp_path / "trace.jsonl"
@@ -556,6 +563,72 @@ class TestExportTrace:
             obj = json.loads(ln)
             assert "id" in obj
             assert "type" in obj
+
+    def test_text_output_delegates_to_trace_export(
+        self, temp_db, runner, tmp_path, monkeypatch
+    ):
+        from activegraph.trace.printer import Trace
+
+        run_id = _seed_run(temp_db)
+        out_file = tmp_path / "trace.txt"
+        out_file.write_text("stale content\n")
+        calls: list[str] = []
+        real_export = Trace.export
+
+        def recording_export(trace, path):
+            calls.append(path)
+            return real_export(trace, path)
+
+        monkeypatch.setattr(Trace, "export", recording_export)
+        result = runner.invoke(
+            cli,
+            [
+                "export-trace", f"sqlite:///{temp_db}",
+                "--run-id", run_id,
+                "--format", "text",
+                "-o", str(out_file),
+            ],
+        )
+
+        assert result.exit_code == EXIT_OK, result.output
+        assert calls == [str(out_file)]
+        assert out_file.read_text() == self._expected_text(temp_db, run_id)
+        assert "stale content" not in out_file.read_text()
+
+    def test_text_output_without_path_writes_trace_to_stdout(
+        self, temp_db, runner
+    ):
+        run_id = _seed_run(temp_db)
+        result = runner.invoke(
+            cli,
+            [
+                "export-trace", f"sqlite:///{temp_db}",
+                "--run-id", run_id,
+                "--format", "text",
+            ],
+        )
+
+        assert result.exit_code == EXIT_OK, result.output
+        assert result.output == self._expected_text(temp_db, run_id)
+
+    def test_text_output_preserves_file_open_errors(
+        self, temp_db, runner, tmp_path
+    ):
+        run_id = _seed_run(temp_db)
+        out_file = tmp_path / "missing" / "trace.txt"
+        result = runner.invoke(
+            cli,
+            [
+                "export-trace", f"sqlite:///{temp_db}",
+                "--run-id", run_id,
+                "--format", "text",
+                "-o", str(out_file),
+            ],
+        )
+
+        assert result.exit_code == EXIT_GENERIC_ERROR
+        assert isinstance(result.exception, OSError)
+        assert result.exception.filename == str(out_file)
 
 
 class TestMigrate:

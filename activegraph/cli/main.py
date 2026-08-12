@@ -1032,27 +1032,8 @@ def cmd_export_trace(url: str, run_id: str, fmt: str, out_path: Optional[str]) -
 
     trace = Trace(rt.graph)
     if out_path:
-        with open(out_path, "w") as f:
-            trace.print(file=f) if _supports_file_arg(trace.print) else _fallback_text(trace, f)
+        trace.export(out_path)
     else:
-        trace.print()
-
-
-def _supports_file_arg(fn) -> bool:
-    import inspect
-
-    try:
-        sig = inspect.signature(fn)
-        return "file" in sig.parameters
-    except (TypeError, ValueError):
-        return False
-
-
-def _fallback_text(trace, f) -> None:
-    """Trace.print writes to stdout; redirect for backward-compat printers."""
-    import contextlib
-
-    with contextlib.redirect_stdout(f):
         trace.print()
 
 
