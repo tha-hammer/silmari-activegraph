@@ -647,12 +647,23 @@ class Runtime:
         return self.graph.sink_statuses()
 
     def flush_sinks(self, timeout: float | None = 5.0) -> bool:
-        """Flush all attached sinks, applying ``timeout`` to each worker."""
+        """Flush all attached sinks, applying ``timeout`` to each worker.
+
+        Flush is non-detaching: it does not finalize attachment ownership or
+        release a name. If a timed-out close later reaches CLOSED or FAILED,
+        only close/remove reaps closing ownership. A terminal failure remains
+        queryable until explicit removal or name reuse.
+        """
 
         return self.graph.flush_sinks(timeout=timeout)
 
     def close_sinks(self, timeout: float | None = 5.0) -> bool:
-        """Detach and close all sinks, applying ``timeout`` to each worker."""
+        """Detach and close all sinks, applying ``timeout`` to each worker.
+
+        Retry after a timed-out close reaches a terminal state to finalize
+        Graph ownership. A failed retry may return ``False`` while still
+        retaining its queryable failure snapshot and releasing the name.
+        """
 
         return self.graph.close_sinks(timeout=timeout)
 

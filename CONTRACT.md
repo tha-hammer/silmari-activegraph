@@ -7787,6 +7787,13 @@ error. ``SinkHandle.status()``,
 and lifecycle surface. A timeout reports incomplete flush/close; it does
 not wait forever on a hanging adapter.
 
+Flush is non-detaching: it does not finalize attachment ownership or release a
+name. If a timed-out close later reaches CLOSED or FAILED, only close/remove
+reaps closing ownership. A terminal failure remains queryable until explicit
+removal or name reuse. A failed close retry may return ``False`` while still
+reaping the closing attachment, releasing its name, and retaining the failed
+snapshot for inspection.
+
 Four names are added to the locked standard metric table:
 
 - ``activegraph_sink_queue_depth{sink,run_id}`` (gauge);

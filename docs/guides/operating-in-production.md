@@ -302,6 +302,11 @@ Every overflow is counted in `SinkStatus` and the standard sink metrics.
 `RecordingSink` is the thread-safe in-memory double for application tests.
 Status snapshots include active sinks, timed-out closes that can be retried,
 and terminal close failures retained until their name is reused or removed.
+Flush is non-detaching: it does not finalize attachment ownership or release a
+name. If a timed-out close later reaches CLOSED or FAILED, only close/remove
+reaps closing ownership. A terminal failure remains queryable until explicit
+removal or name reuse. A failed close retry can therefore return `False` while
+still releasing closing ownership and retaining the failure snapshot.
 
 Normal `Runtime.load`, `fork`, and strict replay never redeliver history
 to live sinks. Passing `sinks=` to those APIs attaches them only after the
