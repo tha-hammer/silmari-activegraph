@@ -7773,12 +7773,15 @@ Every attachment selects one closed-set ``OverflowPolicy``:
   if the worker is able to continue.
 
 No policy waits for capacity. Every overflow increments the attachment's
-``dropped`` count with its reason. An ``on_event`` exception increments
-``errors`` and not ``delivered``; the worker continues so one bad record
-does not discard the bounded suffix silently. An ``open`` failure marks
-the attachment failed. ``SinkStatus`` exposes name, lifecycle state,
-capacity, current depth, policy, enqueued, delivered, dropped,
-error counts, and the last error. ``SinkHandle.status()``,
+``dropped`` count with its reason. Every later delivery refused because
+the handle is already non-accepting increments ``dropped`` under the
+low-cardinality ``sink.not_accepting`` reason; this is a refusal, not a
+new overflow. An ``on_event`` exception increments ``errors`` and not
+``delivered``; the worker continues so one bad record does not discard
+the bounded suffix silently. An ``open`` failure marks the attachment
+failed. ``SinkStatus`` exposes name, lifecycle state, capacity, current
+depth, policy, enqueued, delivered, dropped, error counts, and the last
+error. ``SinkHandle.status()``,
 ``Graph.sink_statuses()`` / ``Runtime.sink_statuses()``, and bounded
 ``flush_sinks`` / ``close_sinks`` calls are the in-process observability
 and lifecycle surface. A timeout reports incomplete flush/close; it does
@@ -7795,7 +7798,9 @@ The v0.8 #C4 cardinality rule remains unchanged: ``run_id`` appears only
 on the active-state queue-depth gauge, never on a sink counter. Status is
 the source of exact per-attachment counts even when ``NoOpMetrics`` is
 configured. Metric backend exceptions are best-effort and cannot turn a
-sink observation into a runtime failure.
+sink observation into a runtime failure. Sink workers publish metric batches;
+exact status remains authoritative for a refusal recorded after a terminal
+worker has stopped, because the emit thread never calls a metrics backend.
 
 ## v1.8 #4. Normal replay is silent; historical export is a separate mode
 

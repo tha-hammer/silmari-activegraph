@@ -1117,6 +1117,113 @@ def test_every_overflow_policy_is_exact_counted_and_observable(
         runtime.close_sinks(timeout=2.0)
 
 
+def test_fail_sink_late_offer_is_counted_after_worker_stops() -> None:
+    graph = Graph(run_id="run_fail_sink_late_offer")
+    sink = OrderedGateSink()
+    runtime = Runtime(
+        graph,
+        behaviors=[],
+        sinks=[
+            SinkConfig(
+                sink,
+                name="bounded",
+                queue_capacity=1,
+                overflow_policy=OverflowPolicy.FAIL_SINK,
+            )
+        ],
+    )
+    handle = graph._sinks["bounded"]
+    try:
+        graph.emit(_event(graph, 1))
+        assert sink.entered.wait(timeout=2.0)
+        graph.emit(_event(graph, 2))
+        graph.emit(_event(graph, 3))
+
+        status = runtime.sink_statuses()[0]
+        assert status.state.value == "failed"
+        assert status.enqueued == 2
+        assert status.delivered == 0
+        assert status.dropped == 1
+        assert status.queue_depth == 1
+        assert status.dropped_by_reason == (("overflow.fail_sink", 1),)
+
+        sink.release.set()
+        assert handle._stopped.wait(timeout=2.0)
+        assert sink.ids == ("evt_001", "evt_002")
+
+        graph.emit(_event(graph, 4))
+        status = runtime.sink_statuses()[0]
+        assert status.state.value == "failed"
+        assert status.enqueued == 2
+        assert status.delivered == 2
+        assert status.dropped == 2
+        assert status.queue_depth == 0
+        assert status.errors == 0
+        assert status.dropped_by_reason == (
+            ("overflow.fail_sink", 1),
+            ("sink.not_accepting", 1),
+        )
+        assert sink.ids == ("evt_001", "evt_002")
+    finally:
+        sink.release.set()
+        runtime.close_sinks(timeout=2.0)
+
+
+def test_open_failure_late_offer_preserves_queued_loss_reasons() -> None:
+    graph = Graph(run_id="run_open_failure_late_offer")
+    sink = OpenFailingSlowCloseSink()
+    runtime = Runtime(
+        graph,
+        behaviors=[],
+        sinks=[SinkConfig(sink, name="opening", queue_capacity=2)],
+    )
+    handle = graph._sinks["opening"]
+    assert sink.open_entered.wait(timeout=2.0)
+    try:
+        graph.emit(_event(graph, 1))
+        graph.emit(_event(graph, 2))
+        status = runtime.sink_statuses()[0]
+        assert status.state.value == "opening"
+        assert status.enqueued == 2
+        assert status.delivered == 0
+        assert status.dropped == 0
+        assert status.errors == 0
+        assert status.queue_depth == 2
+
+        sink.release_open.set()
+        assert sink.close_entered.wait(timeout=2.0)
+        status = runtime.sink_statuses()[0]
+        assert status.state.value == "failed"
+        assert status.enqueued == 2
+        assert status.delivered == 0
+        assert status.dropped == 2
+        assert status.errors == 1
+        assert status.queue_depth == 0
+        assert status.dropped_by_reason == (("sink.open_failed", 2),)
+        assert status.last_error_operation == "open"
+
+        sink.release_close.set()
+        assert handle._stopped.wait(timeout=2.0)
+        graph.emit(_event(graph, 3))
+
+        status = runtime.sink_statuses()[0]
+        assert status.state.value == "failed"
+        assert status.enqueued == 2
+        assert status.delivered == 0
+        assert status.dropped == 3
+        assert status.errors == 2
+        assert status.queue_depth == 0
+        assert status.dropped_by_reason == (
+            ("sink.not_accepting", 1),
+            ("sink.open_failed", 2),
+        )
+        assert status.last_error_operation == "close"
+    finally:
+        sink.release_open.set()
+        sink.release_close.set()
+        runtime.close_sinks(timeout=2.0)
+
+
 def test_load_and_fork_attach_only_after_history_replay() -> None:
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
