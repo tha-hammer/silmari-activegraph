@@ -744,6 +744,40 @@ def _check_tool_invalid_input_and_invoker_error(metrics: RecordingMetrics) -> No
         ) == [0.0]
 
 
+def _drive_pattern_match_and_delayed_recheck(
+    metrics: RecordingMetrics, _tmp_path: Path
+) -> None:
+    class MatchMatcher:
+        def matches(self, event, graph):
+            return [object()]
+
+    @behavior(name="metric_delayed_pattern", on=["audit.metric"], activate_after=1)
+    def metric_delayed_pattern(event, graph, ctx):
+        return None
+
+    metric_delayed_pattern.pattern_matcher = MatchMatcher()
+    graph = Graph()
+    runtime = Runtime(
+        graph,
+        behaviors=[metric_delayed_pattern],
+        metrics=metrics,
+    )
+    for event_type in ("audit.metric", "advance.tick"):
+        _emit_public_metric_event(graph, event_type, {})
+    runtime.run_until_idle()
+
+
+def _check_pattern_match_and_delayed_recheck(metrics: RecordingMetrics) -> None:
+    assert metrics.values(
+        "counter", "activegraph_patterns_evaluated_total", {}
+    ) == [1.0, 1.0]
+    durations = metrics.values(
+        "histogram", "activegraph_patterns_evaluation_duration_seconds", {}
+    )
+    assert len(durations) == 2
+    assert all(value >= 0.0 for value in durations)
+
+
 class _MetricRecordingSink:
     def open(self) -> None:
         return None
@@ -917,6 +951,17 @@ METRIC_PRODUCTION_CASES = (
         _check_tool_invalid_input_and_invoker_error,
     ),
     MetricProductionCase(
+        "pattern_match_and_delayed_recheck",
+        frozenset(
+            {
+                "activegraph_patterns_evaluated_total",
+                "activegraph_patterns_evaluation_duration_seconds",
+            }
+        ),
+        _drive_pattern_match_and_delayed_recheck,
+        _check_pattern_match_and_delayed_recheck,
+    ),
+    MetricProductionCase(
         "sink_deliver_drop_error_depth",
         frozenset(
             {
@@ -937,8 +982,6 @@ EXPECTED_METRIC_PRODUCTION_GAPS = frozenset(
     {
         "activegraph_budget_cost_remaining_usd",
         "activegraph_budget_events_remaining",
-        "activegraph_patterns_evaluated_total",
-        "activegraph_patterns_evaluation_duration_seconds",
         "activegraph_replay_divergence_detected_total",
     }
 )

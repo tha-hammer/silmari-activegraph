@@ -1065,6 +1065,21 @@ class Runtime:
 
     # ---------- public entry points ----------
 
+    def _record_pattern_evaluation(self, elapsed_seconds: float) -> None:
+        """Observe one matcher call without changing matcher control flow."""
+
+        try:
+            self.metrics.counter("activegraph_patterns_evaluated_total", {})
+            self.metrics.histogram(
+                "activegraph_patterns_evaluation_duration_seconds",
+                {},
+                elapsed_seconds,
+            )
+        except Exception:
+            # Metrics implementations are specified as non-throwing; keep the
+            # runtime boundary defensive so observation never masks matching.
+            return
+
     def _resolve_structured_output_mode(self, b: LLMBehavior) -> str:
         """Resolve "native" or "prompt" for one behavior. CONTRACT v1.3 #1.
 
@@ -1130,7 +1145,10 @@ class Runtime:
                     self._structured_output_modes[b.name] = (
                         self._resolve_structured_output_mode(b)
                     )
-        self.registry = Registry(source)
+        self.registry = Registry(
+            source,
+            pattern_observer=self._record_pattern_evaluation,
+        )
 
         # v0.7: assemble the tool registry. Explicit tools= override the
         # global @tool registry, mirroring how behaviors= works.
