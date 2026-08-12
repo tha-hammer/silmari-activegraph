@@ -581,8 +581,11 @@ concrete error leaves in the package root under one of the seven categories** �
 `runtime/config_errors.py:33,66,96`; `runtime/registration_errors.py:21,79,140,193,250`;
 `runtime/patterns.py:60`; `runtime/scheduler.py:91`; `store/errors.py:27,41,53,66`;
 `store/url.py:42`; `tools/errors.py:152,215,277`; `packs/__init__.py:91,149,161,171,181,347,360`.
-The single outlier is `SandboxStartupError(RuntimeError)` at `sandbox/__init__.py:172`, which does
-not root in `ActiveGraphError`. `MissingOptionalDependency` is raised from five subsystems:
+`SandboxStartupError(ConfigurationError, RuntimeError)` at `sandbox/__init__.py:174` now roots in
+`ActiveGraphError` while preserving built-in `RuntimeError` catches. It remains a subsystem-only
+export and intentionally uses the legacy one-message constructor until AF-wse's separately
+reviewed next-major structured-rendering migration. `MissingOptionalDependency` is raised from
+five subsystems:
 `observability/otel.py:122`, `observability/prometheus.py:122`, `packs/__init__.py:53`,
 `store/postgres.py:74`, `store/falkordb.py:82,97`.
 
@@ -616,7 +619,10 @@ internal-bug    ::= internal_bug_fields( summary, what_happened, why_invariant,
 
 Contract notes (CONTRACT v1.0 #3, #4):
 
-1. **Every framework error inherits from `ActiveGraphError`** and renders in the locked five-block format — `errors.py:1-19`, `:117-124`. Verified: 34/35 exception classes comply.
+1. **Every framework error inherits from `ActiveGraphError`.** Structured errors render in the
+   locked five-block format — `errors.py:1-25`, `:124-131`. `SandboxStartupError` is the explicit
+   narrow exception to rendering only: its ancestry is compliant, while exact one-line
+   `str`/`.args` stay compatible until AF-wse.
 2. **The seven category bases are stable** — `errors.py:141-212`. External code can `except RegistrationError:` today and have it cover leaves that migrate later — `errors.py:136-138`.
 3. **Dual construction mode** during the v1.0 transition: structured (summary + 3 named fields → locked format) or legacy (single positional message → verbatim). `is_structured()` gates which — `errors.py:83-111`, `:126-129`.
 4. **Every concrete leaf multi-inherits a builtin** so existing `except ValueError:` / `except LookupError:` code keeps working — e.g. `ApprovalNotFoundError(ExecutionError, LookupError)`, `InvalidStoreURL(StorageError, ValueError)`, `MissingOptionalDependency(RegistrationError, ImportError)` (`errors.py:215`).
@@ -829,10 +835,11 @@ sequenceDiagram
     (`cli/quickstart.py:433-437`); a developer who renames the behavior silently gets 0. The code
     itself flags this as "a finding worth surfacing in v1.1" (`:429-432`).
 
-11. **`SandboxStartupError(RuntimeError)`** at `sandbox/__init__.py:172` is the only exception class
-    in the package not rooted in `ActiveGraphError` — it violates CONTRACT v1.0 #4's "every framework
-    error inherits from `ActiveGraphError`" (`errors.py:5`). Flagged rather than assumed intentional;
-    the child-process boundary may make it deliberate.
+11. **`SandboxStartupError(ConfigurationError, RuntimeError)` is no longer an ancestry outlier.**
+    The `ConfigurationError`/`ActiveGraphError` route repairs the framework hierarchy, while the
+    built-in base preserves existing startup handlers. The remaining one-line rendering is an
+    explicit deprecated compatibility waiver tracked by AF-wse, not a claim that the leaf already
+    obeys the five-block format; the class stays out of top-level exports.
 
 12. **`DOCS_BASE_URL` is documented as knowingly 404ing.** `errors.py:37-42` states the URL "renders
     the same 404 the rc2 user-test surfaced" until Pages/DNS land, and that the v1.1 #9

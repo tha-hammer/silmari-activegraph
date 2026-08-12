@@ -292,6 +292,7 @@ nav:
           - InvalidRuntimeConfiguration: reference/errors/invalid-runtime-configuration.md
           - InvalidArgumentType: reference/errors/invalid-argument-type.md
           - IncompatibleRuntimeState: reference/errors/incompatible-runtime-state.md
+          - SandboxStartupError: reference/errors/sandbox-startup-error.md
           - RuntimeContextRequiredError: reference/errors/runtime-context-required-error.md
           - InvalidPatchLifecycleState: reference/errors/invalid-patch-lifecycle-state.md
           - PackSchemaViolation: reference/errors/pack-schema-violation.md

@@ -72,6 +72,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from activegraph.errors import ConfigurationError
+
 _log = logging.getLogger("activegraph.sandbox")
 
 
@@ -169,7 +171,7 @@ class TrialReport:
     warnings: tuple[str, ...] = ()
 
 
-class SandboxStartupError(RuntimeError):
+class SandboxStartupError(ConfigurationError, RuntimeError):
     """A trial child could not START under the sandbox env.
 
     Raised by :func:`preflight` when the child fails before it can run
@@ -178,6 +180,8 @@ class SandboxStartupError(RuntimeError):
     the explicit package-path channel exists to prevent). The message
     carries the child's stderr tail so the cause is never opaque.
     """
+
+    _doc_slug = "sandbox-startup-error"
 
 
 def _child_code_paths() -> list[str]:

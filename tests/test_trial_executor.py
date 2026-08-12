@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import activegraph.sandbox as sandbox
 from activegraph.sandbox import (
     LocalSubprocessTrialExecutor,
     PackSource,
@@ -17,6 +18,7 @@ from activegraph.sandbox import (
     TrialFailureDetails,
     TrialIsolationGuarantees,
     TrialLimits,
+    TrialReport,
     TrialResult,
     TrialSpecification,
 )
@@ -116,6 +118,44 @@ def test_local_executor_declares_honest_non_security_isolation() -> None:
     assert guarantees.network == "unconfined"
     assert guarantees.syscalls == "unconfined"
     assert guarantees.security_sandbox is False
+
+
+def test_local_executor_keeps_child_failure_as_report_without_preflight(
+    monkeypatch,
+) -> None:
+    def unexpected_preflight(*args, **kwargs):
+        raise AssertionError("trial execution must not run startup preflight")
+
+    def failed_trial(*args, **kwargs):
+        return TrialReport(
+            outcome="scenario_failed",
+            fork_run_id="run_trial",
+            events_appended=2,
+            behavior_failures=1,
+            detail="candidate scenario raised",
+            exit_code=30,
+        )
+
+    monkeypatch.setattr(sandbox, "preflight", unexpected_preflight)
+    monkeypatch.setattr(sandbox, "_run_forked_trial_local", failed_trial)
+    specification = TrialSpecification(
+        store_path="trial.db",
+        parent_run_id="run_parent",
+        at_event="evt_001",
+        pack_source=PackSource(root_dir="/pinned/pack"),
+    )
+
+    result = LocalSubprocessTrialExecutor().execute(specification.to_json())
+
+    assert result.status == "scenario_failed"
+    assert result.failure == TrialFailureDetails(
+        kind="scenario_failed",
+        message="candidate scenario raised",
+        exit_code=30,
+    )
+    assert result.event_log == TrialEventLogReference(
+        store_path="trial.db", run_id="run_trial"
+    )
 
 
 def test_specification_rejects_unknown_schema_version() -> None:

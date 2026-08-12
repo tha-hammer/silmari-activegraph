@@ -64,6 +64,7 @@ from activegraph import (
     UnsupportedPatternError,
 )
 from activegraph.errors import GITHUB_NEW_ISSUE_URL, internal_bug_fields
+from activegraph.sandbox import SandboxStartupError
 
 
 SNAPSHOTS_DIR = Path(__file__).parent / "snapshots" / "errors"
@@ -195,6 +196,33 @@ def test_active_graph_error_is_the_root() -> None:
         PackError,
     ):
         assert issubclass(cls, ActiveGraphError), cls
+
+
+def test_sandbox_startup_error_has_narrow_legacy_format_waiver() -> None:
+    message = "trial child could not start (exit 17): deterministic failure"
+    err = SandboxStartupError(message)
+
+    assert issubclass(SandboxStartupError, ConfigurationError)
+    assert issubclass(SandboxStartupError, ActiveGraphError)
+    assert issubclass(SandboxStartupError, RuntimeError)
+    assert type(err) is SandboxStartupError
+    assert str(err) == message
+    assert err.args == (message,)
+    assert err.what_failed == ""
+    assert err.why == ""
+    assert err.how_to_fix == ""
+    assert err.context == {}
+    assert err.is_structured() is False
+    assert err.doc_url == (
+        "https://docs.activegraph.ai/errors/sandbox-startup-error"
+    )
+
+
+def test_sandbox_startup_error_stays_out_of_top_level_exports() -> None:
+    import activegraph
+
+    assert "SandboxStartupError" not in activegraph.__all__
+    assert not hasattr(activegraph, "SandboxStartupError")
 
 
 def test_doc_slug_is_unique_per_category() -> None:

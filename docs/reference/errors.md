@@ -1,8 +1,10 @@
 # Errors reference catalog
 
-Every exception the framework raises has a dedicated reference
-page. The error message in the runtime ends with a `More:` link to
-its page; you should rarely need to visit this catalog directly.
+Every exception the framework raises has a dedicated reference page.
+Structured error messages end with a `More:` link to their page. The one
+documented compatibility exception is `SandboxStartupError`: it has its own
+page and framework ancestry, but keeps its legacy one-line rendering until the
+separately reviewed next-major migration tracked by AF-wse.
 
 If you arrived here from an error message, follow the link the
 message printed. If you're browsing — start with
@@ -55,6 +57,7 @@ The seven category bases match the
 
 ### ConfigurationError
 
+- [SandboxStartupError](errors/sandbox-startup-error.md)
 - [MissingProviderError](errors/missing-provider-error.md)
 - [MissingToolError](errors/missing-tool-error.md)
 - [MissingOptionalDependency](errors/missing-optional-dependency.md)
