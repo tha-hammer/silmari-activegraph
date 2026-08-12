@@ -19,6 +19,18 @@ from activegraph import Event, Graph, Runtime, behavior, relation_behavior
 from activegraph.runtime.scheduler import parse_activate_after
 
 
+def _emit_event(graph: Graph, event_type: str, payload: dict) -> Event:
+    event = Event(
+        id=graph.ids.event(),
+        type=event_type,
+        payload=payload,
+        actor="test",
+        timestamp=graph.clock.now(),
+    )
+    graph.emit(event)
+    return event
+
+
 # ---------- parse_activate_after -------------------------------------------
 
 
@@ -232,6 +244,113 @@ def test_scheduled_relation_behavior_uses_relations_added_before_fire():
         }
     )
     assert all(relation_id != relation_c.id for relation_id, _ in fired)
+
+
+def test_budget_exhaustion_restores_complete_due_suffix_in_fifo_order():
+    fired: list[str] = []
+
+    def delayed(name: str):
+        @behavior(name=name, on=["budget.trigger"], activate_after=1)
+        def run(event, graph, ctx):
+            fired.append(name)
+
+        return run
+
+    behaviors = [delayed("first"), delayed("second"), delayed("third")]
+    graph = Graph()
+    runtime = Runtime(
+        graph,
+        behaviors=behaviors,
+        budget={"max_behavior_calls": 1},
+    )
+    _emit_event(graph, "budget.trigger", {})
+    _emit_event(graph, "budget.advance", {})
+
+    exhausted = runtime.run_quantum(max_queue_events=3, max_seconds=1.0)
+    assert exhausted.budget_exhausted is True
+    assert fired == ["first"]
+    assert exhausted.delayed_depth == 2
+
+    runtime.budget.limits["max_behavior_calls"] = 3
+    runtime.run_until_idle()
+    assert fired == ["first", "second", "third"]
+    assert runtime.run_quantum(max_queue_events=1, max_seconds=1.0).delayed_depth == 0
+
+
+def test_relation_fanout_is_non_resumable_after_budget_prefix():
+    fired: list[str] = []
+
+    @relation_behavior(
+        name="budgeted_relation",
+        relation_type="depends_on",
+        on=["budget.relation"],
+        activate_after=1,
+    )
+    def budgeted_relation(relation, event, graph, ctx):
+        fired.append(relation.id)
+
+    graph = Graph()
+    source = graph.add_object("task", {})
+    targets = [graph.add_object("task", {}) for _ in range(3)]
+    relations = [
+        graph.add_relation(source.id, target.id, "depends_on")
+        for target in targets
+    ]
+    runtime = Runtime(
+        graph,
+        behaviors=[budgeted_relation],
+        budget={"max_behavior_calls": 2},
+    )
+    _emit_event(graph, "budget.relation", {"task_id": source.id})
+    _emit_event(graph, "budget.advance", {})
+    exhausted = runtime.run_quantum(max_queue_events=3, max_seconds=1.0)
+
+    assert exhausted.budget_exhausted is True
+    assert len(fired) == 2
+    assert len(set(fired)) == 2
+    assert set(fired) < {relation.id for relation in relations}
+    assert exhausted.delayed_depth == 0
+
+    runtime.budget.limits["max_behavior_calls"] = 10
+    runtime.run_until_idle()
+    assert len(fired) == 2
+
+
+def test_scheduled_relation_failure_does_not_stop_sibling_fanout():
+    attempted: list[str] = []
+
+    @relation_behavior(
+        name="failing_relation",
+        relation_type="depends_on",
+        on=["failure.relation"],
+        activate_after=1,
+    )
+    def failing_relation(relation, event, graph, ctx):
+        attempted.append(relation.id)
+        if len(attempted) == 1:
+            raise ValueError("first relation fails")
+
+    graph = Graph()
+    source = graph.add_object("task", {})
+    targets = [graph.add_object("task", {}) for _ in range(2)]
+    relations = [
+        graph.add_relation(source.id, target.id, "depends_on")
+        for target in targets
+    ]
+    runtime = Runtime(graph, behaviors=[failing_relation])
+    _emit_event(graph, "failure.relation", {"task_id": source.id})
+    _emit_event(graph, "failure.advance", {})
+    runtime.run_until_idle()
+
+    assert set(attempted) == {relation.id for relation in relations}
+    assert len(attempted) == 2
+    failed = [
+        event
+        for event in graph.events
+        if event.type == "behavior.failed"
+        and event.payload["behavior"] == "failing_relation"
+    ]
+    assert len(failed) == 1
 
 
 def test_activate_after_fires_after_n_events():

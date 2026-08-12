@@ -1338,11 +1338,12 @@ class Runtime:
 
     def _fire_due_delayed(self) -> None:
         due = self._delayed.pop_due(self._tick)
-        for entry in due:
+        for index, entry in enumerate(due):
             if not self._budget_remaining():
-                # Re-push and exit — budget exhausted before all due
-                # entries fired; preserved for next run_until_idle.
-                self._delayed.push(entry)
+                # Restore every entry that has not started. Once an entry's
+                # relation fan-out begins it remains non-resumable, matching
+                # immediate relation dispatch (no cursor/repeat model).
+                self._delayed.restore_due_front(due[index:])
                 break
             registry = cast(Registry, self.registry)
             if not registry.contains_identity(entry.behavior):

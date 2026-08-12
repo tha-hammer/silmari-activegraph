@@ -37,7 +37,7 @@ a clear message pointing at CONTRACT v0.7 #13.
 from __future__ import annotations
 
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -74,6 +74,10 @@ class DelayedQueue:
                 kept.append(entry)
         self.entries = kept
         return removed
+
+    def restore_due_front(self, entries: Sequence[ScheduledEntry]) -> None:
+        """Restore an unprocessed due suffix ahead of retained future work."""
+        self.entries = list(entries) + self.entries
 
     def pop_due(self, current_event_count: int) -> list[ScheduledEntry]:
         due: list[ScheduledEntry] = []
