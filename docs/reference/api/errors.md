@@ -65,6 +65,14 @@ per-error recovery prose see the
 
 ::: activegraph.ReservedFieldError
 
+::: activegraph.ObjectNotFoundError
+
+::: activegraph.PatchNotFoundError
+
+::: activegraph.ApplyPatchNotFoundError
+
+::: activegraph.RejectPatchNotFoundError
+
 ::: activegraph.RuntimeContextRequiredError
 
 ::: activegraph.InvalidPatchLifecycleState

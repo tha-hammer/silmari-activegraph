@@ -791,7 +791,9 @@ class Graph:
         """Auto-apply shortcut: build patch, version-check, emit applied/rejected."""
         obj = self._state.get_object(target)
         if obj is None:
-            raise KeyError(f"unknown object: {target}")
+            from activegraph.runtime.exec_errors import ObjectNotFoundError
+
+            raise ObjectNotFoundError(object_id=target)
         clean = copy.deepcopy(
             _reject_reserved_fields(updates, api="patch_object", param="updates")
         )
@@ -893,7 +895,9 @@ class Graph:
     ) -> Event:
         patch = self._state.get_patch(patch_id)
         if patch is None:
-            raise KeyError(f"unknown patch: {patch_id}")
+            from activegraph.runtime.exec_errors import ApplyPatchNotFoundError
+
+            raise ApplyPatchNotFoundError(patch_id=patch_id)
         if patch.status != "proposed":
             from activegraph.runtime.exec_errors import InvalidPatchLifecycleState
             raise InvalidPatchLifecycleState(
@@ -946,9 +950,11 @@ class Graph:
         caused_by: Optional[str],
         frame_id: Optional[str],
     ) -> Event:
-        # Type-level assertion only: a missing patch_id fails on attribute
-        # access exactly as before (validation is the caller's job).
-        patch = cast(Patch, self._state.get_patch(patch_id))
+        patch = self._state.get_patch(patch_id)
+        if patch is None:
+            from activegraph.runtime.exec_errors import RejectPatchNotFoundError
+
+            raise RejectPatchNotFoundError(patch_id=patch_id)
         current = self._state.get_object(patch.target)
         event = Event(
             id=self.ids.event(),

@@ -273,6 +273,10 @@ nav:
           - UnknownToolError: reference/errors/unknown-tool-error.md
           - ApprovalNotFoundError: reference/errors/approval-not-found-error.md
           - ReservedFieldError: reference/errors/reserved-field-error.md
+          - ObjectNotFoundError: reference/errors/object-not-found-error.md
+          - PatchNotFoundError: reference/errors/patch-not-found-error.md
+          - ApplyPatchNotFoundError: reference/errors/apply-patch-not-found-error.md
+          - RejectPatchNotFoundError: reference/errors/reject-patch-not-found-error.md
           - MissingProviderError: reference/errors/missing-provider-error.md
           - MissingToolError: reference/errors/missing-tool-error.md
           - MissingOptionalDependency: reference/errors/missing-optional-dependency.md

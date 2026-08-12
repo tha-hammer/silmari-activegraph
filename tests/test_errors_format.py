@@ -22,6 +22,7 @@ from activegraph import (
     ActiveGraphError,
     AmbiguousBehaviorError,
     AmbiguousToolError,
+    ApplyPatchNotFoundError,
     ApprovalNotFoundError,
     BehaviorNotFoundError,
     ConfigurationError,
@@ -42,15 +43,18 @@ from activegraph import (
     MissingProviderError,
     MissingToolError,
     NonSerializableEventError,
+    ObjectNotFoundError,
     PackConflictError,
     PackError,
     PackNotFoundError,
     PackSchemaViolation,
     PackVersionConflictError,
     PatternError,
+    PatchNotFoundError,
     RegistrationError,
     ReplayDivergenceError,
     ReplayError,
+    RejectPatchNotFoundError,
     RuntimeContextRequiredError,
     SchemaVersionMismatch,
     StorageError,
@@ -1057,6 +1061,63 @@ def test_pr_f_cross_category_leaves_are_execution() -> None:
     assert issubclass(InvalidPatchLifecycleState, ExecutionError)
     assert not issubclass(RuntimeContextRequiredError, ConfigurationError)
     assert not issubclass(InvalidPatchLifecycleState, ConfigurationError)
+
+
+def test_graph_lookup_leaves_preserve_exact_hierarchy_and_builtin_routing() -> None:
+    assert issubclass(ObjectNotFoundError, ExecutionError)
+    assert issubclass(ObjectNotFoundError, ActiveGraphError)
+    assert issubclass(ObjectNotFoundError, KeyError)
+    assert not issubclass(ObjectNotFoundError, AttributeError)
+
+    assert issubclass(PatchNotFoundError, ExecutionError)
+    assert issubclass(PatchNotFoundError, ActiveGraphError)
+    assert not issubclass(PatchNotFoundError, KeyError)
+    assert not issubclass(PatchNotFoundError, AttributeError)
+
+    assert issubclass(ApplyPatchNotFoundError, PatchNotFoundError)
+    assert issubclass(ApplyPatchNotFoundError, KeyError)
+    assert not issubclass(ApplyPatchNotFoundError, AttributeError)
+
+    assert issubclass(RejectPatchNotFoundError, PatchNotFoundError)
+    assert issubclass(RejectPatchNotFoundError, AttributeError)
+    assert not issubclass(RejectPatchNotFoundError, KeyError)
+
+
+@pytest.mark.parametrize(
+    ("err", "field", "value", "slug", "snapshot"),
+    [
+        (
+            ObjectNotFoundError(object_id="task#404"),
+            "object_id",
+            "task#404",
+            "object-not-found-error",
+            "object_not_found",
+        ),
+        (
+            ApplyPatchNotFoundError(patch_id="patch_404"),
+            "patch_id",
+            "patch_404",
+            "apply-patch-not-found-error",
+            "apply_patch_not_found",
+        ),
+        (
+            RejectPatchNotFoundError(patch_id="patch_404"),
+            "patch_id",
+            "patch_404",
+            "reject-patch-not-found-error",
+            "reject_patch_not_found",
+        ),
+    ],
+)
+def test_graph_lookup_leaf_format_and_semantic_fields(
+    err, field, value, slug, snapshot
+) -> None:
+    _assert_format_compliant(err)
+    assert getattr(err, field) == value
+    assert err.context[field] == value
+    assert err.doc_url.endswith(f"/errors/{slug}")
+    assert err.args == (str(err),)
+    _check_snapshot(snapshot, err)
 
 
 # --- Reverse-audit-order snapshots (hardest first) ---

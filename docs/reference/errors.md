@@ -46,6 +46,12 @@ The seven category bases match the
 - [UnknownToolError](errors/unknown-tool-error.md)
 - [ApprovalNotFoundError](errors/approval-not-found-error.md)
 - [ReservedFieldError](errors/reserved-field-error.md)
+- [ObjectNotFoundError](errors/object-not-found-error.md)
+- [PatchNotFoundError](errors/patch-not-found-error.md)
+- [ApplyPatchNotFoundError](errors/apply-patch-not-found-error.md)
+- [RejectPatchNotFoundError](errors/reject-patch-not-found-error.md)
+- [RuntimeContextRequiredError](errors/runtime-context-required-error.md)
+- [InvalidPatchLifecycleState](errors/invalid-patch-lifecycle-state.md)
 
 ### ConfigurationError
 
@@ -55,8 +61,6 @@ The seven category bases match the
 - [InvalidToolRegistration](errors/invalid-tool-registration.md)
 - [InvalidRuntimeConfiguration](errors/invalid-runtime-configuration.md)
 - [InvalidArgumentType](errors/invalid-argument-type.md)
-- [RuntimeContextRequiredError](errors/runtime-context-required-error.md)
-- [InvalidPatchLifecycleState](errors/invalid-patch-lifecycle-state.md)
 
 ### RegistrationError
 
