@@ -19,6 +19,10 @@ def test_normalize_pack_name_kebab_to_snake():
     assert module_name == "my_pack"
 
 
+def test_normalize_pack_name_preserves_strip_and_lowercase_compatibility():
+    assert normalize_pack_name(" My-Pack ") == ("my-pack", "my_pack")
+
+
 def test_normalize_pack_name_already_snake():
     pack_name, module_name = normalize_pack_name("simple")
     assert pack_name == "simple"
@@ -38,6 +42,18 @@ def test_normalize_pack_name_rejects_uppercase():
 def test_normalize_pack_name_rejects_starting_digit():
     with pytest.raises(ValueError):
         normalize_pack_name("9pack")
+
+
+def test_normalize_pack_name_applies_64_character_boundary_after_normalizing():
+    accepted = "A" + "b" * 63
+    assert normalize_pack_name(f" {accepted} ") == (accepted.lower(), accepted.lower())
+    with pytest.raises(ValueError, match="64"):
+        normalize_pack_name("a" * 65)
+
+
+def test_normalize_pack_name_rejects_raw_underscore_distribution_slug():
+    with pytest.raises(ValueError, match="distribution"):
+        normalize_pack_name("my_pack")
 
 
 def test_scaffold_pack_creates_expected_layout(tmp_path):

@@ -91,6 +91,32 @@ def test_load_manifest_round_trip(tmp_path):
     assert m.fixtures_deterministic is True
 
 
+@pytest.mark.parametrize("name", ["a", "a" * 64])
+def test_manifest_name_accepts_canonical_boundaries(tmp_path, name):
+    text = GOOD_MANIFEST.replace('name = "meeting_notes"', f'name = "{name}"')
+    assert load_manifest(_write_pack(tmp_path, text)).name == name
+
+
+@pytest.mark.parametrize("name", ["", "a" * 65, "UPPER", "9pack", "my-pack"])
+def test_manifest_name_rejects_noncanonical_identity(tmp_path, name):
+    text = GOOD_MANIFEST.replace('name = "meeting_notes"', f'name = "{name}"')
+    with pytest.raises(PackManifestError, match="pack.name"):
+        load_manifest(_write_pack(tmp_path, text))
+
+
+@pytest.mark.parametrize("toml_value", ["123", "true"])
+def test_manifest_name_rejects_non_string_without_coercion(tmp_path, toml_value):
+    text = GOOD_MANIFEST.replace(
+        'name = "meeting_notes"', f"name = {toml_value}"
+    )
+    with pytest.raises(PackManifestError) as excinfo:
+        load_manifest(_write_pack(tmp_path, text))
+    assert any(
+        violation == "pack.name must be a string"
+        for violation in excinfo.value.violations
+    )
+
+
 def test_violations_are_aggregated_into_one_error(tmp_path):
     bad = GOOD_MANIFEST.replace('name = "meeting_notes"', 'name = "Bad-Name"')
     bad = bad.replace('version = "0.1.0"', 'version = "not-a-version"')

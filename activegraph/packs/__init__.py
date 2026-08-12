@@ -63,6 +63,7 @@ from activegraph.behaviors.base import (
     _llm_behavior_fn_placeholder,
 )
 from activegraph.tools.base import Tool
+from activegraph.packs.validation import validate_pack_name
 
 
 # ---------------------------------------------------------------- exceptions
@@ -546,9 +547,6 @@ def _load_one_prompt(path: Path) -> PackPrompt:
 # ----------------------------------------------------- the Pack itself
 
 
-_PACK_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
-
-
 @dataclass(frozen=True, eq=False)
 class Pack:
     """A frozen bundle of pack contents.
@@ -589,10 +587,10 @@ class Pack:
                 object.__setattr__(self, f, tuple(v))
 
         # name shape
-        if not isinstance(self.name, str) or not _PACK_NAME_RE.match(self.name):
-            raise PackValidationError(
-                f"Pack.name must match [a-z][a-z0-9_]*, got {self.name!r}"
-            )
+        try:
+            validate_pack_name(self.name, field="Pack.name")
+        except ValueError as exc:
+            raise PackValidationError(str(exc)) from exc
         if not isinstance(self.version, str) or not self.version:
             raise PackValidationError(f"Pack.version must be non-empty str, got {self.version!r}")
 

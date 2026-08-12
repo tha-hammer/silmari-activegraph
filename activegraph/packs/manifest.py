@@ -56,9 +56,9 @@ from pathlib import Path
 from typing import Any
 
 from activegraph.errors import PackError
+from activegraph.packs.validation import validate_pack_name
 
 
-_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 # PEP 440 core grammar (syntactic check only; semantic range
 # resolution is load-time enforcement, not this cycle).
 _VERSION_RE = re.compile(
@@ -221,11 +221,12 @@ def load_manifest(path: str | Path) -> PackManifest:
     surface = table("surface")
     fixtures = table("fixtures")
 
-    name = str(pack.get("name", ""))
-    if not _NAME_RE.match(name):
-        violations.append(
-            f"pack.name {name!r} must match ^[a-z][a-z0-9_]{{1,63}}$"
-        )
+    raw_name = pack.get("name", "")
+    try:
+        name = validate_pack_name(raw_name, field="pack.name")
+    except ValueError as exc:
+        violations.append(str(exc))
+        name = raw_name if isinstance(raw_name, str) else ""
     version = str(pack.get("version", ""))
     if not _VERSION_RE.match(version):
         violations.append(f"pack.version {version!r} is not PEP 440")

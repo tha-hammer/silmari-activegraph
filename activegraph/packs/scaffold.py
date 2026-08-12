@@ -13,8 +13,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from activegraph.packs.validation import validate_pack_name
 
-_PACK_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+
+_DISTRIBUTION_SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
 
 def normalize_pack_name(raw: str) -> tuple[str, str]:
@@ -26,11 +28,14 @@ def normalize_pack_name(raw: str) -> tuple[str, str]:
     - lowercases and validates.
     """
     name = raw.strip().lower()
-    if not _PACK_NAME_RE.match(name):
+    if _DISTRIBUTION_SLUG_RE.fullmatch(name) is None:
         raise ValueError(
-            f"pack name {raw!r} must match [a-z][a-z0-9-]* (lowercase, ASCII)"
+            f"distribution slug {raw!r} must match "
+            f"[a-z][a-z0-9-]{{0,63}} (1–64 lowercase ASCII characters)"
         )
-    return name, name.replace("-", "_")
+    module_name = name.replace("-", "_")
+    validate_pack_name(module_name, field="normalized Pack.name")
+    return name, module_name
 
 
 def scaffold_pack(target_dir: Path, raw_name: str) -> Path:

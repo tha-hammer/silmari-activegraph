@@ -117,13 +117,18 @@ def test_pack_equality_by_name_and_version():
     assert hash(p1) != hash(p3)
 
 
-def test_pack_name_validation():
-    with pytest.raises(PackValidationError):
-        Pack(name="UPPER", version="0.1.0", settings_schema=EmptySettings)
-    with pytest.raises(PackValidationError):
-        Pack(name="9_starts_with_digit", version="0.1.0", settings_schema=EmptySettings)
-    with pytest.raises(PackValidationError):
-        Pack(name="", version="0.1.0", settings_schema=EmptySettings)
+@pytest.mark.parametrize("name", ["a", "a" * 64])
+def test_pack_name_accepts_canonical_boundaries(name):
+    assert Pack(name=name, version="0.1.0").name == name
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["", "a" * 65, "UPPER", "9_starts_with_digit", "my-pack", 1, True],
+)
+def test_pack_name_rejects_noncanonical_identity(name):
+    with pytest.raises(PackValidationError, match="Pack.name"):
+        Pack(name=name, version="0.1.0", settings_schema=EmptySettings)
 
 
 def test_pack_duplicate_behavior_name_rejected():

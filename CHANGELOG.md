@@ -53,6 +53,12 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
   pins now fail before a fork or import. Callers that previously relied on an
   empty pin must compute the candidate and every extra pack's bundle hash and
   reserialize the specification.
+- **Pack names now have one 1–64 character identity rule.** `Pack` and
+  `manifest.toml` accept the same lowercase snake-case boundary; scaffolding
+  keeps its existing strip/lowercase behavior but caps the normalized kebab
+  distribution slug at 64 characters. This is an intentional 1.x constructor
+  narrowing: third-party names longer than 64 characters must choose a shorter
+  stable identity before upgrading.
 
 ## [1.10.0] — 2026-07-12
 

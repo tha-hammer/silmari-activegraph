@@ -181,8 +181,8 @@ List arguments are converted to tuples in `__post_init__` for
 convenience.
 
 `Pack.__post_init__` validates:
-  - `name` is a non-empty lowercase ASCII identifier (matches
-    `^[a-z][a-z0-9_]*$`)
+  - `name` is a 1–64 character lowercase ASCII identifier (matches
+    `^[a-z][a-z0-9_]{0,63}$`)
   - `version` is non-empty
   - object types have unique names within the pack
   - relation types have unique names within the pack

@@ -8635,3 +8635,20 @@ version fail with `pack_source.expected_bundle_hash` or the indexed
 `extra_packs[i].expected_bundle_hash` path before executor work, parent fork,
 or child import. This intentionally breaks the insecure subset of v1 rather
 than retain an unpinned escape hatch.
+
+## 2026-08-12 Set 4 amendment #5 — canonical Pack-name boundary
+
+This amendment intentionally narrows the public v0.9 #2/#6 Pack identity
+contract. Logical `Pack.name` values and manifest `pack.name` values must be
+strings matching `^[a-z][a-z0-9_]{0,63}$`: one through 64 ASCII snake-case
+characters beginning with a lowercase letter. Caller spelling is preserved,
+and equality/hash remain exactly `(name, version)`.
+
+The scaffold continues to strip surrounding whitespace and lowercase input,
+then requires a one-through-64-character ASCII kebab distribution slug. Its
+derived snake name is revalidated through the logical-name rule; a raw
+underscore is not accepted as a distribution slug. Third-party Pack names
+longer than 64 characters must choose a shorter stable identity before
+upgrading. Hard constructor rejection in the current 1.x line is an explicit
+compatibility break, justified by aligning all identity boundaries before a
+Pack can register or emit audit events.
