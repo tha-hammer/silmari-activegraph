@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import UserDict
 import copy
 import io
 import json
@@ -14,7 +15,16 @@ from activegraph.observability.logging import (
     configure_logging,
     get_logger,
     runtime_log_extra,
+    set_payload_redactor,
 )
+
+
+@pytest.fixture(autouse=True)
+def reset_configured_logging():
+    set_payload_redactor(None)
+    yield
+    set_payload_redactor(None)
+    logging.getLogger("activegraph").handlers.clear()
 
 
 @pytest.fixture
@@ -24,6 +34,17 @@ def captured_stream():
     yield stream
     # Reset to non-JSON default so other tests aren't affected
     logging.getLogger("activegraph").handlers.clear()
+
+
+class _CopyFailure:
+    def __deepcopy__(self, memo):
+        raise RuntimeError("copy failed")
+
+
+def _explicit_payload_extra(use_helper, payload):
+    if use_helper:
+        return runtime_log_extra(payload=payload)
+    return {"payload": payload}
 
 
 class TestLogSchema:
@@ -53,9 +74,7 @@ class TestLogSchema:
         )
         log = get_logger("activegraph.test")
         extra = (
-            runtime_log_extra(payload=original)
-            if use_helper
-            else {"payload": original}
+            runtime_log_extra(payload=original) if use_helper else {"payload": original}
         )
         log.info("explicit payload", extra=extra)
 
@@ -74,6 +93,157 @@ class TestLogSchema:
         }
         assert "do-not-log" not in lines[0]
         assert original == original_snapshot
+
+    @pytest.mark.parametrize(
+        "use_helper", [True, False], ids=["helper", "stdlib-extra"]
+    )
+    @pytest.mark.parametrize(
+        ("failure_kind", "expected_callback_calls"),
+        [
+            ("non-mapping", 0),
+            ("copy", 0),
+            ("callback-raises", 1),
+            ("callback-non-dict", 1),
+            ("callback-non-json", 1),
+        ],
+    )
+    def test_invalid_explicit_payload_fails_closed(
+        self, use_helper, failure_kind, expected_callback_calls
+    ):
+        stream = io.StringIO()
+        callback_inputs = []
+        if failure_kind == "non-mapping":
+            payload = "do-not-log"
+        elif failure_kind == "copy":
+            payload = {"secret": "do-not-log", "bad": _CopyFailure()}
+        else:
+            payload = {"nested": {"secret": "do-not-log"}}
+
+        def redact(detached):
+            callback_inputs.append(detached)
+            if failure_kind == "callback-raises":
+                raise RuntimeError("redactor rejected do-not-log")
+            if failure_kind == "callback-non-dict":
+                return ["do-not-log"]
+            if failure_kind == "callback-non-json":
+                return {"secret": "do-not-log", "bad": object()}
+            return {"secret": "[REDACTED]"}
+
+        configure_logging(
+            level="INFO",
+            json_output=True,
+            stream=stream,
+            payload_redactor=redact,
+        )
+        get_logger("activegraph.test").info(
+            "payload omitted",
+            extra=_explicit_payload_extra(use_helper, payload),
+        )
+
+        lines = stream.getvalue().splitlines()
+        assert len(callback_inputs) == expected_callback_calls
+        assert len(lines) == 1
+        decoded = json.loads(lines[0])
+        assert decoded["message"] == "payload omitted"
+        assert "payload" not in decoded
+        assert "do-not-log" not in lines[0]
+
+    @pytest.mark.parametrize(
+        "use_helper", [True, False], ids=["helper", "stdlib-extra"]
+    )
+    def test_reconfigure_with_none_clears_payload_redactor(self, use_helper):
+        redacted_stream = io.StringIO()
+        callback_inputs = []
+        original = {"nested": {"secret": "do-not-log"}}
+        original_snapshot = copy.deepcopy(original)
+
+        def redact(detached):
+            callback_inputs.append(detached)
+            return {"nested": {"secret": "[REDACTED]"}}
+
+        configure_logging(
+            level="INFO",
+            json_output=True,
+            stream=redacted_stream,
+            payload_redactor=redact,
+        )
+        log = get_logger("activegraph.test")
+        log.info(
+            "redacted",
+            extra=_explicit_payload_extra(use_helper, original),
+        )
+
+        raw_stream = io.StringIO()
+        configure_logging(
+            level="INFO",
+            json_output=True,
+            stream=raw_stream,
+            payload_redactor=None,
+        )
+        log.info(
+            "raw after clearing",
+            extra=_explicit_payload_extra(use_helper, original),
+        )
+
+        redacted_lines = redacted_stream.getvalue().splitlines()
+        raw_lines = raw_stream.getvalue().splitlines()
+        assert len(callback_inputs) == 1
+        assert len(redacted_lines) == 1
+        assert json.loads(redacted_lines[0])["payload"] == {
+            "nested": {"secret": "[REDACTED]"}
+        }
+        assert "do-not-log" not in redacted_lines[0]
+        assert len(raw_lines) == 1
+        assert json.loads(raw_lines[0])["payload"] == original
+        assert original == original_snapshot
+
+    @pytest.mark.parametrize(
+        "use_helper", [True, False], ids=["helper", "stdlib-extra"]
+    )
+    def test_no_redactor_emits_detached_mapping_unchanged(self, use_helper):
+        stream = io.StringIO()
+        original = UserDict({"public": "kept", "nested": {"items": ["unchanged"]}})
+        original_snapshot = copy.deepcopy(original)
+        configure_logging(
+            level="INFO",
+            json_output=True,
+            stream=stream,
+            payload_redactor=None,
+        )
+
+        get_logger("activegraph.test").info(
+            "identity",
+            extra=_explicit_payload_extra(use_helper, original),
+        )
+
+        lines = stream.getvalue().splitlines()
+        assert len(lines) == 1
+        assert json.loads(lines[0])["payload"] == dict(original)
+        assert original == original_snapshot
+
+    def test_helper_reserved_none_and_doc_url_behavior_is_unchanged(self):
+        stream = io.StringIO()
+        configure_logging(level="INFO", json_output=True, stream=stream)
+        extra = runtime_log_extra(
+            args=("reserved",),
+            run_id=None,
+            doc_url="https://docs.activegraph.ai/errors/example/",
+        )
+        assert extra == {
+            "ag_args": ("reserved",),
+            "doc_url": "https://docs.activegraph.ai/errors/example/",
+        }
+
+        get_logger("activegraph.test").warning("failure", extra=extra)
+
+        lines = stream.getvalue().splitlines()
+        assert len(lines) == 1
+        decoded = json.loads(lines[0])
+        assert decoded["doc_url"] == "https://docs.activegraph.ai/errors/example/"
+        assert "run_id" not in decoded
+        assert "args" not in decoded
+        assert "ag_args" not in decoded
+        assert "payload" not in decoded
 
     def test_every_line_is_valid_json(self, captured_stream):
         log = get_logger("activegraph.test")
