@@ -58,6 +58,10 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
   sampling-inferred name remain readable through canonical-first fallback.
   Fixture identity metadata is an atomic, opt-in pair; internal mismatches fail
   before provider or file effects and are never retried as network failures.
+- Anthropic and OpenAI now delegate exception classification and
+  `retry-after` parsing to the same wire-policy owner. Error reasons, payload
+  extras, and the deliberately narrow lowercase numeric-header semantics are
+  unchanged.
 
 ## [1.10.0] — 2026-07-12
 

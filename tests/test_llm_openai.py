@@ -170,7 +170,7 @@ def test_complete_maps_network_exception():
 
 def test_complete_maps_rate_limit_exception():
     class RateLimitError(Exception):
-        pass
+        response = SimpleNamespace(headers={"retry-after": "1.25"})
 
     client = MagicMock()
     client.chat.completions.create.side_effect = RateLimitError("429 too many")
@@ -187,6 +187,49 @@ def test_complete_maps_rate_limit_exception():
             timeout_seconds=30,
         )
     assert exc.value.reason == "llm.rate_limited"
+    assert exc.value.payload_extras["retry_after_seconds"] == 1.25
+
+
+def test_complete_delegates_error_policy_to_wire_symbols(monkeypatch):
+    import activegraph.llm.openai as openai_module
+    from activegraph.llm import wire
+
+    assert openai_module.classify_provider_exception is wire.classify_provider_exception
+    assert openai_module.retry_after_seconds is wire.retry_after_seconds
+    assert not hasattr(openai_module, "_classify_provider_exception")
+    assert not hasattr(openai_module, "_retry_after_seconds")
+    error = RuntimeError("opaque")
+    client = MagicMock()
+    client.chat.completions.create.side_effect = error
+    classified: list[Exception] = []
+    retried: list[Exception] = []
+    monkeypatch.setattr(
+        openai_module,
+        "classify_provider_exception",
+        lambda exc: classified.append(exc) or "llm.request_error",
+    )
+    monkeypatch.setattr(
+        openai_module,
+        "retry_after_seconds",
+        lambda exc: retried.append(exc) or 7.25,
+    )
+
+    with pytest.raises(LLMBehaviorError) as exc_info:
+        OpenAIProvider(client=client).complete(
+            system="",
+            messages=[LLMMessage(role="user", content="u")],
+            model="gpt-4o-mini",
+            max_tokens=64,
+            temperature=0.0,
+            top_p=1.0,
+            output_schema=None,
+            timeout_seconds=30,
+        )
+
+    assert classified == [error]
+    assert retried == [error]
+    assert exc_info.value.reason == "llm.request_error"
+    assert exc_info.value.payload_extras["retry_after_seconds"] == 7.25
 
 
 def test_complete_maps_auth_failure_to_auth_error():

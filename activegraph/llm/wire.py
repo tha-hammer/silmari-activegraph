@@ -157,3 +157,19 @@ def classify_provider_exception(e: Exception) -> str:
     if "badrequest" in name or "unprocessableentity" in name or "notfounderror" in name:
         return "llm.request_error"
     return "llm.network_error"
+
+
+def retry_after_seconds(e: Exception) -> Optional[float]:
+    """Parse the providers' existing narrow lowercase retry header shape."""
+
+    response = getattr(e, "response", None)
+    headers = getattr(response, "headers", None) if response is not None else None
+    if headers is None:
+        return None
+    retry_after = headers.get("retry-after") if hasattr(headers, "get") else None
+    if retry_after is None:
+        return None
+    try:
+        return float(retry_after)
+    except (TypeError, ValueError):
+        return None

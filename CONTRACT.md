@@ -8640,3 +8640,14 @@ the inner provider. Replay probes the canonical filename first; only after a
 miss may it probe the legacy inferred filename, at most once and only when its
 hash differs. A total miss reports the canonical requested hash. This fallback
 is read compatibility for old fixtures, never a new-write policy.
+
+## v1.11 #5. Provider wire owns shared exception and retry-header policy
+
+Anthropic and OpenAI adapters consume the same module-level
+`activegraph.llm.wire.classify_provider_exception` and
+`retry_after_seconds` symbols. Providers retain ownership of their
+`LLMBehaviorError` envelopes. Retry-header parsing deliberately preserves the
+existing narrow semantics: read lowercase `retry-after` through `.get`, apply
+`float()`, and return `None` for absent/unreadable values or `TypeError`/
+`ValueError`. It does not normalize header case, parse HTTP dates, clamp
+negative values, or otherwise reinterpret provider input.
