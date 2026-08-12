@@ -318,6 +318,31 @@ class TestOpenTelemetryMetricsOptional:
         assert queue_dp.attributes == {}
         assert queue_dp.value == 5.0
 
+    def test_first_zero_gauge_exports_and_round_trip_returns_to_zero(self):
+        from activegraph.observability.otel import OpenTelemetryMetrics
+
+        if not OpenTelemetryMetrics.available():
+            pytest.skip("opentelemetry-api/opentelemetry-sdk not installed")
+
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+        reader = InMemoryMetricReader()
+        provider = MeterProvider(metric_readers=[reader])
+        metrics = OpenTelemetryMetrics(
+            meter=provider.get_meter("activegraph.zero-gauge")
+        )
+
+        metrics.gauge("activegraph_queue_depth", {}, 0.0)
+        first = _otel_metrics_by_name(reader.get_metrics_data())
+        assert first["activegraph_queue_depth"].data.data_points[0].attributes == {}
+        assert first["activegraph_queue_depth"].data.data_points[0].value == 0.0
+
+        metrics.gauge("activegraph_queue_depth", {}, 2.0)
+        metrics.gauge("activegraph_queue_depth", {}, 0.0)
+        final = _otel_metrics_by_name(reader.get_metrics_data())
+        assert final["activegraph_queue_depth"].data.data_points[0].value == 0.0
+
     def test_concurrent_gauge_updates_serialize_previous_value(self):
         from activegraph.observability.otel import OpenTelemetryMetrics
 
