@@ -161,6 +161,11 @@ class Context:
     policy: Optional[Policy]
     random: _random.Random
     clock: Any  # Clock-like
+    # Compatibility field populated only for @llm_behavior invocation
+    # contexts. Plain/relation contexts keep None. Recorded generation still
+    # belongs to Runtime's @llm_behavior path; direct provider calls from a
+    # handler are unsupported because they bypass events, cache, budget, and
+    # replay governance.
     llm_provider: Optional[LLMProvider] = None
     # v0.7: pattern bindings for the current invocation. Empty list for
     # behaviors that don't declare a pattern. The handler is fired

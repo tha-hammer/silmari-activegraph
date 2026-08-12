@@ -111,7 +111,7 @@ Entry points differ only in the `stop` predicate and whether they emit a termina
 
 ### Data types owned here
 
-- `Context` — the `ctx` every behavior receives: `view`, `frame`, `policy`, `random`, `clock`, `llm_provider`, `matches`, `settings`, `_runtime`, `_behavior_name`, `_event_id` — `activegraph/runtime/runtime.py:157-239`
+- `Context` — the `ctx` every behavior receives: `view`, `frame`, `policy`, `random`, `clock`, invocation-scoped `llm_provider`, `matches`, `settings`, `_runtime`, `_behavior_name`, `_event_id` — `activegraph/runtime/runtime.py:157-239`. Only an LLM invocation receives the configured provider; plain/relation contexts retain `None`. Direct provider calls from handlers are unsupported because they bypass Runtime governance; use `@llm_behavior` and `Context.embed`.
 - `Context.pack_settings(pack_name)` / `Context.propose_object(...)` / `Context.embed(...)` — `activegraph/runtime/runtime.py:182-239`
 - `BehaviorFailure` — NamedTuple of `behavior, event_id, reason, exception_type, message, failed_event_id` — `activegraph/runtime/runtime.py:242-265`
 - `RunQuantumResult` — frozen dataclass; `elapsed_seconds` is deliberately never written to the log — `activegraph/runtime/runtime.py:268-283`

@@ -59,6 +59,17 @@ def test_priority_docs_lock_registration_order_for_all_dispatch_paths() -> None:
     assert "runtime.status().registered_behaviors" in behavior_docs
 
 
+def test_provider_docs_keep_raw_access_outside_the_supported_generation_path() -> None:
+    for path in (BEHAVIOR_CONCEPT, RUNTIME_SPEC, BEHAVIOR_SPEC):
+        normalized = " ".join(path.read_text().split()).lower()
+        assert "llm_provider" in normalized
+        assert "plain" in normalized and "relation" in normalized
+        assert "none" in normalized
+        assert "unsupported" in normalized or "not a supported" in normalized
+        assert "@llm_behavior" in normalized
+        assert "embed" in normalized
+
+
 def test_contract_preserves_history_and_appends_explicit_approval_overlay() -> None:
     contract = CONTRACT.read_text()
 

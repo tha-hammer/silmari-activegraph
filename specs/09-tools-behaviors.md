@@ -301,7 +301,10 @@ Contract notes:
   it. Tools are reachable only from the LLM tool loop in `_invoke_llm_body` —
   `runtime/runtime.py:1942-2006`.
 - **`ctx.llm_provider` is set only for LLM behaviors** — `runtime/runtime.py:1529`; plain and
-  relation behaviors get the field's `None` default — `:1404-1415`, `:2538-2549`.
+  relation behaviors get the field's `None` default — `:1404-1415`, `:2538-2549`. This is
+  compatibility exposure, not a raw generation API: handlers must not call `complete()` directly.
+  Recorded generation goes through `@llm_behavior`, and embeddings through `ctx.embed`, so events,
+  cache, budgets, retry, tools, provenance, and replay remain Runtime-owned.
 - **A behavior exception never propagates.** `_invoke` catches everything except
   `ReplayDivergenceError` and emits `behavior.failed` — `runtime/runtime.py:1436-1458`; same in
   `_invoke_relation` (`:2563-2572`) and around the LLM handler (`:2069-2079`).
@@ -633,11 +636,11 @@ Message sources: `runtime/registry.py:40-70`; `runtime/runtime.py:1288-1296`, `:
    behavior is silently `continue`d at fire time — `runtime/runtime.py:1360-1363` ("Defer this rare
    combination to a future enhancement"). No event marks the drop.
 
-7. **`ctx.llm_provider` asymmetry.** Set only for `@llm_behavior` (`runtime/runtime.py:1529`); plain
-   and relation behaviors always see `None` (`:1404-1415`, `:2538-2549`). Unclear whether that is
-   deliberate. A behavior reaching `ctx.llm_provider.complete()` directly would also bypass the
-   `llm.requested` / `llm.responded` event pair and the LLM cache — the same hazard `ctx.embed()`
-   exists to prevent (`runtime/runtime.py:222-227`), but without an equivalent safe alternative.
+7. **`ctx.llm_provider` is deliberately LLM-invocation-only.** It is the exact configured provider
+   for `@llm_behavior` and `None` for plain/relation contexts. The identity is characterized for
+   compatibility, but direct `complete()` calls remain unsupported because they bypass the
+   Runtime-owned LLM event, cache, budget, retry, tool, provenance, and replay path. The supported
+   alternatives are `@llm_behavior` for generation and `ctx.embed()` for embeddings.
 
 8. **`_resolve_pack_tool_refs` cannot rename in place.** `packs/loader.py:727-733` substitutes a
    *string* `"{pack}.{tool}"` for a pack-local `Tool` object in an `LLMBehavior.tools` list, with a

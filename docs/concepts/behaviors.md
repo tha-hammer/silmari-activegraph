@@ -121,6 +121,15 @@ practical consequences:
   Direct `requests.get` in a behavior body breaks replay
   determinism in a way the framework can't recover from.
 
+`Context.llm_provider` is an invocation-scoped compatibility field: it is
+the configured provider object only while an `@llm_behavior` handler runs,
+and it is `None` in plain and relation handlers. This identity exposure is
+not a supported generation path. Even an LLM handler must not call
+`ctx.llm_provider.complete()` directly, because that bypasses Runtime-owned
+request/response events, cache, budgets, retry classification, tool handling,
+provenance, and replay. Put recorded generation in `@llm_behavior`; use
+`ctx.embed(...)` for governed embeddings.
+
 The framework doesn't enforce determinism with static analysis; the
 discipline is on the developer. The cost of breaking it is a fork
 that produces a different result from its parent — see
