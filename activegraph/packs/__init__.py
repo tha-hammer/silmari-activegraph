@@ -436,6 +436,12 @@ class PackPolicy:
     ``requires_approval`` lists object types for which this policy supplies
     pack-owner attribution when behavior code explicitly calls
     ``Context.propose_object``. It does not intercept ``Graph.add_object``.
+
+    ``auto_apply`` is reserved compatibility metadata. List input is
+    normalized to a tuple, but neither the loader nor Runtime reads it. Its
+    values have no defined object-type, setting, exemption, or automatic grant
+    semantics. Contents deliberately receive no validation beyond the existing
+    sequence normalization.
     """
 
     name: str

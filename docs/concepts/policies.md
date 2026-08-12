@@ -94,6 +94,15 @@ A pack may expose a setting such as
 meaning: it must choose a direct add or an explicit proposal. The runtime
 does not inspect that setting or automatically grant proposals.
 
+### Reserved `auto_apply` metadata
+
+`PackPolicy.auto_apply` is reserved compatibility metadata and currently has
+no runtime effect. List input is normalized to a tuple, but the loader and
+runtime do not read it. Its values have no defined object-type, setting,
+exemption, or automatic grant semantics. Do not use it to select direct writes,
+exempt a type from review, or grant an explicit proposal. Those choices remain
+in behavior and operator code until a future contract defines otherwise.
+
 ## How a behavior proposes
 
 A behavior that wants its change to flow through a policy calls

@@ -515,6 +515,12 @@ If a pack setting selects between immediate and reviewed operation, behavior
 code must branch on that setting and call the appropriate API. The runtime
 does not turn `requires_approval` into an automatic interception or grant.
 
+`PackPolicy.auto_apply` is reserved compatibility metadata and currently has
+no runtime effect. List input is normalized to a tuple, but the loader and
+runtime do not read it. Its values have no defined object-type, setting,
+exemption, or automatic grant semantics. Do not use the field to configure,
+bypass, or automatically decide an approval workflow.
+
 ---
 
 ## 10. Discovery via Python entry points

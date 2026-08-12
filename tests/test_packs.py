@@ -25,6 +25,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 from activegraph import (
+    FrozenClock,
     Graph,
     Object,
     Pack,
@@ -174,6 +175,67 @@ def test_requires_approval_attributes_only_explicit_proposals():
     assert approved is not None
     assert approved.type == "secret"
     assert approved.data == {"value": "proposed"}
+
+
+def test_auto_apply_is_normalized_reserved_metadata_without_runtime_effect():
+    """``auto_apply`` is preserved metadata, not a runtime instruction."""
+
+    tuple_policy = PackPolicy(name="memo_review", auto_apply=("memo",))
+    list_policy = PackPolicy(name="memo_review", auto_apply=["memo"])
+    assert list_policy.auto_apply == tuple_policy.auto_apply == ("memo",)
+
+    def run_workflow(auto_apply):
+        proposal_ids: list[str] = []
+
+        @behavior(name="proposer", on=["goal.created"])
+        def proposer(event, graph, ctx):
+            proposal_ids.append(
+                ctx.propose_object(
+                    "memo",
+                    {"value": "proposed"},
+                    reason="operator review",
+                )
+            )
+
+        policy = PackPolicy(
+            name="memo_review",
+            requires_approval=("memo",),
+            auto_apply=auto_apply,
+        )
+        pack = Pack(
+            name="reserved_auto_apply",
+            version="0.1.0",
+            behaviors=(proposer,),
+            policies=(policy,),
+        )
+        rt = Runtime(
+            Graph(
+                clock=FrozenClock("2026-08-12T00:00:00Z"),
+                run_id="run_reserved_auto_apply",
+            )
+        )
+
+        assert rt.load_pack(pack) is True
+        direct = rt.graph.add_object("memo", {"value": "direct"})
+        rt.run_goal("propose the reviewed memo")
+
+        assert proposal_ids == ["approval_001"]
+        assert policy.auto_apply == tuple(auto_apply)
+        return policy, {
+            "loaded_packs": rt.loaded_packs(),
+            "events": [event.to_dict() for event in rt.graph.events],
+            "direct": direct.to_dict(),
+            "objects": [obj.to_dict() for obj in rt.graph.all_objects()],
+            "proposal_ids": proposal_ids,
+            "pending": rt.pending_approvals(),
+        }
+
+    empty_policy, without_reserved_value = run_workflow(())
+    populated_policy, with_reserved_value = run_workflow(("memo",))
+
+    assert empty_policy.auto_apply == ()
+    assert populated_policy.auto_apply == ("memo",)
+    assert without_reserved_value == with_reserved_value
 
 
 def test_pack_is_frozen():

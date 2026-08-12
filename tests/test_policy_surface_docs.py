@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_CONCEPT = ROOT / "docs" / "concepts" / "policies.md"
 PACK_AUTHORING = ROOT / "docs" / "guides" / "authoring-packs.md"
+PACK_SPEC = ROOT / "specs" / "07-packs.md"
 CONTRACT = ROOT / "CONTRACT.md"
 
 
@@ -23,6 +24,23 @@ def test_current_docs_describe_approval_as_an_explicit_proposal() -> None:
     assert "`object.proposed`" not in combined
     assert "Loaded policies modify how `graph.add_object` behaves" not in combined
     assert "the framework approves every proposal automatically" not in combined
+
+
+def test_auto_apply_docs_mark_the_field_reserved_and_semantically_undefined() -> None:
+    for path in (POLICY_CONCEPT, PACK_AUTHORING, PACK_SPEC):
+        text = path.read_text()
+        normalized = " ".join(text.split())
+        assert "auto_apply" in normalized
+        assert "reserved compatibility metadata" in normalized
+        assert "list input is normalized to a tuple" in normalized.lower()
+        assert (
+            "no defined object-type, setting, exemption, or automatic grant semantics"
+            in normalized
+        )
+
+        assert "auto_apply controls" not in normalized
+        assert "auto_apply exempts" not in normalized
+        assert "auto_apply automatically grants" not in normalized
 
 
 def test_contract_preserves_history_and_appends_explicit_approval_overlay() -> None:
