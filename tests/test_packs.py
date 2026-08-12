@@ -19,6 +19,7 @@ Covers:
 from __future__ import annotations
 
 import textwrap
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,8 @@ from activegraph import (
     RelationType,
     Runtime,
     behavior as user_behavior,
+    llm_behavior as user_llm_behavior,
+    relation_behavior as user_relation_behavior,
     clear_registry,
     clear_tool_registry,
     discover,
@@ -56,6 +59,7 @@ from activegraph.packs import (
     tool,
 )
 from activegraph.packs.loader import AMBIGUOUS
+from activegraph.core.event import Event
 
 
 # ---------------------------------------------------- Pack dataclass
@@ -204,6 +208,177 @@ def test_pack_decorators_attach_pack_meta_to_function():
     assert hasattr(x.fn, "__pack_meta__")
     assert x.fn.__pack_meta__["kind"] == "behavior"
     assert x.fn.__pack_meta__["name"] == "x"
+
+
+def _assert_behavior_domain_parity(global_obj, pack_obj) -> None:
+    skipped = {"fn", "handler", "pattern_matcher"}
+    for field in fields(global_obj):
+        if field.name in skipped:
+            continue
+        value = getattr(global_obj, field.name)
+        peer = getattr(pack_obj, field.name)
+        assert value == peer, field.name
+        assert type(value) is type(peer), field.name
+
+    assert global_obj.pattern_matcher.pattern.source == (
+        pack_obj.pattern_matcher.pattern.source
+    )
+    assert global_obj.pattern_matcher.pattern.match == (
+        pack_obj.pattern_matcher.pattern.match
+    )
+    assert global_obj.pattern_matcher.pattern.where == (
+        pack_obj.pattern_matcher.pattern.where
+    )
+    positive = Graph()
+    positive.add_object("claim", {})
+    event = Event(id="evt_match", type="custom.event")
+    assert bool(global_obj.pattern_matcher.matches(event, positive)) is True
+    assert bool(pack_obj.pattern_matcher.matches(event, positive)) is True
+    assert global_obj.pattern_matcher.matches(event, Graph()) == []
+    assert pack_obj.pattern_matcher.matches(event, Graph()) == []
+
+
+def test_global_and_pack_behavior_construction_has_exact_domain_parity():
+    common = dict(
+        name="parity",
+        on=["custom.event"],
+        where={"kind": "x"},
+        view={"objects": ["claim"]},
+        creates=["result"],
+        budget={"max_events": 2},
+        priority=3,
+        pattern="(c:claim)",
+        activate_after=2,
+    )
+
+    def global_plain_fn(event, graph, ctx):
+        pass
+
+    def pack_plain_fn(event, graph, ctx):
+        pass
+
+    global_plain = user_behavior(**common)(global_plain_fn)
+    pack_plain = behavior(**common)(pack_plain_fn)
+    _assert_behavior_domain_parity(global_plain, pack_plain)
+    assert global_plain.fn is global_plain_fn
+    assert pack_plain.fn is pack_plain_fn
+
+    llm_common = common | {
+        "description": "describe",
+        "model": "m",
+        "output_schema": _Widget,
+        "deterministic": True,
+        "max_tokens": 12,
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "timeout_seconds": 2,
+        "prompt_template": "{system}",
+        "tools": ["lookup"],
+        "max_tool_turns": 2,
+    }
+
+    def global_llm_fn(event, graph, ctx, out):
+        pass
+
+    def pack_llm_fn(event, graph, ctx, out):
+        pass
+
+    global_llm = user_llm_behavior(**llm_common)(global_llm_fn)
+    pack_llm = llm_behavior(**llm_common)(pack_llm_fn)
+    _assert_behavior_domain_parity(global_llm, pack_llm)
+    assert global_llm.fn is pack_llm.fn
+    assert global_llm.handler is global_llm_fn
+    assert pack_llm.handler is pack_llm_fn
+
+    relation_common = common | {"relation_type": "supports"}
+
+    def global_relation_fn(relation, event, graph, ctx):
+        pass
+
+    def pack_relation_fn(relation, event, graph, ctx):
+        pass
+
+    global_relation = user_relation_behavior(**relation_common)(global_relation_fn)
+    pack_relation = relation_behavior(**relation_common)(pack_relation_fn)
+    _assert_behavior_domain_parity(global_relation, pack_relation)
+    assert global_relation.fn is global_relation_fn
+    assert pack_relation.fn is pack_relation_fn
+
+
+def test_pack_behavior_metadata_and_loader_clones_preserve_all_fields():
+    @behavior(
+        name="plain",
+        on=["custom.event"],
+        where={"kind": "x"},
+        pattern="(c:claim)",
+        activate_after=2,
+    )
+    def plain(event, graph, ctx):
+        pass
+
+    @llm_behavior(
+        name="llm",
+        on=["custom.event"],
+        where={"kind": "x"},
+        output_schema=_Widget,
+        pattern="(c:claim)",
+        activate_after=2,
+    )
+    def llm(event, graph, ctx, out):
+        pass
+
+    @relation_behavior(
+        "supports",
+        name="relation",
+        on=["custom.event"],
+        pattern="(c:claim)",
+        activate_after=2,
+    )
+    def relation(rel, event, graph, ctx):
+        pass
+
+    assert plain.fn.__pack_meta__ == {
+        "kind": "behavior",
+        "name": "plain",
+        "on": ["custom.event"],
+        "where": {"kind": "x"},
+    }
+    assert llm.handler.__pack_meta__ == {
+        "kind": "llm_behavior",
+        "name": "llm",
+        "on": ["custom.event"],
+        "where": {"kind": "x"},
+        "output_schema": "_Widget",
+    }
+    assert relation.fn.__pack_meta__ == {
+        "kind": "relation_behavior",
+        "name": "relation",
+        "relation_type": "supports",
+    }
+
+    pack = Pack(
+        name="clonepack",
+        version="1.0.0",
+        behaviors=[plain, llm, relation],
+        settings_schema=EmptySettings,
+    )
+    runtime = _fresh_runtime()
+    runtime.load_pack(pack)
+    clones = {clone._short_name: clone for clone in runtime._pack_behaviors}
+
+    for original in (plain, llm, relation):
+        clone = clones[original.name]
+        assert clone.name == f"clonepack.{original.name}"
+        assert clone._pack_owner == "clonepack"
+        assert clone._short_name == original.name
+        assert clone._pack_local is True
+        for field in fields(original):
+            if field.name in {"name", "fn", "handler"}:
+                continue
+            value = getattr(original, field.name)
+            peer = getattr(clone, field.name)
+            assert value == peer, field.name
+            assert type(value) is type(peer), field.name
 
 
 # ---------------------------------------------------- prompt loading

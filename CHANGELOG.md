@@ -62,6 +62,11 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
   `retry-after` parsing to the same wire-policy owner. Error reasons, payload
   extras, and the deliberately narrow lowercase numeric-header semantics are
   unchanged.
+- Global and pack behavior decorators now share side-effect-free two-stage
+  construction. Pack LLM behaviors use provider-aware `model=None` and the
+  same strict schema validation as global decorators. Global LLM decoration
+  and public `register()` validate before appending, so failed live-runtime
+  validation leaves no transient registry residue.
 
 ## [1.10.0] — 2026-07-12
 

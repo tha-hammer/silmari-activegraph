@@ -30,6 +30,8 @@ from activegraph import (
     llm_behavior,
 )
 from activegraph.llm import AnthropicProvider, ClaudeCodeProvider, OpenAIProvider
+from activegraph.packs import EmptySettings, llm_behavior as pack_llm_behavior
+from activegraph import Pack
 
 from tests._llm_helpers import ClaimList, ScriptedProvider
 
@@ -67,6 +69,31 @@ def test_default_model_resolves_at_registration_when_decorator_omits_it():
 
     # Registration stamped the provider default onto the behavior.
     assert extractor.model == "claude-haiku-4-5"
+
+
+@pytest.mark.parametrize("default_model", ["claude-pack-default", "gpt-pack-default"])
+def test_pack_omitted_model_survives_clone_until_runtime_resolution(
+    default_model,
+) -> None:
+    @pack_llm_behavior(name="extractor", on=["goal.created"])
+    def extractor(event, graph, ctx, llm_output):
+        pass
+
+    pack = Pack(
+        name="modelpack",
+        version="1.0.0",
+        behaviors=[extractor],
+        settings_schema=EmptySettings,
+    )
+    runtime = Runtime(Graph(), behaviors=[], llm_provider=_scripted(default_model))
+
+    runtime.load_pack(pack)
+    clone = runtime._pack_behaviors[0]
+    assert extractor.model is None
+    assert clone.model is None
+
+    runtime._ensure_registry()
+    assert clone.model == default_model
 
 
 def test_anthropic_provider_default_model_is_claude_family():
@@ -400,6 +427,7 @@ def test_register_after_runtime_construction_raises_at_register_time():
 
     assert "claude-sonnet-4-5" in str(excinfo.value)
     assert "OpenAIProvider" in str(excinfo.value)
+    assert clear_registry() == []
 
 
 def test_readme_quickstart_pattern_works_when_models_match():

@@ -8651,3 +8651,28 @@ existing narrow semantics: read lowercase `retry-after` through `.get`, apply
 `float()`, and return `None` for absent/unreadable values or `TypeError`/
 `ValueError`. It does not normalize header case, parse HTTP dates, clamp
 negative values, or otherwise reinterpret provider input.
+
+## v1.11 #6. Global and pack behavior decorators share pure construction
+
+`activegraph.behaviors._factory` is the sole owner of plain, LLM, and relation
+behavior construction. Each builder is two-stage: the decorator expression
+parses/compiles `pattern`, parses `activate_after`, then (for LLM behaviors)
+validates `output_schema`; the returned binder validates the handler, makes
+defensive copies, and constructs the dataclass. This locks error precedence as
+pattern before activation before schema before handler. Construction has no
+registry, Pack, or live-runtime side effect.
+
+This amendment precisely supersedes v0.9 #3's statement that global and pack
+decorators have identical signatures and differ only by skipped registration.
+Their common construction parameters/defaults/validation are identical,
+including `LLMBehavior.model: Optional[str] = None`. Policy intentionally
+splits after successful construction: global plain/relation behaviors append
+once; global LLM behaviors validate against live runtimes and only then append;
+public `register()` likewise validates before append. Pack decorators never
+append or live-validate, and instead set `_pack_local` plus exact
+`__pack_meta__`. Pack tools additionally have the pack-only `export_globally`
+surface and `_export_globally` metadata, specified separately below.
+
+Consequently an omitted pack LLM model survives loader cloning as `None` until
+the Runtime resolves its configured provider's default, and invalid pack LLM
+schemas fail at decoration with the same error and precedence as global ones.
