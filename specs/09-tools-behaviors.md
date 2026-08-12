@@ -243,8 +243,9 @@ match-predicate   ::= [ event.type ∈ behavior.on ]
                       ∧ [ ¬behavior.on ⇒ ¬is_lifecycle(event) ]
 
 invocation        ::= scheduled | immediate
-scheduled         ::= Emit("behavior.scheduled") ";" push-delayed
-                      (* fires at tick + activate_after, re-checking where + pattern *)
+scheduled         ::= Emit("behavior.scheduled") ";" push-delayed-exact-identity
+                      (* fires at tick + activate_after; current relation/pattern,
+                         original-event where, one pattern marker before fan-out *)
 immediate         ::= Emit("behavior.started")
                       ";" handler-call
                       ";" ( Emit("behavior.completed") | Emit("behavior.failed") )
@@ -632,9 +633,11 @@ Message sources: `runtime/registry.py:40-70`; `runtime/runtime.py:1288-1296`, `:
    does not sort unequal values or ties, and status exposes registration order. Activating priority
    would require a separate contract amendment.
 
-6. **`relation_behavior` + `activate_after` is explicitly unimplemented.** A scheduled relation
-   behavior is silently `continue`d at fire time — `runtime/runtime.py:1360-1363` ("Defer this rare
-   combination to a future enhancement"). No event marks the drop.
+6. **Resolved: `relation_behavior` + `activate_after` executes at fire time.** Runtime reuses the
+   shared one-behavior matcher for current relation candidates/pattern bindings, keeps `where=` on
+   the original event payload, validates exact behavior identity/name, emits one pattern marker,
+   and fans out through the normal relation lifecycle. Pack disable cancels exact pending wrappers;
+   due-entry suffixes are FIFO-resumable before start, while started relation fan-out has no cursor.
 
 7. **`ctx.llm_provider` is deliberately LLM-invocation-only.** It is the exact configured provider
    for `@llm_behavior` and `None` for plain/relation contexts. The identity is characterized for

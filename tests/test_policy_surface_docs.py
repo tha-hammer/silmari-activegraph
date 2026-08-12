@@ -106,6 +106,25 @@ def test_contract_appends_capability_verification_overlay() -> None:
     assert "does not create a gateway registry" in overlay
 
 
+def test_delayed_relation_docs_lock_current_state_identity_and_budget_rules() -> None:
+    for path in (BEHAVIOR_CONCEPT, RUNTIME_SPEC, BEHAVIOR_SPEC):
+        normalized = " ".join(path.read_text().split()).lower()
+        assert "relation" in normalized and "activate_after" in normalized
+        assert "current" in normalized and "pattern" in normalized
+        assert "original event payload" in normalized
+
+    contract = CONTRACT.read_text()
+    heading = "## v1.11 #4. Delayed relation behavior fire-time contract"
+    assert contract.count(heading) == 1
+    overlay = " ".join(contract.split(heading, 1)[1].split())
+    assert "corrects and completes v0.7 #13" in overlay
+    assert "exact still-registered behavior object" in overlay
+    assert "Disabling a pack cancels pending entries" in overlay
+    assert "entire unprocessed due suffix" in overlay
+    assert "non-resumable" in overlay
+    assert "exactly one `pattern.matched` marker" in overlay
+
+
 def test_contract_preserves_history_and_appends_explicit_approval_overlay() -> None:
     contract = CONTRACT.read_text()
 

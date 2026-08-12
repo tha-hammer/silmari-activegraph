@@ -8621,3 +8621,30 @@ historical clauses remain in place as archaeology.
    not create a gateway registry, register an implementation, resolve a
    credential, or use `consumes` for runtime authority. Host code owns those
    operations and the gateway-side declaration check.
+
+## v1.11 #4. Delayed relation behavior fire-time contract
+
+This append-only amendment corrects and completes v0.7 #13. Event-count
+timing remains unchanged and wall-clock scheduling remains out of scope.
+
+1. A `RelationBehavior` with `activate_after=N` is scheduled once per matching
+   behavior/event, then executes at its due event-count tick. Fire-time matching
+   uses the exact still-registered behavior object and its unchanged name; a
+   rebuilt registry or newly reloaded same-name wrapper cannot inherit old work.
+2. "Current graph state" means current relation candidates and current pattern
+   bindings. `where=` is re-evaluated against the original triggering event
+   payload, because the query language has no graph root for `where`. No
+   trigger-time relation IDs or relation enumeration order are persisted.
+3. A successful fire-time pattern evaluation emits exactly one
+   `pattern.matched` marker for the scheduled behavior/event before the first
+   relation lifecycle start. Every relation invocation receives the identical
+   complete `ctx.matches` binding list.
+4. Disabling a pack cancels pending entries owned by its exact behavior
+   wrappers before the registry is rebuilt. Reloading may create new work, but
+   it never resurrects a disabled wrapper's entry; other behaviors retain FIFO.
+5. If budget capacity ends before a due entry starts, the entire unprocessed
+   due suffix is restored at the front in FIFO order. Once a relation entry
+   starts fan-out, its local remaining relations are non-resumable, exactly like
+   immediate fan-out: no cursor is stored, completed relations never repeat,
+   and a contained handler failure does not prevent siblings while capacity
+   remains.

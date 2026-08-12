@@ -855,11 +855,13 @@ Two consequences that could not be resolved from the code alone:
   `_requeue_unfired` bypasses `_on_event` by pushing to `rt._queue` directly (`:4172`). Worth
   confirming against `CONTRACT.md` whether the narrow filter is intended.
 
-**Acknowledged gap, not a bug:** `activate_after` combined with `RelationBehavior` is silently a
-no-op — `_fire_due_delayed` `continue`s past relation behaviors with the comment "Defer this rare
-combination to a future enhancement" (`activegraph/runtime/runtime.py:1360-1363`). The behavior *is*
-scheduled (a `behavior.scheduled` event is emitted at `:1309`) but never fires, so the trace shows a
-scheduled-but-never-started entry indistinguishable from a `where=`-recheck skip.
+**Resolved behavior:** `activate_after` combined with `RelationBehavior` is
+dispatched at fire time against current relation candidates and pattern state.
+The immutable-by-contract original event payload remains the input to `where=`. Exact
+behavior identity prevents registry rebuilds or pack reloads from inheriting
+old work; disable cancels owned entries; pre-entry exhaustion restores the
+complete FIFO suffix; started relation fan-out is non-resumable and emits one
+pattern marker before fan-out.
 
 **Performance observations (not correctness):**
 

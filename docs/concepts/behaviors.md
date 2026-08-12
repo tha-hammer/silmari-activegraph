@@ -53,6 +53,10 @@ fires when **all** of them hold:
   the triggering event. Integer event count only; wall-clock units
   are refused (see
   [`invalid-activate-after`](../reference/errors/invalid-activate-after.md)).
+  Delayed relation behaviors re-evaluate current relation candidates and
+  pattern bindings at fire time, while `where=` remains a filter over the
+  original event payload. Disabling an owning pack cancels its exact pending
+  wrappers.
 - `priority=` — reserved metadata. It is retained on the behavior but does
   not influence dispatch. Plain, LLM, relation, global, pack, and delayed
   behaviors all run in registration order; unequal values and ties obey the
