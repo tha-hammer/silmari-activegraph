@@ -8676,3 +8676,27 @@ surface and `_export_globally` metadata, specified separately below.
 Consequently an omitted pack LLM model survives loader cloning as `None` until
 the Runtime resolves its configured provider's default, and invalid pack LLM
 schemas fail at decoration with the same error and precedence as global ones.
+
+## v1.11 #7. Global and pack tools share pure canonical construction
+
+`activegraph.tools._factory` is the sole owner of Tool construction. Its first
+stage normalizes `cost_per_call` to `Decimal`, so an invalid cost fails before
+handler validation. Its returned binder validates the `(args, ctx)` signature,
+infers an omitted input schema, converts `timeout_seconds` to exact `float` and
+`deterministic` to exact `bool`, and constructs the Tool before any effect.
+Global `@tool` then appends exactly once. Pack `@tool` never appends; it sets
+`_pack_local`, boolean `_export_globally`, and exact `__pack_meta__` instead.
+
+The pack-only `export_globally` parameter remains an intentional exception to
+the common signature. It controls whether the loader-renamed canonical Tool is
+also entered under its short key in a Runtime's effective `tool_registry`; it
+does not append to the module-global registry. Regardless of export, an
+unambiguous `Runtime.get_tool(short)` continues to resolve through Pack short-
+name metadata. Canonical and exported-short registry keys point to the same
+loader clone, not the original decorated pack Tool.
+
+The omitted cost is newly locked to exact `Decimal("0")`, including string
+rendering `"0"` and Decimal exponent/tuple representation. This authority
+comes from the canonical Tool field and original global decorator plus v0.9
+parity—not from a later historical contract change—and supersedes the pack
+copy's stale `"0.0"` default.

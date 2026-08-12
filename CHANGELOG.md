@@ -67,6 +67,11 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
   same strict schema validation as global decorators. Global LLM decoration
   and public `register()` validate before appending, so failed live-runtime
   validation leaves no transient registry residue.
+- Global and pack tools now share canonical construction and validation.
+  Omitted pack tool cost is exactly `Decimal("0")` (rather than the stale
+  `Decimal("0.0")` representation), and pack timeout/determinism values now
+  normalize to the same exact types as global tools. Pack export aliases still
+  point to the loader clone without touching the module-global registry.
 
 ## [1.10.0] — 2026-07-12
 

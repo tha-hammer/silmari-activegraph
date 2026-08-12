@@ -6,9 +6,9 @@ exposes:
 
 - The `Pack` dataclass (frozen, equality by (name, version)).
 - Pack-aware decorators: `@behavior`, `@llm_behavior`,
-  `@relation_behavior`, `@tool`. Identical signatures to the
-  decorators in `activegraph.*` except they DO NOT register
-  globally — a pack module is safe to import without a runtime.
+  `@relation_behavior`, `@tool`. They share construction semantics
+  with `activegraph.*` but attach pack metadata instead of registering
+  globally; pack `@tool` additionally exposes `export_globally`.
 - `ObjectType`, `RelationType`, `PackPolicy`, `PackPrompt` —
   the value objects that go into a `Pack`.
 - `EmptySettings` — Pydantic placeholder for packs with no
@@ -38,6 +38,7 @@ import hashlib
 import re
 import sys
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
@@ -63,6 +64,7 @@ from activegraph.behaviors.base import (
 )
 from activegraph.behaviors import _factory as behavior_factory
 from activegraph.tools.base import Tool
+from activegraph.tools import _factory as tool_factory
 
 
 # ---------------------------------------------------------------- exceptions
@@ -862,7 +864,7 @@ def tool(
     description: str = "",
     input_schema: Optional[type] = None,
     output_schema: Optional[type] = None,
-    cost_per_call: Any = "0.0",
+    cost_per_call: Any = Decimal("0"),
     timeout_seconds: float = 30.0,
     deterministic: bool = False,
     export_globally: bool = False,
@@ -873,44 +875,25 @@ def tool(
     name (`{pack}.{name}`) AND the global short name. Default is
     pack-scoped only.
     """
-    from decimal import Decimal
+    bind = tool_factory.build_tool(
+        name=name,
+        description=description,
+        input_schema=input_schema,
+        output_schema=output_schema,
+        cost_per_call=cost_per_call,
+        timeout_seconds=timeout_seconds,
+        deterministic=deterministic,
+    )
 
     def wrap(fn: Callable[..., Any]) -> Tool:
-        # v1.3: arity check at decoration time, plus input_schema
-        # inference from the first parameter's Pydantic annotation when
-        # input_schema= is omitted (see activegraph/_signature.py).
-        from activegraph._signature import (
-            infer_tool_input_schema,
-            validate_handler_signature,
-        )
-
-        validate_handler_signature(
-            fn,
-            expected_params=("args", "ctx"),
-            decorator="@tool",
-            allow_annotated_extras=False,
-        )
-        t = Tool(
-            name=name or fn.__name__,
-            fn=fn,
-            description=description,
-            input_schema=(
-                input_schema
-                if input_schema is not None
-                else infer_tool_input_schema(fn)
-            ),
-            output_schema=output_schema,
-            cost_per_call=Decimal(str(cost_per_call)),
-            timeout_seconds=timeout_seconds,
-            deterministic=deterministic,
-        )
+        t = bind(fn)
         t._pack_local = True  # type: ignore[attr-defined]
         t._export_globally = bool(export_globally)  # type: ignore[attr-defined]
         fn.__pack_meta__ = {  # type: ignore[attr-defined]
             "kind": "tool",
             "name": t.name,
-            "deterministic": deterministic,
-            "export_globally": export_globally,
+            "deterministic": t.deterministic,
+            "export_globally": bool(export_globally),
         }
         return t
 
