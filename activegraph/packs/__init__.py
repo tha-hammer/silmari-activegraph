@@ -733,7 +733,10 @@ def behavior(
     pattern: Optional[str] = None,
     activate_after: Any = None,
 ) -> Callable[[Callable[..., None]], Behavior]:
-    """Pack-aware `@behavior`. Does not register globally."""
+    """Pack-aware `@behavior`. Does not register globally.
+
+    ``priority`` is reserved metadata; dispatch remains registration-ordered.
+    """
 
     from activegraph.runtime.patterns import parse as _parse_pattern
     from activegraph.runtime.scheduler import parse_activate_after as _parse_aa
@@ -805,7 +808,10 @@ def llm_behavior(
     tools: Optional[list[Any]] = None,
     max_tool_turns: int = 6,
 ) -> Callable[[Callable[..., None]], LLMBehavior]:
-    """Pack-aware `@llm_behavior`. Does not register globally."""
+    """Pack-aware `@llm_behavior`. Does not register globally.
+
+    ``priority`` is reserved metadata; dispatch remains registration-ordered.
+    """
 
     from activegraph.runtime.patterns import parse as _parse_pattern
     from activegraph.runtime.scheduler import parse_activate_after as _parse_aa
@@ -878,7 +884,10 @@ def relation_behavior(
     pattern: Optional[str] = None,
     activate_after: Any = None,
 ) -> Callable[[Callable[..., None]], RelationBehavior]:
-    """Pack-aware `@relation_behavior`. Does not register globally."""
+    """Pack-aware `@relation_behavior`. Does not register globally.
+
+    ``priority`` is reserved metadata; dispatch remains registration-ordered.
+    """
 
     from activegraph.runtime.patterns import parse as _parse_pattern
     from activegraph.runtime.scheduler import parse_activate_after as _parse_aa

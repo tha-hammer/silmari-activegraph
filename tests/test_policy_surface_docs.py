@@ -6,7 +6,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_CONCEPT = ROOT / "docs" / "concepts" / "policies.md"
 PACK_AUTHORING = ROOT / "docs" / "guides" / "authoring-packs.md"
+BEHAVIOR_CONCEPT = ROOT / "docs" / "concepts" / "behaviors.md"
 PACK_SPEC = ROOT / "specs" / "07-packs.md"
+RUNTIME_SPEC = ROOT / "specs" / "02-runtime-core.md"
+BEHAVIOR_SPEC = ROOT / "specs" / "09-tools-behaviors.md"
 CONTRACT = ROOT / "CONTRACT.md"
 
 
@@ -41,6 +44,19 @@ def test_auto_apply_docs_mark_the_field_reserved_and_semantically_undefined() ->
         assert "auto_apply controls" not in normalized
         assert "auto_apply exempts" not in normalized
         assert "auto_apply automatically grants" not in normalized
+
+
+def test_priority_docs_lock_registration_order_for_all_dispatch_paths() -> None:
+    for path in (BEHAVIOR_CONCEPT, RUNTIME_SPEC, BEHAVIOR_SPEC):
+        normalized = " ".join(path.read_text().split()).lower()
+        assert "priority" in normalized
+        assert "registration order" in normalized
+        assert "reserved" in normalized
+
+    behavior_docs = " ".join(BEHAVIOR_CONCEPT.read_text().split()).lower()
+    assert "plain, llm, relation, global, pack, and delayed" in behavior_docs
+    assert "runtimestatus.registered_behaviors" not in behavior_docs
+    assert "runtime.status().registered_behaviors" in behavior_docs
 
 
 def test_contract_preserves_history_and_appends_explicit_approval_overlay() -> None:

@@ -53,6 +53,10 @@ fires when **all** of them hold:
   the triggering event. Integer event count only; wall-clock units
   are refused (see
   [`invalid-activate-after`](../reference/errors/invalid-activate-after.md)).
+- `priority=` — reserved metadata. It is retained on the behavior but does
+  not influence dispatch. Plain, LLM, relation, global, pack, and delayed
+  behaviors all run in registration order; unequal values and ties obey the
+  same rule.
 
 ## The signature
 
@@ -121,6 +125,12 @@ The framework doesn't enforce determinism with static analysis; the
 discipline is on the developer. The cost of breaking it is a fork
 that produces a different result from its parent — see
 [`replay-divergence-error`](../reference/errors/replay-divergence-error.md).
+
+Registration order is also the dispatch-order contract. Runtime never sorts
+the registry by `priority`, and `Runtime.status().registered_behaviors` reports
+the same order used for matching. Pack behaviors follow the global or explicit
+behaviors already registered with the runtime; delayed entries due on the same
+event-count tick remain FIFO.
 
 ## The failure model
 

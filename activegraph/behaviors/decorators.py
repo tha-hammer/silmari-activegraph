@@ -163,6 +163,9 @@ def behavior(
 ) -> Callable[[Callable[..., None]], Behavior]:
     """Decorate a function as an event-driven behavior.
 
+    ``priority`` is reserved metadata. Runtime dispatch remains in behavior
+    registration order for unequal values as well as ties.
+
     v0.7 additions (both keyword-only):
       - `pattern=`: a Cypher subset pattern string. When set, the
         behavior fires only when the pattern matches the post-event
@@ -236,6 +239,9 @@ def llm_behavior(
     max_tool_turns: int = 6,
 ) -> Callable[[Callable[..., None]], LLMBehavior]:
     """Decorate a function as an LLM-driven behavior.
+
+    ``priority`` is reserved metadata. Runtime dispatch remains in behavior
+    registration order for unequal values as well as ties.
 
     The decorated function's signature is
     `(event, graph, ctx, llm_output) -> None`. The runtime assembles
@@ -359,6 +365,9 @@ def relation_behavior(
     activate_after: Any = None,
 ) -> Callable[[Callable[..., None]], RelationBehavior]:
     """Decorate a function as a relation behavior — fires once per matching edge.
+
+    ``priority`` is reserved metadata. Runtime dispatch remains in behavior
+    registration order for unequal values as well as ties.
 
     v0.7: also accepts `pattern=` and `activate_after=` per CONTRACT
     v0.7 #8 / #11 / #13.
