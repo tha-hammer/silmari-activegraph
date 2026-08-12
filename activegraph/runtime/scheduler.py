@@ -37,6 +37,7 @@ a clear message pointing at CONTRACT v0.7 #13.
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -60,6 +61,19 @@ class DelayedQueue:
 
     def push(self, entry: ScheduledEntry) -> None:
         self.entries.append(entry)
+
+    def cancel_behaviors(self, behaviors: Collection[BehaviorLike]) -> int:
+        """Cancel entries owned by the exact supplied behavior objects."""
+        targets = tuple(behaviors)
+        kept: list[ScheduledEntry] = []
+        removed = 0
+        for entry in self.entries:
+            if any(entry.behavior is behavior for behavior in targets):
+                removed += 1
+            else:
+                kept.append(entry)
+        self.entries = kept
+        return removed
 
     def pop_due(self, current_event_count: int) -> list[ScheduledEntry]:
         due: list[ScheduledEntry] = []

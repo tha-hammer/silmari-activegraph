@@ -2887,6 +2887,12 @@ class Runtime:
         )
         state.tool_short_to_canonical = _rebuild_shorts(state.tool_owners)
 
+        owned_behavior_objects = [
+            b
+            for b in self._pack_behaviors
+            if getattr(b, "_pack_owner", None) == name
+        ]
+        self._delayed.cancel_behaviors(owned_behavior_objects)
         self._pack_behaviors = [
             b
             for b in self._pack_behaviors
