@@ -13,9 +13,11 @@ against a fresh runtime:
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -26,6 +28,11 @@ from activegraph.packs.diligence.fixtures import (
     RecordedDiligenceProvider,
     THREE_COMPANIES,
     company_goal,
+)
+from activegraph.packs.manifest import (
+    load_manifest,
+    verify_content_hash,
+    verify_surface,
 )
 
 
@@ -59,6 +66,33 @@ def diligence_runtime():
 def test_three_memos_produced(diligence_runtime):
     memos = [o for o in diligence_runtime.graph.all_objects() if o.type == "memo"]
     assert len(memos) == 3, f"expected 3 memos (one per company), got {len(memos)}"
+
+
+def test_diligence_manifest_matches_source_surface_and_content():
+    import activegraph.packs.diligence as diligence_module
+
+    root = Path(diligence_module.__file__).resolve().parent
+    manifest = load_manifest(root)
+    verify_surface(manifest, diligence_pack)
+    verify_content_hash(manifest, root)
+
+
+def test_diligence_load_emits_no_manifest_warning(caplog):
+    from activegraph.packs import loader as pack_loader
+
+    pack_loader._manifest_checked.clear()
+    provider = RecordedDiligenceProvider(companies=THREE_COMPANIES)
+    with caplog.at_level(logging.WARNING, logger="activegraph.packs.manifest"):
+        runtime = Runtime(Graph(), llm_provider=provider)
+        assert runtime.load_pack(
+            diligence_pack, settings=DiligenceSettings()
+        ) is True
+    assert not [
+        record
+        for record in caplog.records
+        if record.name == "activegraph.packs.manifest"
+        and record.levelno >= logging.WARNING
+    ]
 
 
 def test_each_memo_has_required_sections(diligence_runtime):

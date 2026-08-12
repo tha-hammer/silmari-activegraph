@@ -17,6 +17,12 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
 
 ### Added
 
+- **Pack manifests are now shipped and scaffolded.** The bundled Diligence
+  pack and every `activegraph pack new` project include a package-data
+  `manifest.toml`, a real fixture resource, and direct surface/content-hash
+  verification. `Pack.manifest_path` provides an optional absolute, exact
+  locator for relation-only or componentless packs; legacy module discovery
+  remains available when it is omitted.
 - **`ClaudeCodeProvider`** (CONTRACT v1.11 #1). A third `LLMProvider`,
   `activegraph/llm/claude_code.py`, backed by the Claude Agent SDK
   (`pip install "activegraph[claude-code]"`, or via `[llm]`/`[all]` —
@@ -46,6 +52,11 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
 
 ### Changed
 
+- **Manifest checks are visible and fixture paths are strict.** Explicit
+  missing/unreadable paths and unexpected locator/checker failures now emit
+  one structured WARNING per Pack identity while the 1.x load still proceeds.
+  Manifest fixture entrypoints must resolve to an existing regular file inside
+  the pack without absolute paths, traversal, or symlinks.
 - **Sandbox trial wire schema v2 now requires artifact pins.** New
   `PackSource` values require an exact lowercase `sha256:` bundle hash, and
   `TrialSpecification` emits schema v2. Pinned schema-v1 JSON remains accepted

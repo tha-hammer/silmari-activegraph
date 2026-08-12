@@ -74,8 +74,10 @@ deterministic = true
 def _write_pack(tmp_path, manifest_text=GOOD_MANIFEST):
     root = tmp_path / "meeting_notes"
     root.mkdir(parents=True)
-    (root / "manifest.toml").write_text(manifest_text)
     (root / "__init__.py").write_text("# pack module\n")
+    (root / "fixtures").mkdir()
+    (root / "fixtures" / "run_fixtures.py").write_text("# deterministic\n")
+    (root / "manifest.toml").write_text(manifest_text)
     return root
 
 
@@ -180,6 +182,58 @@ def test_nonempty_signature_is_rejected_not_skipped(tmp_path):
         load_manifest(root)
 
 
+def test_fixture_entrypoint_accepts_contained_regular_file(tmp_path):
+    manifest = load_manifest(_write_pack(tmp_path))
+    assert manifest.fixtures_entrypoint == "fixtures/run_fixtures.py"
+
+
+def test_fixture_entrypoint_rejects_non_string(tmp_path):
+    text = GOOD_MANIFEST.replace(
+        'entrypoint = "fixtures/run_fixtures.py"', "entrypoint = 42"
+    )
+    with pytest.raises(PackManifestError) as excinfo:
+        load_manifest(_write_pack(tmp_path, text))
+    assert any("must be a string" in v for v in excinfo.value.violations)
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "expected"),
+    [
+        ("/tmp/run_fixtures.py", "relative"),
+        ("../outside.py", "traversal"),
+        ("fixtures/missing.py", "does not exist"),
+        ("fixtures", "regular file"),
+    ],
+)
+def test_fixture_entrypoint_rejects_unsafe_or_missing_targets(
+    tmp_path, entrypoint, expected
+):
+    text = GOOD_MANIFEST.replace(
+        'entrypoint = "fixtures/run_fixtures.py"',
+        f'entrypoint = "{entrypoint}"',
+    )
+    with pytest.raises(PackManifestError) as excinfo:
+        load_manifest(_write_pack(tmp_path, text))
+    assert any(expected in violation for violation in excinfo.value.violations)
+
+
+def test_fixture_entrypoint_rejects_escaping_symlink(tmp_path):
+    root = _write_pack(tmp_path)
+    outside = tmp_path / "outside.py"
+    outside.write_text("# outside\n")
+    os.symlink(outside, root / "fixtures" / "linked.py")
+    text = GOOD_MANIFEST.replace(
+        'entrypoint = "fixtures/run_fixtures.py"',
+        'entrypoint = "fixtures/linked.py"',
+    )
+    (root / "manifest.toml").write_text(text)
+
+    with pytest.raises(PackManifestError) as excinfo:
+        load_manifest(root)
+
+    assert any("symlink" in violation for violation in excinfo.value.violations)
+
+
 # --------------------------------------------------- surface check
 
 
@@ -261,10 +315,14 @@ def test_content_hash_is_deterministic_and_byte_exact(tmp_path):
     root = _write_pack(tmp_path)
     (root / "behaviors.py").write_text("x = 1\n")
 
-    # Hand-compute the §4 stream for the two hashed files (the
+    # Hand-compute the §4 stream for all hashed files (the
     # manifest itself is excluded).
     h = hashlib.sha256()
-    for rel in [b"__init__.py", b"behaviors.py"]:
+    for rel in [
+        b"__init__.py",
+        b"behaviors.py",
+        b"fixtures/run_fixtures.py",
+    ]:
         data = (root / rel.decode()).read_bytes()
         h.update(rel)
         h.update(b"\x00")
@@ -373,7 +431,9 @@ def test_bundle_hash_includes_the_manifest(tmp_path):
 def test_bundle_hash_is_byte_exact(tmp_path):
     root = _write_pack(tmp_path)
     h = hashlib.sha256()
-    for rel in sorted([b"__init__.py", b"manifest.toml"]):
+    for rel in sorted(
+        [b"__init__.py", b"fixtures/run_fixtures.py", b"manifest.toml"]
+    ):
         data = (root / rel.decode()).read_bytes()
         h.update(rel)
         h.update(b"\x00")

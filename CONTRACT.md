@@ -8667,3 +8667,40 @@ Hard rejection in the current 1.x line is an explicit compatibility break,
 justified by refusing invalid identity before registration or audit events.
 Third-party labels such as `nightly` must migrate to a valid exact spelling
 such as `0+nightly`. No automatic rewrite is performed on callers' behalf.
+
+## 2026-08-12 Set 4 amendment #7 — manifest location and shipped artifacts
+
+This amendment extends the v0.9 #2 Pack shape by appending the defaulted field
+`manifest_path: Path | None = None` after `capabilities`. A non-None value must
+be an absolute `pathlib.Path`; strings and relative paths fail Pack
+construction. It is metadata only and remains excluded from equality and
+hashing, which stay exactly `(name, version)`. A declared path is authoritative:
+the loader checks exactly that path, including when it is missing, and never
+falls back. Without a declaration, legacy discovery continues to anchor on
+behavior/tool functions, a nonempty settings class, and object schemas.
+Relation-only and componentless packs must use an explicit path.
+
+This deliberately amends the v1.6 #1 warning policy. Before 2.0, manifest
+validation remains warn-and-load and truly absent legacy manifests remain
+silent. Schema/TOML/surface violations use `pack.manifest_invalid`; missing,
+unreadable, and unexpected locator/checker failures use
+`pack.manifest_check_failed`. Every failure is a structured WARNING, carries
+the pack identity, resolved path or `<unresolved>`, failure kind, error type,
+error detail, and applicable violations, and is emitted at most once per
+`(name, version)` per process. This intentionally promotes unexpected tier
+failures from DEBUG: an explicit locator is an owner assertion whose failed
+check must be visible, while identity deduplication prevents log flooding.
+
+`fixtures.entrypoint` is a pack-relative resource path from the manifest's
+directory. It must be a nonempty string with no absolute form, `..` component,
+or symlink component; its resolved target must remain inside the pack and be an
+existing regular file. It declares a fixture resource, not an executable
+sandbox scenario. The manifest schema's two-way live-surface check covers
+object types, relation types, behaviors, tools, settings, and capabilities;
+policies and prompts remain intentionally outside the current manifest schema.
+
+The bundled Diligence pack and every `activegraph pack new` scaffold now ship a
+wheel-included `manifest.toml` that passes schema, live-surface, and content-hash
+verification. Scaffolded Packs use an explicit absolute locator and ship a
+minimal deterministic fixture resource. Content hashes exclude
+`manifest.toml`; external bundle hashes include it.

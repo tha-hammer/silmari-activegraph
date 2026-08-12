@@ -192,7 +192,7 @@ exclude = ["tests*", "examples*"]
 # the gate fails before the wheel can ship.
 
 [tool.setuptools.package-data]
-"activegraph.packs.diligence" = ["prompts/*.md"]
+"activegraph.packs.diligence" = ["manifest.toml", "prompts/*.md"]
 
 [tool.pytest.ini_options]
 markers = [

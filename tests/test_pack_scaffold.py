@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 import pytest
 
+from activegraph.packs.manifest import (
+    load_manifest,
+    verify_content_hash,
+    verify_surface,
+)
 from activegraph.packs.scaffold import normalize_pack_name, scaffold_pack
 
 
@@ -66,8 +73,36 @@ def test_scaffold_pack_creates_expected_layout(tmp_path):
     assert (root / "test_pack" / "behaviors.py").is_file()
     assert (root / "test_pack" / "tools.py").is_file()
     assert (root / "test_pack" / "settings.py").is_file()
+    assert (root / "test_pack" / "manifest.toml").is_file()
+    assert (root / "test_pack" / "fixtures" / "__init__.py").is_file()
     assert (root / "test_pack" / "prompts" / "example_prompt.md").is_file()
     assert (root / "tests" / "test_pack_loads.py").is_file()
+
+
+def test_scaffolded_manifest_matches_live_pack_and_package_data(
+    tmp_path, monkeypatch
+):
+    root = scaffold_pack(tmp_path, "manifest-demo")
+    module_root = root / "manifest_demo"
+    monkeypatch.syspath_prepend(str(root))
+    sys.modules.pop("manifest_demo", None)
+    try:
+        module = importlib.import_module("manifest_demo")
+        manifest = load_manifest(module_root / "manifest.toml")
+        verify_surface(manifest, module.pack)
+        verify_content_hash(manifest, module_root)
+        assert module.pack.name == manifest.name == "manifest_demo"
+        assert module.pack.manifest_path == (
+            module_root / "manifest.toml"
+        ).resolve()
+    finally:
+        sys.modules.pop("manifest_demo", None)
+
+    project = tomllib.loads((root / "pyproject.toml").read_text())
+    assert project["tool"]["setuptools"]["package-data"]["manifest_demo"] == [
+        "manifest.toml",
+        "prompts/*.md",
+    ]
 
 
 def test_scaffold_refuses_to_overwrite(tmp_path):
@@ -117,6 +152,7 @@ def test_cli_pack_new_creates_directory(tmp_path):
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "cli-test").is_dir()
     assert (tmp_path / "cli-test" / "cli_test" / "__init__.py").is_file()
+    assert (tmp_path / "cli-test" / "cli_test" / "manifest.toml").is_file()
 
 
 def test_cli_pack_list_includes_diligence():

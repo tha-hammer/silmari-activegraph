@@ -73,11 +73,18 @@ def main(rt):
 '''
 
 
+def _write_fixture_resource(root):
+    fixtures = root / "fixtures"
+    fixtures.mkdir()
+    (fixtures / "run_fixtures.py").write_text("# deterministic\n")
+
+
 def _candidate_dir(tmp_path, scenario=HAPPY_SCENARIO, init=PACK_INIT):
     root = tmp_path / "trial_candidate"
     root.mkdir()
     (root / "__init__.py").write_text(init)
     (root / "scenario.py").write_text(scenario)
+    _write_fixture_resource(root)
     content = compute_content_hash(root)
     (root / "manifest.toml").write_text(
         MANIFEST_TEMPLATE.format(content_hash=content)
@@ -363,6 +370,7 @@ def test_recorded_segment_replay_inside_the_trial(tmp_path):
     root.mkdir()
     (root / "__init__.py").write_text(REPLAY_PACK_INIT)
     (root / "scenario.py").write_text(REPLAY_SCENARIO)
+    _write_fixture_resource(root)
     content = compute_content_hash(root)
     (root / "manifest.toml").write_text(
         REPLAY_MANIFEST.format(content_hash=content)
@@ -428,6 +436,7 @@ def _trusted_dir(tmp_path, init=TRUSTED_PACK_INIT):
     root = tmp_path / "trusted_helper"
     root.mkdir()
     (root / "__init__.py").write_text(init)
+    _write_fixture_resource(root)
     content = compute_content_hash(root)
     (root / "manifest.toml").write_text(
         TRUSTED_MANIFEST.format(content_hash=content)
@@ -447,6 +456,7 @@ def test_extra_packs_enable_cross_pack_interaction_trials(tmp_path):
     (root / "scenario.py").write_text(
         'def main(rt):\n    rt.run_goal("cross-pack trial")\n'
     )
+    _write_fixture_resource(root)
     annotator_manifest = MANIFEST_TEMPLATE.replace(
         'behaviors = ["greeter"]', 'behaviors = ["annotator"]'
     )

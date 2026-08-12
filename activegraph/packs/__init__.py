@@ -578,6 +578,9 @@ class Pack:
     # outbound reach from the graph. The gateway-side check ("did the
     # registering pack declare this?") is downstream's half.
     capabilities: tuple[Any, ...] = ()
+    # Optional exact manifest locator.  It remains metadata only: Pack
+    # identity and hashing stay exactly (name, version).
+    manifest_path: Path | None = None
 
     def __post_init__(self) -> None:
         # list → tuple conversion (frozen requires object.__setattr__)
@@ -595,6 +598,16 @@ class Pack:
             validate_pack_version(self.version, field="Pack.version")
         except ValueError as exc:
             raise PackValidationError(str(exc)) from exc
+
+        if self.manifest_path is not None:
+            if not isinstance(self.manifest_path, Path):
+                raise PackValidationError(
+                    f"Pack {self.name!r}: manifest_path must be a pathlib.Path or None"
+                )
+            if not self.manifest_path.is_absolute():
+                raise PackValidationError(
+                    f"Pack {self.name!r}: manifest_path must be absolute"
+                )
 
         # settings_schema shape
         if not (isinstance(self.settings_schema, type) and issubclass(self.settings_schema, BaseModel)):

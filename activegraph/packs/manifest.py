@@ -71,6 +71,56 @@ _AUTHORED_BY = frozenset({"human", "agent"})
 _HASH_PREFIX = "sha256:"
 
 
+def _validate_fixture_entrypoint(
+    manifest_path: Path, raw_entrypoint: Any, violations: list[str]
+) -> str:
+    """Validate a fixture resource without following pack-local symlinks."""
+    field_name = "fixtures.entrypoint"
+    if not isinstance(raw_entrypoint, str):
+        violations.append(f"{field_name} must be a string")
+        return ""
+    if not raw_entrypoint:
+        violations.append(f"{field_name} must be nonempty")
+        return ""
+
+    relative = Path(raw_entrypoint)
+    if relative.is_absolute():
+        violations.append(f"{field_name} must be a relative pack path")
+        return raw_entrypoint
+    if ".." in relative.parts:
+        violations.append(f"{field_name} must not contain '..' traversal")
+        return raw_entrypoint
+
+    root = manifest_path.parent.resolve()
+    candidate = root / relative
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            violations.append(
+                f"{field_name} must not traverse a symlink: {raw_entrypoint!r}"
+            )
+            return raw_entrypoint
+
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        violations.append(
+            f"{field_name} resolves outside the pack root: {raw_entrypoint!r}"
+        )
+        return raw_entrypoint
+    if not candidate.exists():
+        violations.append(
+            f"{field_name} target does not exist: {raw_entrypoint!r}"
+        )
+    elif not candidate.is_file():
+        violations.append(
+            f"{field_name} target must be a regular file: {raw_entrypoint!r}"
+        )
+    return raw_entrypoint
+
+
 class PackManifestError(PackError, ValueError):
     """A manifest failed validation. Carries every violation at once.
 
@@ -343,9 +393,9 @@ def load_manifest(path: str | Path) -> PackManifest:
         violations.append("surface.consumes must be a list of strings")
         consumes_v = []
 
-    fixtures_entrypoint = str(fixtures.get("entrypoint", ""))
-    if not fixtures_entrypoint:
-        violations.append("fixtures.entrypoint must be nonempty")
+    fixtures_entrypoint = _validate_fixture_entrypoint(
+        p, fixtures.get("entrypoint", ""), violations
+    )
     fixtures_deterministic = fixtures.get("deterministic")
     if not isinstance(fixtures_deterministic, bool):
         violations.append("fixtures.deterministic must be a boolean")

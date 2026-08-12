@@ -159,6 +159,7 @@ pack-decl       ::= "Pack" "(" "name=" pack-name "," "version=" string
                     [ "," "prompts="         PackPrompt-seq     ]
                     [ "," "settings_schema=" BaseModel-subclass ]
                     [ "," "capabilities="    CapabilityDecl-seq ]
+                    [ "," "manifest_path="   absolute-Path      ]
                     ")" "!" PackValidationError ;
 
 behavior-decl   ::= "@behavior"          "(" behavior-args ")" plain-handler
@@ -198,6 +199,8 @@ Contract notes — all violations raise `PackValidationError`:
 7. Equality and `hash` are `(name, version)` only — deliberately not deep structural comparison,
    because that identity is exactly what idempotent loading hinges on
    (`activegraph/packs/__init__.py:552-561`, `:679-685`).
+8. `manifest_path`, when present, is an absolute `pathlib.Path`. It is the final defaulted field,
+   never participates in identity, and names the exact file to check without fallback.
 
 Prompt loading (`load_prompts_from_dir`) reads `*.md` files with `---`-delimited **TOML**
 frontmatter; `version` is required and `name` defaults to the filename stem
@@ -266,7 +269,7 @@ capability-entry::= "[[surface.capabilities]]"
                        neither is ever inferred from the other — ADR 0016 *)
 
 fixtures-table  ::= "[fixtures]"
-                    "entrypoint"    "=" nonempty-string
+                    "entrypoint"    "=" contained-regular-resource
                     "deterministic" "=" boolean ;
 ```
 
@@ -300,8 +303,10 @@ Contract notes:
   (`activegraph/packs/manifest.py:262-267`). Ranges are checked **syntactically only** — semantic
   resolution against a running runtime is explicitly out of scope
   (`activegraph/packs/manifest.py:183-185`).
-- `fixtures.entrypoint` must be non-empty and `fixtures.deterministic` must be a bool
-  (`activegraph/packs/manifest.py:348-354`).
+- `fixtures.entrypoint` must be a nonempty relative path from the manifest directory, contain no
+  `..` or symlink component, resolve inside the pack, and name an existing regular file.
+  `fixtures.deterministic` must be a bool. The entrypoint is a resource declaration, not an
+  executable sandbox scenario.
 - Two hashes exist deliberately. `compute_content_hash` **excludes** `manifest.toml` (a hash cannot
   cover itself) and is an **internal-consistency** check only, never authenticity, since the manifest
   travels with the pack (`activegraph/packs/manifest.py:556-570`, `:621-640`).
@@ -435,14 +440,13 @@ Contract notes:
 - **Prompts are not `prompt_template`**: markdown bodies routinely contain literal `{...}` that would
   crash `str.format`, so the same-named prompt body is appended to the behavior's `description`,
   landing under "Role:" in the system prompt (`activegraph/packs/loader.py:689-717`).
-- **Manifest warning tier (CONTRACT v1.6 #1)**: when a `manifest.toml` is discoverable, `load_pack`
-  runs `load_manifest` + `verify_surface` and logs violations via
-  `logging.getLogger("activegraph.packs.manifest")` at WARNING with structured `extra`
-  (`reason="pack.manifest_invalid"`) — once per `(name, version, path)` per process, and **never
-  raises before 2.0** (`activegraph/packs/loader.py:321-334`, `:372-420`). A pack with no manifest
-  loads exactly as before, silently (`:377-378`). The tier is wrapped in a bare `except Exception`
-  that downgrades to DEBUG (`:412-420`). Hash verification is explicitly *not* on this hot path — it
-  stays host/CI/sandbox territory (`activegraph/packs/loader.py:326-327`).
+- **Manifest warning tier (CONTRACT v1.6 #1, Set 4 amendment #7)**: an explicit absolute
+  `Pack.manifest_path` is authoritative even when missing; without it, legacy discovery anchors on
+  behavior/tool functions, the settings class, and object schemas. Schema/TOML/surface failures log
+  `pack.manifest_invalid`; missing, unreadable, and unexpected locator/checker failures log
+  `pack.manifest_check_failed`. All are structured WARNINGs once per `(name, version)` and **never
+  raise before 2.0**. A legacy pack with no discoverable manifest stays silent. Hash verification is
+  not on the runtime hot path; it remains host/CI/sandbox territory.
 
 ### packs <-> core
 
@@ -574,10 +578,11 @@ emitted-layout  ::= <pack-name>/
                       "README.md"
                       <module-name>/
                         "__init__.py"     (* module-level `pack = Pack(...)` *)
+                        "manifest.toml"   (* schema/surface/content-valid; package data *)
                         "object_types.py" "behaviors.py" "tools.py" "settings.py"
+                        "fixtures/__init__.py"
                         "prompts/example_prompt.md"
                       "tests/test_pack_loads.py" ;
-                    (* NOTE: no manifest.toml is emitted *)
 
 entry-point-decl::= "[project.entry-points.\"activegraph.packs\"]"
                     pack-name "=" "\"" module-name ":pack\"" ;
@@ -592,9 +597,9 @@ Contract notes: `discover()` reads entry-point group `activegraph.packs`, one `P
 `warnings.warn` rather than poisoning the framework (`:1027-1035`); a non-`Pack` object is skipped
 with a warning (`:1036-1043`). Results are memoized process-wide in `_DISCOVERY_CACHE` (`:1003`,
 `:1011-1013`), reset by `clear_discovery_cache()` for tests (`:1056-1065`).
-`activegraph/packs/scaffold.py` imports **nothing** from activegraph — every `activegraph` import in
-that file lives inside a template string (`activegraph/packs/scaffold.py:111-112`, `:138-143`, `:186`,
-`:211`, `:234`, `:293`).
+`activegraph/packs/scaffold.py` imports the shared name validator and normative content-hash helper;
+it renders hashed module content first and writes `manifest.toml` last, avoiding a duplicate hash
+implementation.
 
 ### packs <-> top-level `activegraph`
 
@@ -659,10 +664,10 @@ sequenceDiagram
     Note over LD,GR: phase 5-6 — event then advisory manifest check
     LD->>LD: _build_pack_loaded_payload(pack, settings_obj) (loader.py:890-922)
     LD->>GR: emit(Event "pack.loaded", actor="runtime", caused_by=None)
-    LD->>LD: _locate_pack_manifest(pack) (loader.py:336-369)
-    LD->>MF: load_manifest(root) then verify_surface(manifest, pack)
-    MF-->>LD: PackManifestError{violations} or None
-    LD->>LD: log WARNING reason="pack.manifest_invalid", once per (name, version, path)
+    LD->>LD: explicit manifest_path or legacy module discovery
+    LD->>MF: load_manifest(path) then verify_surface(manifest, pack)
+    MF-->>LD: validation / IO / checker failure or None
+    LD->>LD: classify, then log structured WARNING once per (name, version)
     LD-->>RT: True
     RT-->>Caller: True
 ```
@@ -694,12 +699,10 @@ sequenceDiagram
    atomicity. Whether `rt.graph` can actually be `None` at that point is a runtime-side question that
    remains unresolved.
 
-5. **No `manifest.toml` exists anywhere in the repo** — including for the bundled
-   `activegraph/packs/diligence/` pack. The manifest warning tier therefore never fires for the
-   in-tree pack, and the only manifests are synthesized in tests (`tests/test_pack_manifest.py`,
-   `tests/test_manifest_warning_tier.py`, `tests/test_sandbox_trial.py`). The scaffolder does not emit
-   one either (`activegraph/packs/scaffold.py:50-68`). The declarative half is real machinery with no
-   in-tree production instance — a maturity gap, not proven coverage.
+5. **The declarative half now has production instances.** The bundled Diligence pack ships a
+   wheel-included manifest verified against its live surface and normative content hash. The
+   scaffolder emits the same verified artifact, an explicit absolute locator, package-data rules,
+   and a real fixture resource.
 
 6. **Pack names now share one boundary.** Pack construction and manifest parsing use
    `^[a-z][a-z0-9_]{0,63}$`. The scaffolder separately accepts a normalized 1–64 character kebab
@@ -720,12 +723,10 @@ sequenceDiagram
    the API is contract-stable" (`activegraph/packs/manifest.py:9-11`). Every consumer of this spec
    should carry that qualifier.
 
-10. **`_locate_pack_manifest` is best-effort and can silently miss.** It resolves modules from
-    `pack.behaviors[*].fn`, `pack.tools[*].fn`, `settings_schema`, and `object_types[*].schema` only
-    (`activegraph/packs/loader.py:342-346`); a pack whose components all live in `__main__`, or one
-    with no behaviors, tools, or object types, has no discovery anchor and its manifest is never
-    checked. The whole tier is also swallowed by a bare `except Exception` (`:412-420`), so a discovery
-    bug is invisible at default log levels.
+10. **Legacy discovery remains intentionally limited.** It resolves modules from behavior/tool
+    functions, `settings_schema`, and object schemas only. A relation-only/componentless pack, or
+    one whose components live in `__main__`, must declare `manifest_path`. Unexpected discovery or
+    checking failures are visible as identity-deduped structured WARNINGs rather than DEBUG noise.
 
 11. **`consumes` is declared in the manifest but verified nowhere in-tree.** It is parsed and stored
     (`activegraph/packs/manifest.py:341-347`, `:377`) and deliberately excluded from `verify_surface`
@@ -735,6 +736,5 @@ sequenceDiagram
     from it (`activegraph/packs/__init__.py:573-581`).
 
 12. **Import-graph correction.** `packs -> llm` is not a machinery dependency; it exists only via the
-    bundled example pack's recorded fixtures (`activegraph/packs/diligence/fixtures/__init__.py:19`,
-    `:204`). Likewise `activegraph/packs/scaffold.py` has zero activegraph imports — all are inside
-    template strings.
+    bundled example pack's recorded fixtures. The scaffolder does import its sibling manifest and
+    validation helpers so generated artifacts use the authoritative validators and hash algorithm.
