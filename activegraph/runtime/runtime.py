@@ -2591,8 +2591,11 @@ class Runtime:
     def status(self, recent: int = 20) -> RuntimeStatus:
         """Frozen snapshot of the runtime. CONTRACT v0.8 #11.
 
-        Cheap to call. No graph traversal beyond a tail-slice of the
-        event log. Returns immutable data; mutating any field raises.
+        The operation is side-effect-free and in-memory. With N materialized
+        history events and B registered behaviors, current work is
+        ``O(N + B + min(N, recent))``; ``recent`` bounds returned summaries,
+        not history construction. It performs no store I/O or object/relation
+        traversal. Returns immutable data; mutating any field raises.
 
         ``recent`` controls the length of the ``recent_events`` tail.
         The CLI's ``inspect --tail N`` passes through.

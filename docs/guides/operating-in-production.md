@@ -429,9 +429,12 @@ cardinality. The cardinality rule above is your guide.
 
 ## Runtime introspection
 
-`runtime.status(recent: int = 20)` returns a `RuntimeStatus` — a
-frozen dataclass. Calling it is cheap: no graph traversal, no event
-log scan. It is safe to call from any thread.
+`runtime.status(recent: int = 20)` returns a `RuntimeStatus` — a frozen
+dataclass. The operation is side-effect-free and in-memory. With N materialized
+history events and B registered behaviors, current work is
+`O(N + B + min(N, recent))`; `recent` bounds returned summaries, not history
+construction. It performs no store I/O or object/relation traversal. It is
+safe to call from any thread.
 
 ```python
 status = rt.status()
