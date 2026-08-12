@@ -121,10 +121,10 @@ and `runtime ↔ trace` acyclic by construction rather than by accident (`core/g
 - `LOG_FIELDS: tuple[str, ...]` — the exact 17-field operator log schema, ending in optional `payload` — `observability/logging.py:28-53`
 - `JsonLineFormatter` — one JSON object per record; emits *only* fields in `LOG_FIELDS` and prepares explicit payloads at its final boundary — `observability/logging.py:87-161`
 - `set_payload_redactor(fn)` / `redact_payload(payload)` — process-global redactor hook; a later `configure_logging(..., payload_redactor=None)` clears it — `observability/logging.py:68-84`
-- `Metrics` — `@runtime_checkable` Protocol; `counter`, `histogram`, `gauge` — `observability/metrics.py:27-38`
-- `NoOpMetrics` — `__slots__ = ()`, three bare `return` bodies; the default everywhere — `observability/metrics.py:44-61`
-- `MetricSpec(name, kind, tags, description)` frozen dataclass; `METRIC_NAMES` — the 24-entry declared operator catalog — `observability/metrics.py:71-224`
-- `validate_cardinality_rule(metrics=METRIC_NAMES)` — called at **import time** (`observability/metrics.py:244`); raises `AssertionError` if a counter or histogram declares `run_id`
+- `Metrics` — `@runtime_checkable` Protocol; `counter`, `histogram`, `gauge` — `observability/metrics.py:151-162`
+- `NoOpMetrics` — `__slots__ = ()`, three bare `return` bodies; the default everywhere — `observability/metrics.py:167-184`
+- `MetricSpec(name, kind, tags, description)` frozen dataclass; `METRIC_NAMES` — the exact 24-entry emitted operator catalog — `observability/metrics.py:195-347`
+- `validate_cardinality_rule(metrics=METRIC_NAMES)` — called at **import time**; raises `AssertionError` if a counter or histogram declares `run_id`
 - `PrometheusMetrics(registry=None)` / `.available()` — lazy `prometheus_client`, per-instrument creation locks — `observability/prometheus.py:19-114`
 - `OpenTelemetryMetrics(meter=None, *, meter_name="activegraph")` / `.available()` — gauges emulated via `UpDownCounter` deltas against a tracked last-value map — `observability/otel.py:20-108`
 - `RuntimeState` literal — `observability/status.py:20`
@@ -210,19 +210,32 @@ Contract notes:
 6. `PrometheusMetrics` tag keys are **fixed by the first observation** for a given name; a later differing key set raises (prometheus_client behavior) — `observability/prometheus.py:22-26`.
 7. Naming: counters end `_total`, duration histograms end `_seconds` — test-enforced, `tests/test_observability_metrics.py:87-100`.
 
-Actual emit sites (only two modules emit at all):
+Emission ownership is closed in v1.11 #6. Runtime's accepted-event listener
+owns the generic event counter and the four-type LLM/tool mapper; invocation
+paths own behavior counts and handler duration; queue/budget helpers own live
+gauges; the shared Registry matcher observer owns pattern count/duration; the
+strict replay boundary owns one divergence counter; and attached sink workers
+retain their four existing families. The executable `MetricProductionCase`
+matrix drives only public Runtime/Graph/replay/attached-sink paths and proves
+`union(case.proves) == set(METRIC_BY_NAME)`, exact metric kind, and exact tag
+keys for all 24 rows.
 
-| Metric | Site |
-|---|---|
-| `activegraph_events_emitted_total{event_type}` | `runtime/runtime.py:858` |
-| `activegraph_queue_depth{}` (gauge) | `runtime/runtime.py:903` |
-| `activegraph_behaviors_invoked_total{behavior}` | `runtime/runtime.py:1420` |
-| `activegraph_behaviors_duration_seconds{behavior}` | `runtime/runtime.py:1439`, `:1460` |
-| `activegraph_behaviors_failed_total{behavior, reason}` | `runtime/runtime.py:1444` (`reason=f"exception.{type(e).__name__}"`) |
-| the four `activegraph_sink_*` metrics | `sinks/dispatch.py:520`, `:526`, `:532`, `:538` |
+LLM/tool mapping treats `cache_hit is True` literally, uses each event's own
+model/tool label, and classifies only a Mapping-valued response `error` as a
+failure. Missing/`None` means success; another non-`None` shape is malformed and
+omits family-specific response observations. Successful token fields are exact
+nonnegative integers. Successful costs and tool latency must be finite and
+nonnegative; cached cost/duration and explicit early tool-error duration are
+logical zero. Invalid tool input is post-request and therefore records call,
+failure, and duration zero. Metric-only name/reason normalizers bound open
+payloads without changing event or log diagnostics.
 
-`METRIC_NAMES` is therefore a *declared catalog*, not a guaranteed emission set — see Open
-question 1.
+Queue depth is the last publishing Runtime's untagged local main-queue depth,
+not an aggregate. Finite budget gauges cover Runtime-owned observations only;
+direct mutation/replacement of public `Runtime.budget` has no immediate
+freshness promise. Reconstruction and verification use NoOp metrics, then a
+successful activation publishes the recovered snapshot. Failed construction or
+strict load leaves no initial queue/budget gauge series.
 
 ### A2. runtime <-> observability.logging
 
@@ -758,19 +771,14 @@ sequenceDiagram
 
 ## Open questions
 
-1. **14 of the 24 declared standard metrics have no emit site anywhere in the package.**
-   Verified by grepping each `METRIC_NAMES` entry across `activegraph/`. Unemitted:
-   `activegraph_llm_calls_total`, `_llm_cache_hits_total`, `_llm_failed_total`, `_llm_tokens_in`,
-   `_llm_tokens_out`, `_llm_cost_usd`, `_tools_calls_total`, `_tools_cache_hits_total`,
-   `_tools_failed_total`, `_tools_duration_seconds`, `_budget_cost_remaining_usd`,
-   `_budget_events_remaining`, `_patterns_evaluated_total`,
-   `_patterns_evaluation_duration_seconds`, `_replay_divergence_detected_total`. Only 10 are wired
-   (5 in `runtime/runtime.py`, 4 in `sinks/dispatch.py`, plus `queue_depth`).
-   `tests/test_observability_metrics.py:71-85` asserts only that the *names exist in the table* —
-   never that anything emits them. `runtime/runtime.py:1418-1419` claims LLM and relation behaviors
-   "have their own invocation paths and their own metrics hooks", but no such hooks were found.
-   This is the largest gap between the declared operator contract and the implementation; treat
-   `METRIC_NAMES` as a *declared catalog*, not a guaranteed emission set.
+1. **Resolved in v1.11 #6: all 24 standard metrics have executable production paths.**
+   The public-path `MetricProductionCase` matrix covers Runtime, Graph, strict
+   replay, and attached sink workers; its declared union equals
+   `METRIC_BY_NAME` exactly, each row must actually be observed, and every
+   observation is checked against the catalog's kind and exact tag-key set.
+   Names and tag keys are unchanged. Queue ownership is local last-writer state,
+   budget freshness is Runtime-owned, pattern observation uses the shared
+   matcher seam, and strict replay counts one escaping closed-kind divergence.
 
 2. **`RuntimeState` declares `"running"` but `status()` can never return it.**
    `observability/status.py:20` includes `"running"` in the Literal, but the derivation at

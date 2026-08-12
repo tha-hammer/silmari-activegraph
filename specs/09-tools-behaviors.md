@@ -605,35 +605,36 @@ Message sources: `runtime/registry.py:40-70`; `runtime/runtime.py:1288-1296`, `:
 
 ## Open questions
 
-1. **`activegraph_tools_*` metrics are declared but never emitted.** `observability/metrics.py:140-163`
-   declares `activegraph_tools_calls_total`, `_cache_hits_total`, `_failed_total`,
-   `_duration_seconds`. A repo-wide grep finds no increment/observe call anywhere — contrast with
-   behaviors, which are instrumented (`runtime/runtime.py:1420-1422`, `:1439-1447`, `:1460-1464`).
-   Tool observability is a declared-but-unwired gap.
+1. **Resolved in v1.11 #6: `activegraph_tools_*` metrics follow the
+   request/response audit pair.** Every Runtime-owned `tool.requested` counts a
+   call, and literal `cache_hit is True` also counts a hit. A
+   `tool.responded.payload.error` Mapping counts one bounded-reason failure;
+   absent/`None` is success and another non-`None` shape is malformed. Duration
+   comes from valid response latency, with logical cache hits and explicit early
+   errors recorded as zero. Invalid input occurs after `tool.requested`, so it
+   produces call + failure + duration zero; undeclared/missing-tool and budget
+   gates reached before a request remain behavior-only. There is no
+   `tool.failed` event and the metric contract no longer claims one.
 
-2. **`tool.failed` is a phantom event type.** `observability/metrics.py:156` describes
-   `activegraph_tools_failed_total` as counting "tool calls that produced a `tool.failed` event", but
-   no such event type exists — failures ride on `tool.responded.payload.error` plus `behavior.failed`.
-
-3. **Two reason codes are outside the documented `ToolError` set.** `tools/errors.py:280-285` lists
+2. **Two reason codes are outside the documented `ToolError` set.** `tools/errors.py:280-285` lists
    nine legal reasons; `tool.max_turns_exhausted` (`runtime/runtime.py:2019`) and
    `tool.unrecorded_external_io` (`tools/web_fetch.py:44`) are not among them and have no entry in
    `_TOOL_REASON_PROSE` (`tools/errors.py:127-134`), so both fall through to generic fallback prose.
    Reads as docstring drift rather than a bug, but should be reconciled.
 
-4. **Dead comment block in `_invoke_tool`.** `runtime/runtime.py:2302-2314` contains in-progress
+3. **Dead comment block in `_invoke_tool`.** `runtime/runtime.py:2302-2314` contains in-progress
    refactor narration ("Refactor: pass running_messages by reference…") plus an unused local
    `running_messages_append = getattr(self, "_current_running_messages", None)` and an unused
    `import json as _json` alias. The stash-on-`self` mechanism (`self._last_tool_result_message`,
    `:470`, `:2315`, consumed at `:2004-2006`) works but is not re-entrant.
 
-5. **`priority` is deliberately reserved metadata.** `Behavior.priority` /
+4. **`priority` is deliberately reserved metadata.** `Behavior.priority` /
    `RelationBehavior.priority` retain the caller's value, while `Registry.match`
    (`runtime/registry.py:40-70`) and the delayed queue preserve registration/FIFO order. Runtime
    does not sort unequal values or ties, and status exposes registration order. Activating priority
    would require a separate contract amendment.
 
-6. **Resolved: `relation_behavior` + `activate_after` executes at fire time.** Runtime reuses the
+5. **Resolved: `relation_behavior` + `activate_after` executes at fire time.** Runtime reuses the
    shared one-behavior matcher for current relation candidates/pattern bindings, keeps `where=` on
    the original event payload, validates exact behavior identity/name, emits one pattern marker,
    and fans out through the normal relation lifecycle. Pack disable cancels exact pending wrappers;

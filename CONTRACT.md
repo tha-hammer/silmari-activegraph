@@ -8685,3 +8685,56 @@ renaming any field remains breaking.
    redaction changes neither. Built-in framework log records remain
    payload-free, including event-emitted records and behavior-failure records
    whose graph events retain their original data or traceback.
+
+## v1.11 #6. Standard metrics are emitted from authoritative runtime seams
+
+This append-only amendment completes and clarifies v0.8 #8–#10 and #C4,
+including the v1.8 gauge-retirement limitation. The exact 24 existing
+`METRIC_NAMES`, kinds, and tag keys are unchanged; adding or changing a row
+remains a public API change. An executable public-production-path matrix proves
+every catalog row is actually observed with its declared kind and exact tags.
+
+1. Every accepted live graph event increments
+   `activegraph_events_emitted_total`. Runtime-owned `llm.requested`,
+   `llm.responded`, `tool.requested`, and `tool.responded` additionally map to
+   their standard families. Requests count every attempt, including cache hits
+   and retries; cache-hit counters require literal `cache_hit is True`.
+   Request-side LLM labels use the request model and response-side labels use
+   the response model. Missing/non-string names use `unknown_model` or
+   `unknown_tool`.
+2. A response `error` Mapping is failure, absent/`None` is success, and another
+   non-`None` shape is malformed and omits family-specific response metrics.
+   Successful LLM tokens accept exact nonnegative integers. Successful cost
+   accepts a finite nonnegative decimal value, with a logical cache hit forced
+   to zero. Tool duration accepts finite nonnegative latency, with cache hits
+   and explicit early-error responses forced to zero. Invalid tool input is
+   post-request and therefore records call, failure, and zero duration;
+   missing/undeclared-tool and budget gates reached before the request remain
+   behavior-only.
+3. Plain, LLM, and relation behavior invocation paths increment before work;
+   relation fan-out counts once per relation. Duration covers only the
+   developer handler. Exactly one failure observation is owned by each
+   `behavior.failed` emission.
+4. Metric labels are deliberately closed without rewriting diagnostic event or
+   log values. Documented LLM, tool, budget, and replay codes pass through;
+   missing/open values normalize to bounded values including `unknown_reason`,
+   `llm.other`, `tool.other`, `budget.other`, `exception.other`, and `other`.
+5. `activegraph_queue_depth` is one untagged shared series. Each successful
+   activation, listener push, recovery batch, and successful pop publishes that
+   Runtime's local main-queue depth: **last writer wins; it is not a sum**.
+   Independent depths require independent backend instances or registries.
+6. Budget gauges publish only for finite `max_events` and `max_cost_usd`, after
+   successful activation/load and Runtime-owned `consume`/`add_cost`
+   observations. Direct mutation or replacement of public `Runtime.budget` has
+   no immediate metric-freshness guarantee. Failed construction or strict load
+   creates no initial queue/budget gauge ghost. The three-method protocol has
+   no deletion operation, so zero and older run-id series follow backend
+   retention.
+7. Every actual shared pattern matcher call is counted and timed, including an
+   empty result or raised evaluation. Each strict replay divergence that
+   escapes a public boundary is counted once using the closed exception kind;
+   reconstructed and fresh verifier work uses NoOp metrics, preventing ordinary
+   simulated-work observations and double counting.
+8. Standard observations always use exactly the catalog kind and tag-key set.
+   Instrumentation is non-throwing and does not change graph event payloads or
+   ordering. Attached sink metrics retain the v1.8 worker-owned semantics.

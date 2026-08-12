@@ -977,8 +977,8 @@ class Runtime:
         # Don't enqueue our own lifecycle events for re-matching.
         # v0.7 adds `llm.*`, `tool.*`, `pattern.*`, `behavior.scheduled`
         # to the suppression list — they're internal to the runtime's
-        # bookkeeping. (User behaviors that want to audit LLM/tool
-        # activity can still subscribe via the registry's lookup.)
+        # bookkeeping. They still persist, project, reach sinks, and feed
+        # the standard metrics mapper above; they do not schedule behaviors.
         if (
             event.type.startswith("behavior.")
             or event.type.startswith("relation_behavior.")

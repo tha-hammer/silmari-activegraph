@@ -17,6 +17,16 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
 
 ### Added
 
+- **Complete standard metric emission** (CONTRACT v1.11 #6). All 24
+  existing `METRIC_NAMES` now have executable public production paths with
+  unchanged names and tag keys: exact LLM/tool request, cache, response,
+  failure, and malformed-input semantics; every behavior kind; live queue,
+  finite Runtime-owned budget, pattern, sink, and strict-replay observations;
+  and bounded metric-only label fallbacks. Queue depth is local last-writer
+  state, direct Budget mutation is outside immediate freshness, and failed
+  activation/load creates no queue/budget gauge ghosts. Metrics do not change
+  graph event payloads or ordering.
+
 - **Explicit JSON-log payload redaction** (CONTRACT v1.11 #5). The
   operator schema appends optional `payload` as its seventeenth field.
   Explicit payloads supplied through `runtime_log_extra(payload=...)`

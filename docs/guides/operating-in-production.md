@@ -427,6 +427,28 @@ keep working across framework versions.
 
 **Adding a metric is a public API change.** The list is documented and
 test-pinned. New metrics get added in named releases, not silently.
+The executable `MetricProductionCase` matrix drives public Runtime, Graph,
+replay, and attached-sink paths and proves that all 24 names are observed with
+exactly the kind and tag keys declared above.
+
+LLM and tool call counters follow their `*.requested` events, including every
+retry and cache hit; a cache-hit counter requires the literal boolean `True`.
+Request-side LLM labels use the request model, while token, cost, and failure
+observations use the response model. Missing/non-string labels become
+`unknown_model` or `unknown_tool`. A response is a failure only when `error` is
+a mapping, success when it is absent or `None`, and malformed otherwise; a
+malformed response omits only its family-specific observations. Successful
+token counts must be nonnegative integers. Successful cost accepts a finite,
+nonnegative decimal value, with a logical cache hit recorded as zero. Tool
+duration likewise records zero for cache hits and explicit early errors.
+Invalid tool input is already post-request, so it produces a call, failure, and
+zero duration; gates reached before a request remain behavior-only failures.
+
+Metric reasons are deliberately lower-cardinality than event and log
+diagnostics. Documented LLM/tool/budget/replay codes pass through, while open
+values use bounded fallbacks such as `unknown_reason`, `llm.other`,
+`tool.other`, `budget.other`, `exception.other`, or `other`. The original event
+payload and log reason are never rewritten for metrics.
 
 ### Cardinality rule (locked)
 
@@ -445,6 +467,21 @@ own retention policy expires it. Plan collector retention accordingly; use
 The conformance suite enforces this rule against the standard metric
 list. If you implement a custom `Metrics` backend, do the same.
 
+`activegraph_queue_depth` is untagged and represents the most recently
+publishing Runtime's local main queue: **last writer wins; it is never a sum**.
+Each successful activation, live push, successful pop, and recovery batch
+publishes local state, including the final zero after drain. Use an independent
+backend instance/registry per Runtime when independent depths matter.
+
+Budget gauges exist only for finite `max_events` and `max_cost_usd` dimensions.
+They publish after successful construction/load and after Runtime-owned budget
+mutations. Direct calls to the public `Runtime.budget.consume()` or
+`add_cost()`, or replacing `Runtime.budget`, have no immediate metric-freshness
+guarantee. Failed construction or strict load creates no initial queue/budget
+gauge ghosts; a recovered successful load publishes its nonzero queue before a
+later drain publishes zero. The three-method protocol cannot delete gauge
+series, so zero and older run-id series remain subject to backend retention.
+
 ### Tag conventions
 
 Standard tag keys are: `event_type`, `behavior`, `tool`, `model`,
@@ -453,8 +490,9 @@ modeled as a separate counter rather than a tag — see
 `activegraph_llm_cache_hits_total`). If your backend distinguishes
 booleans from strings, you won't have to special-case.
 
-Custom tags beyond the standard set are fine but may explode
-cardinality. The cardinality rule above is your guide.
+Custom tags on your own non-standard metrics are fine but may explode
+cardinality. Standard observations always use exactly the table's tag keys.
+The cardinality rule above is your guide.
 
 ---
 
