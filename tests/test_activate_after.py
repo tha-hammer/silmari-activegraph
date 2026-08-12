@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
 import pytest
 
 from activegraph import Event, Graph, Runtime, behavior, relation_behavior
@@ -130,6 +132,106 @@ def test_scheduled_relation_behavior_fires_for_current_match():
     )
     assert g.events.index(scheduled) < g.events.index(started)
     assert g.events.index(started) < g.events.index(completed)
+
+
+def test_scheduled_relation_behavior_skips_relation_removed_before_fire():
+    fired: list[tuple[str, str]] = []
+
+    @relation_behavior(
+        name="watch_removed",
+        relation_type="depends_on",
+        on=["task.completed"],
+        activate_after=1,
+    )
+    def watch_removed(relation, event, graph, ctx):
+        fired.append((relation.id, event.id))
+
+    g = Graph()
+    source = g.add_object("task", {})
+    target = g.add_object("task", {})
+    relation_a = g.add_relation(source.id, target.id, "depends_on")
+    runtime = Runtime(g, behaviors=[watch_removed])
+    trigger = Event(
+        id=g.ids.event(),
+        type="task.completed",
+        payload={"task_id": source.id},
+        actor="user",
+        timestamp=g.clock.now(),
+    )
+    g.emit(trigger)
+
+    paused = runtime.run_quantum(max_queue_events=1, max_seconds=1.0)
+    assert paused.delayed_depth == 1
+
+    g.remove_relation(relation_a.id)
+    runtime.run_until_idle()
+
+    assert fired == []
+    scheduled = [
+        event
+        for event in g.events
+        if event.type == "behavior.scheduled"
+        and event.payload["behavior"] == "watch_removed"
+        and event.payload["event_id"] == trigger.id
+    ]
+    started = [
+        event
+        for event in g.events
+        if event.type == "relation_behavior.started"
+        and event.payload["behavior"] == "watch_removed"
+        and event.payload["event_id"] == trigger.id
+    ]
+    assert len(scheduled) == 1
+    assert started == []
+
+
+def test_scheduled_relation_behavior_uses_relations_added_before_fire():
+    fired: list[tuple[str, str]] = []
+
+    @relation_behavior(
+        name="watch_added",
+        relation_type="depends_on",
+        on=["task.completed"],
+        activate_after=1,
+    )
+    def watch_added(relation, event, graph, ctx):
+        fired.append((relation.id, event.id))
+
+    g = Graph()
+    source = g.add_object("task", {})
+    target_a = g.add_object("task", {})
+    target_b = g.add_object("task", {})
+    unrelated_source = g.add_object("task", {})
+    unrelated_target = g.add_object("task", {})
+    relation_a = g.add_relation(source.id, target_a.id, "depends_on")
+    runtime = Runtime(g, behaviors=[watch_added])
+    trigger = Event(
+        id=g.ids.event(),
+        type="task.completed",
+        payload={"task_id": source.id},
+        actor="user",
+        timestamp=g.clock.now(),
+    )
+    g.emit(trigger)
+
+    paused = runtime.run_quantum(max_queue_events=1, max_seconds=1.0)
+    assert paused.delayed_depth == 1
+
+    relation_b = g.add_relation(source.id, target_b.id, "depends_on")
+    relation_c = g.add_relation(
+        unrelated_source.id,
+        unrelated_target.id,
+        "depends_on",
+    )
+    runtime.run_until_idle()
+
+    assert Counter(fired) == Counter(
+        {
+            (relation_a.id, trigger.id): 1,
+            (relation_b.id, trigger.id): 1,
+        }
+    )
+    assert all(relation_id != relation_c.id for relation_id, _ in fired)
 
 
 def test_activate_after_fires_after_n_events():
