@@ -216,6 +216,8 @@ Fields that don't apply are **omitted**, not nulled:
 | `reason`          | string  | failure log lines (see reason taxonomy)         |
 | `error_type`      | string  | failure log lines                               |
 | `error_message`   | string  | failure log lines                               |
+| `doc_url`         | string  | failure documentation URL                      |
+| `payload`         | object  | explicit caller-supplied JSON payload only     |
 
 The schema is **the operator contract**. Dashboards built against
 these field names will keep working across framework versions.
@@ -242,21 +244,50 @@ of the logging configuration.
 
 ### Payload redaction
 
-LLM behaviors include rendered prompts in DEBUG logs. Tool responses
-include their full payloads. Goals can contain anything the user
-typed. If your environment requires redaction (PII, secrets, customer
-data):
+Built-in ActiveGraph log calls do **not** attach graph events, rendered
+prompts, LLM responses, tool arguments or responses, or goals as log
+`payload`s. When your own integration explicitly adds a payload, the
+JSON handler installed by `configure_logging` can redact it at the final
+formatter boundary:
 
 ```python
+from activegraph.observability import (
+    configure_logging,
+    get_logger,
+    runtime_log_extra,
+)
+
 def redact(payload: dict) -> dict:
     return {k: ("<redacted>" if k == "email" else v) for k, v in payload.items()}
 
 configure_logging(level="INFO", json_output=True, payload_redactor=redact)
+
+log = get_logger("integration")
+data = {"email": "operator@example.com", "result": "ok"}
+log.info("integration result", extra=runtime_log_extra(payload=data))
+# Direct stdlib extras cross the same boundary:
+log.info("integration result", extra={"payload": data})
 ```
 
-The redactor runs on every payload that would otherwise appear in a
-log message. It does not affect the event log itself — the source of
-truth keeps the original. Redaction is a logging concern.
+An explicit payload may be any `Mapping`. The formatter materializes and
+deep-copies it into a detached `dict` before invoking the process-global
+callback exactly once. The callback must return a concrete `dict`; its result
+is validated with the same compact `json.dumps(..., separators=(",", ":"),
+ensure_ascii=False)` settings used for the final line. With no callback, the
+detached mapping is emitted unchanged. Passing `payload_redactor=None` on a
+later `configure_logging` call clears the callback.
+
+Mapping/copy failures, callback exceptions, non-dict callback results, and
+non-JSON results fail closed: the log line is still emitted, but its `payload`
+field is omitted. The original caller-owned mapping is never mutated by the
+formatter or callback.
+
+This promise applies only to the ActiveGraph JSON handler installed by
+`configure_logging(json_output=True)`. Arbitrary operator-installed handlers
+are outside it. The human formatter (`json_output=False`) never interpolates a
+payload or runs the callback. Event persistence and `EventSink` exports are
+separate surfaces and require their own data-handling policy; logging redaction
+does not change the graph event log, durable store, or sink envelope.
 
 ---
 

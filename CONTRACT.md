@@ -8648,3 +8648,40 @@ timing remains unchanged and wall-clock scheduling remains out of scope.
    immediate fan-out: no cursor is stored, completed relations never repeat,
    and a contained handler failure does not prevent siblings while capacity
    remains.
+
+## v1.11 #5. Explicit JSON log payloads are detached and redacted
+
+This append-only amendment extends v0.8 #6's structured logging schema and
+v1.0.3 #3's `doc_url` addition. Those historical clauses remain unchanged.
+Appending optional `payload` is an additive v1.11 schema change; removing or
+renaming any field remains breaking.
+
+1. `LOG_FIELDS` is exactly these 17 fields in this order:
+   `timestamp`, `level`, `logger`, `message`, `run_id`, `event_id`,
+   `behavior`, `tool`, `model`, `cache_hit`, `cost_usd`, `latency_seconds`,
+   `reason`, `error_type`, `error_message`, `doc_url`, `payload`. As before,
+   inapplicable fields are omitted rather than nulled.
+2. `payload` is caller-supplied opt-in data, never an implicit copy of a graph
+   event, prompt, response, tool argument/output, or goal. Either
+   `runtime_log_extra(payload=mapping)` or direct stdlib
+   `extra={"payload": mapping}` crosses the same final boundary: the
+   `JsonLineFormatter` on the ActiveGraph handler installed by
+   `configure_logging(json_output=True)`.
+3. Input may be any `Mapping`. The formatter materializes and deep-copies it
+   into a detached concrete `dict`, then invokes the process-global configured
+   redactor exactly once. The callback must return a concrete `dict`. With no
+   callback, the detached mapping is emitted unchanged; a later
+   `configure_logging(..., payload_redactor=None)` clears the callback.
+4. The callback result is validated with the formatter's exact final JSON
+   semantics: `json.dumps(..., separators=(",", ":"), ensure_ascii=False)`.
+   A non-Mapping input, copy failure, callback exception, non-dict result, or
+   serialization failure omits `payload` without losing the otherwise valid log
+   line and never falls back to the original. Copy, callback, and serialization
+   catch `Exception`, not `BaseException`.
+5. The promise is limited to that configured ActiveGraph JSON formatter.
+   Arbitrary operator-installed handlers are outside it. Human output
+   (`json_output=False`) never interpolates payload or invokes the callback.
+   Event persistence and `EventSink` export are separate policy surfaces; log
+   redaction changes neither. Built-in framework log records remain
+   payload-free, including event-emitted records and behavior-failure records
+   whose graph events retain their original data or traceback.

@@ -10,6 +10,7 @@ import logging
 
 import pytest
 
+from activegraph import Graph, Runtime
 from activegraph.observability.logging import (
     LOG_FIELDS,
     configure_logging,
@@ -48,6 +49,32 @@ def _explicit_payload_extra(use_helper, payload):
 
 
 class TestLogSchema:
+    def test_builtin_runtime_event_log_omits_graph_event_payload(self, captured_stream):
+        graph = Graph()
+        runtime = Runtime(graph, behaviors=[])
+        runtime.run_goal("goal-secret-that-must-stay-in-the-event-log")
+
+        goal_event = next(
+            event for event in graph.events if event.type == "goal.created"
+        )
+        assert goal_event.payload == {
+            "goal": "goal-secret-that-must-stay-in-the-event-log"
+        }
+        records = [
+            json.loads(line)
+            for line in captured_stream.getvalue().splitlines()
+            if line.strip()
+        ]
+        emitted = next(
+            record for record in records if record["message"] == "event emitted"
+        )
+        assert emitted["event_id"] == goal_event.id
+        assert "payload" not in emitted
+        assert (
+            "goal-secret-that-must-stay-in-the-event-log"
+            not in captured_stream.getvalue()
+        )
+
     @pytest.mark.parametrize(
         "use_helper", [True, False], ids=["helper", "stdlib-extra"]
     )
@@ -263,6 +290,7 @@ class TestLogSchema:
         assert obj["logger"] == "activegraph.test"
         assert obj["message"] == "hello"
         assert "timestamp" in obj
+        assert set(obj) == {"timestamp", "level", "logger", "message"}
 
     def test_optional_fields_omitted_when_absent(self, captured_stream):
         log = get_logger("activegraph.test")
@@ -303,7 +331,7 @@ class TestLogSchema:
         """The schema is the contract. Don't change LOG_FIELDS without
         bumping the framework's documented version. Add fields at the
         end of the tuple."""
-        assert LOG_FIELDS == (
+        legacy_fields = (
             "timestamp",
             "level",
             "logger",
@@ -321,9 +349,9 @@ class TestLogSchema:
             "error_message",
             # v1.0.3 #3 addition.
             "doc_url",
-            # v1.11 addition.
-            "payload",
         )
+        assert len(legacy_fields) == 16
+        assert LOG_FIELDS == legacy_fields + ("payload",)
 
 
 class TestConfigureLogging:

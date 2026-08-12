@@ -70,6 +70,10 @@ def test_behavior_failure_emits_warning_log(captured_json_log):
     # execution-error page.
     assert rec["doc_url"].endswith("/errors/execution-error")
     assert "behavior failed: boom" in rec["message"]
+    failed_event = next(e for e in rt.graph.events if e.type == "behavior.failed")
+    assert "ValueError: kaboom" in failed_event.payload["traceback"]
+    assert "payload" not in rec
+    assert "traceback" not in rec
 
 
 def test_behavior_failure_doc_url_uses_reason_prefix(captured_json_log):
