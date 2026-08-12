@@ -152,6 +152,7 @@ from activegraph.observability.metrics import (
     normalize_llm_metric_reason,
     normalize_metric_model,
     normalize_metric_tool,
+    normalize_replay_metric_reason,
     normalize_tool_metric_reason,
 )
 from activegraph.observability.status import (
@@ -1124,6 +1125,20 @@ class Runtime:
             # runtime boundary defensive so observation never masks matching.
             return
 
+    def _record_replay_divergence(
+        self,
+        error: ReplayDivergenceError,
+        *,
+        metrics: Optional[Metrics] = None,
+    ) -> None:
+        """Count one escaping strict divergence with a bounded kind label."""
+
+        target = self.metrics if metrics is None else metrics
+        target.counter(
+            "activegraph_replay_divergence_detected_total",
+            {"reason": normalize_replay_metric_reason(error.kind)},
+        )
+
     def _resolve_structured_output_mode(self, b: LLMBehavior) -> str:
         """Resolve "native" or "prompt" for one behavior. CONTRACT v1.3 #1.
 
@@ -1404,11 +1419,13 @@ class Runtime:
                 else None
             )
             if expected is None or expected != inputs_hash:
-                raise ReplayDivergenceError(
+                error = ReplayDivergenceError(
                     event_id=request.id,
                     expected=f"embedding_hash={expected or '<no recorded request>'}",
                     actual=f"embedding_hash={inputs_hash}",
                 )
+                self._record_replay_divergence(error)
+                raise error
 
         if cached is not None:
             vectors = cached
@@ -1416,11 +1433,13 @@ class Runtime:
             if self.replay_strict:
                 # Strict replay is never allowed to fall through to external
                 # embedding I/O, even if a provider object is configured.
-                raise ReplayDivergenceError(
+                error = ReplayDivergenceError(
                     event_id=request.id,
                     expected=f"embedding_response={inputs_hash}",
                     actual=None,
                 )
+                self._record_replay_divergence(error)
+                raise error
             if provider is None:
                 exc = RuntimeError(
                     "Runtime.embed() requires an embedding_provider= on cache miss"
@@ -1983,11 +2002,13 @@ class Runtime:
                         else None
                     )
                     if expected is not None and expected != turn_hash:
-                        raise ReplayDivergenceError(
+                        error = ReplayDivergenceError(
                             event_id=requested_evt.id,
                             expected=f"prompt_hash={expected}",
                             actual=f"prompt_hash={turn_hash}",
                         )
+                        self._record_replay_divergence(error)
+                        raise error
 
                 if cached is not None:
                     turn_response = cached
@@ -3610,18 +3631,25 @@ class Runtime:
         _rebuild_pending_approvals(rt, events)
 
         if replay_strict:
-            _verify_replay(
-                graph,
-                events,
-                behaviors,
-                frame,
-                policy,
-                budget,
-                seed,
-                llm_provider=llm_provider,
-                embedding_provider=embedding_provider,
-                native_structured_output=native_structured_output,
-            )
+            try:
+                _verify_replay(
+                    graph,
+                    events,
+                    behaviors,
+                    frame,
+                    policy,
+                    budget,
+                    seed,
+                    llm_provider=llm_provider,
+                    embedding_provider=embedding_provider,
+                    native_structured_output=native_structured_output,
+                )
+            except ReplayDivergenceError as error:
+                rt._record_replay_divergence(
+                    error,
+                    metrics=requested_metrics,
+                )
+                raise
 
         rt.metrics = requested_metrics
         try:

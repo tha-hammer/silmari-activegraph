@@ -63,6 +63,15 @@ TOOL_METRIC_REASONS = frozenset(
     }
 )
 
+REPLAY_METRIC_REASONS = frozenset(
+    {
+        "prompt_hash_mismatch",
+        "embedding_hash_mismatch",
+        "type_mismatch",
+        "length_mismatch",
+    }
+)
+
 BEHAVIOR_METRIC_REASONS = frozenset(
     {
         *LLM_METRIC_REASONS,
@@ -125,6 +134,14 @@ def normalize_behavior_metric_reason(value: object) -> str:
     if value.startswith("exception."):
         return METRIC_EXCEPTION_OTHER_REASON
     return METRIC_OTHER_REASON
+
+
+def normalize_replay_metric_reason(value: object) -> str:
+    """Bound strict replay divergence kinds to the closed public set."""
+
+    if not isinstance(value, str):
+        return METRIC_UNKNOWN_REASON
+    return value if value in REPLAY_METRIC_REASONS else METRIC_OTHER_REASON
 
 
 # ---- the protocol --------------------------------------------------------

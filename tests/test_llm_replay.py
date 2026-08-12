@@ -305,12 +305,22 @@ def test_replay_strict_raises_on_prompt_hash_drift():
 
         clear_registry()
         _register()
-        with pytest.raises(ReplayDivergenceError):
+        from tests.test_observability_metrics import RecordingMetrics
+
+        metrics = RecordingMetrics()
+        with pytest.raises(ReplayDivergenceError) as exc_info:
             Runtime.load(
                 db,
                 llm_provider=_scripted(),
                 replay_strict=True,
+                metrics=metrics,
             )
+        assert exc_info.value.kind == "prompt_hash_mismatch"
+        assert metrics.values(
+            "counter",
+            "activegraph_replay_divergence_detected_total",
+            {"reason": "prompt_hash_mismatch"},
+        ) == [1.0]
     finally:
         if os.path.exists(db):
             os.remove(db)

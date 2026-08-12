@@ -48,6 +48,7 @@ from activegraph.observability.metrics import (
     normalize_behavior_metric_reason,
     normalize_metric_model,
     normalize_metric_tool,
+    normalize_replay_metric_reason,
     normalize_tool_metric_reason,
     validate_cardinality_rule,
 )
@@ -219,6 +220,17 @@ class TestStandardMetricTable:
         assert normalize_behavior_metric_reason("exception.ValueError") == "exception.other"
         assert normalize_behavior_metric_reason("user-controlled") == "other"
         assert normalize_behavior_metric_reason(None) == "unknown_reason"
+
+    def test_replay_metric_reason_normalizer_is_closed(self):
+        for reason in (
+            "prompt_hash_mismatch",
+            "embedding_hash_mismatch",
+            "type_mismatch",
+            "length_mismatch",
+        ):
+            assert normalize_replay_metric_reason(reason) == reason
+        assert normalize_replay_metric_reason("future_kind") == "other"
+        assert normalize_replay_metric_reason(None) == "unknown_reason"
 
 
 class TestRuntimeEmitsExpectedMetrics:
@@ -1006,6 +1018,48 @@ def _check_pattern_match_and_delayed_recheck(metrics: RecordingMetrics) -> None:
     assert all(value >= 0.0 for value in durations)
 
 
+def _drive_strict_replay_divergence(
+    metrics: RecordingMetrics, tmp_path: Path
+) -> None:
+    toggle = {"extra": True}
+
+    @behavior(name="metric_replay_divergence", on=["goal.created"])
+    def diverge(event, graph, ctx):
+        graph.add_object("metric_replay", {})
+        if toggle["extra"]:
+            graph.add_object("metric_replay", {})
+
+    path = str(tmp_path / "metric-replay-divergence.db")
+    original = Runtime(
+        Graph(run_id="run_metric_divergence", clock=FrozenClock()),
+        behaviors=[diverge],
+        persist_to=path,
+    )
+    original.run_goal("metrics")
+    original.graph.store.close()
+    toggle["extra"] = False
+    with pytest.raises(ReplayDivergenceError) as exc_info:
+        Runtime.load(
+            path,
+            run_id="run_metric_divergence",
+            behaviors=[diverge],
+            replay_strict=True,
+            metrics=metrics,
+        )
+    assert exc_info.value.kind == "length_mismatch"
+
+
+def _check_strict_replay_divergence(metrics: RecordingMetrics) -> None:
+    assert metrics.observations() == [
+        (
+            "counter",
+            "activegraph_replay_divergence_detected_total",
+            {"reason": "length_mismatch"},
+            1.0,
+        )
+    ]
+
+
 class _MetricRecordingSink:
     def open(self) -> None:
         return None
@@ -1201,6 +1255,12 @@ METRIC_PRODUCTION_CASES = (
         _check_pattern_match_and_delayed_recheck,
     ),
     MetricProductionCase(
+        "strict_replay_divergence",
+        frozenset({"activegraph_replay_divergence_detected_total"}),
+        _drive_strict_replay_divergence,
+        _check_strict_replay_divergence,
+    ),
+    MetricProductionCase(
         "sink_deliver_drop_error_depth",
         frozenset(
             {
@@ -1213,14 +1273,6 @@ METRIC_PRODUCTION_CASES = (
         _drive_sink_metrics,
         _check_sink_metrics,
     ),
-)
-
-
-# Removed slice-by-slice as later Phase 2 behaviors add executable cases.
-EXPECTED_METRIC_PRODUCTION_GAPS = frozenset(
-    {
-        "activegraph_replay_divergence_detected_total",
-    }
 )
 
 
@@ -1242,8 +1294,7 @@ def test_metric_production_matrix_accounts_for_the_catalog() -> None:
         for name in sorted(METRIC_BY_NAME)
     }
     proved = {name for name, cases in catalog_to_cases.items() if cases}
-    assert proved.isdisjoint(EXPECTED_METRIC_PRODUCTION_GAPS)
-    assert proved | EXPECTED_METRIC_PRODUCTION_GAPS == set(METRIC_BY_NAME), json.dumps(
+    assert proved == set(METRIC_BY_NAME), json.dumps(
         catalog_to_cases, sort_keys=True, indent=2
     )
 

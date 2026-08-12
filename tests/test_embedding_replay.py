@@ -66,14 +66,26 @@ def test_loaded_runtime_embed_reuses_direct_recorded_return(tmp_path) -> None:
     assert len(provider.calls) == 1
 
     replay_provider = _NoContactProvider()
+    from tests.test_observability_metrics import RecordingMetrics
+
+    metrics = RecordingMetrics()
     loaded = Runtime.load(
         path,
         behaviors=[],
         embedding_provider=replay_provider,
         replay_embedding_cache=True,
         replay_strict=True,
+        metrics=metrics,
     )
     assert loaded.embed(["alpha"], model="test-embedding-v1") == expected
+    with pytest.raises(ReplayDivergenceError) as exc_info:
+        loaded.embed(["beta"], model="test-embedding-v1")
+    assert exc_info.value.kind == "length_mismatch"
+    assert metrics.values(
+        "counter",
+        "activegraph_replay_divergence_detected_total",
+        {"reason": "length_mismatch"},
+    ) == [1.0]
     assert replay_provider.calls == 0
 
 
@@ -160,14 +172,23 @@ def test_strict_embedding_replay_detects_input_hash_drift(tmp_path) -> None:
     query["text"] = "changed"
 
     replay_provider = _NoContactProvider()
+    from tests.test_observability_metrics import RecordingMetrics
+
+    metrics = RecordingMetrics()
     with pytest.raises(ReplayDivergenceError) as exc_info:
         Runtime.load(
             path,
             behaviors=[embedder],
             embedding_provider=replay_provider,
             replay_strict=True,
+            metrics=metrics,
         )
     assert exc_info.value.kind == "embedding_hash_mismatch"
+    assert metrics.values(
+        "counter",
+        "activegraph_replay_divergence_detected_total",
+        {"reason": "embedding_hash_mismatch"},
+    ) == [1.0]
     assert replay_provider.calls == 0
 
 
@@ -289,5 +310,20 @@ def test_strict_wall_replay_rejects_missing_stop_position(
         "time",
         SimpleNamespace(monotonic=lambda: (_ for _ in ()).throw(AssertionError())),
     )
-    with pytest.raises(ReplayDivergenceError, match="wall_stop_position"):
-        Runtime.load(path, behaviors=[once], replay_strict=True)
+    from tests.test_observability_metrics import RecordingMetrics
+
+    metrics = RecordingMetrics()
+    with pytest.raises(ReplayDivergenceError, match="wall_stop_position") as exc_info:
+        Runtime.load(
+            path,
+            behaviors=[once],
+            replay_strict=True,
+            metrics=metrics,
+        )
+    assert exc_info.value.kind == "type_mismatch"
+    assert metrics.values(
+        "counter",
+        "activegraph_replay_divergence_detected_total",
+        {"reason": "type_mismatch"},
+    ) == [1.0]
+    assert metrics.gauges == []
