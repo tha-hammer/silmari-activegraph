@@ -14,7 +14,8 @@ behaviors without `pattern=`). The runtime forwards `matches` as
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Union
+from time import monotonic
+from typing import Any, Callable, Iterable, Union
 
 from activegraph.behaviors.base import Behavior, RelationBehavior
 from activegraph.core.event import Event
@@ -22,11 +23,18 @@ from activegraph.core.graph import Graph, Relation, evaluate_where
 
 
 BehaviorLike = Union[Behavior, RelationBehavior]
+PatternObserver = Callable[[float], None]
 
 
 class Registry:
-    def __init__(self, behaviors: Iterable[BehaviorLike]) -> None:
+    def __init__(
+        self,
+        behaviors: Iterable[BehaviorLike],
+        *,
+        pattern_observer: PatternObserver | None = None,
+    ) -> None:
         self._behaviors: list[BehaviorLike] = list(behaviors)
+        self._pattern_observer = pattern_observer
 
     def all(self) -> list[BehaviorLike]:
         return list(self._behaviors)
@@ -37,6 +45,48 @@ class Registry:
                 return i
         return -1
 
+    def contains_identity(self, behavior: BehaviorLike) -> bool:
+        return any(candidate is behavior for candidate in self._behaviors)
+
+    def _match_behavior(
+        self,
+        behavior: BehaviorLike,
+        event: Event,
+        graph: Graph,
+    ) -> tuple[list[Relation], list[Any]] | None:
+        """Match one behavior using the same gates as live dispatch."""
+        # Event-type filter: required only when `on=` is non-empty.
+        # Pattern-only behaviors (empty `on`) skip this gate.
+        if behavior.on and event.type not in behavior.on:
+            return None
+        # Suppress lifecycle events for pattern-only behaviors so a
+        # pattern doesn't fire on behavior.started, etc.
+        if not behavior.on and _is_lifecycle(event):
+            return None
+        pattern_matches: list[Any] = []
+        if behavior.pattern_matcher is not None:
+            started = monotonic()
+            try:
+                pattern_matches = behavior.pattern_matcher.matches(event, graph)
+            finally:
+                if self._pattern_observer is not None:
+                    try:
+                        self._pattern_observer(monotonic() - started)
+                    except Exception:
+                        # Observation cannot change matcher control flow. If
+                        # matching raised, that original exception still wins.
+                        pass
+            if not pattern_matches:
+                return None
+        if isinstance(behavior, RelationBehavior):
+            relations = _matching_relations(behavior, event, graph)
+            if not relations:
+                return None
+            return relations, pattern_matches
+        if behavior.where and not evaluate_where(behavior.where, event.payload):
+            return None
+        return [], pattern_matches
+
     def match(
         self, event: Event, graph: Graph
     ) -> list[tuple[BehaviorLike, list[Relation], list[Any]]]:
@@ -46,27 +96,10 @@ class Registry:
         """
         out: list[tuple[BehaviorLike, list[Relation], list[Any]]] = []
         for b in self._behaviors:
-            # Event-type filter: required only when `on=` is non-empty.
-            # Pattern-only behaviors (empty `on`) skip this gate.
-            if b.on and event.type not in b.on:
-                continue
-            # Suppress lifecycle events for pattern-only behaviors so a
-            # pattern doesn't fire on behavior.started, etc.
-            if not b.on and _is_lifecycle(event):
-                continue
-            pattern_matches: list[Any] = []
-            if b.pattern_matcher is not None:
-                pattern_matches = b.pattern_matcher.matches(event, graph)
-                if not pattern_matches:
-                    continue
-            if isinstance(b, RelationBehavior):
-                rels = _matching_relations(b, event, graph)
-                if rels:
-                    out.append((b, rels, pattern_matches))
-            else:
-                if b.where and not evaluate_where(b.where, event.payload):
-                    continue
-                out.append((b, [], pattern_matches))
+            matched = self._match_behavior(b, event, graph)
+            if matched is not None:
+                relations, pattern_matches = matched
+                out.append((b, relations, pattern_matches))
         return out
 
 

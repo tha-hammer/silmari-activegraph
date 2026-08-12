@@ -73,7 +73,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, Optional,
 from activegraph.behaviors.base import Behavior, LLMBehavior, RelationBehavior
 from activegraph.behaviors.decorators import get_registry
 from activegraph.core.event import Event
-from activegraph.core.graph import Graph, evaluate_where as _evaluate_where
+from activegraph.core.graph import Graph
 from activegraph.core.graph_store import GraphStore
 from activegraph.core.ids import IDGen
 from activegraph.core.view import View
@@ -1328,11 +1328,10 @@ class Runtime:
         )
         self._delayed.push(
             ScheduledEntry(
+                behavior=behavior,
                 behavior_name=behavior.name,
-                behavior_index=cast(Registry, self.registry).index_of(behavior),
                 triggering_event_id=event.id,
                 fire_at_event_count=self._tick + behavior.activate_after,
-                where_recheck_path=None,
                 scheduled_event_id=sched_evt.id,
             )
         )
@@ -1345,33 +1344,28 @@ class Runtime:
                 # entries fired; preserved for next run_until_idle.
                 self._delayed.push(entry)
                 break
-            behavior = cast(Registry, self.registry).all()[entry.behavior_index]
+            registry = cast(Registry, self.registry)
+            if not registry.contains_identity(entry.behavior):
+                continue
+            behavior = entry.behavior
+            if behavior.name != entry.behavior_name:
+                continue
             # Re-fetch the triggering event so the handler still sees it.
             ev = self._find_event(entry.triggering_event_id)
             if ev is None:
                 continue
-            # Re-check where= against the LATEST graph state.
-            if behavior.where and not _evaluate_where(behavior.where, ev.payload):
-                # Silently skip per CONTRACT v0.7 #13. The trace already
-                # has the behavior.scheduled event; absence of a
-                # behavior.started is sufficient evidence the where
-                # didn't hold.
+            matched = registry._match_behavior(behavior, ev, self.graph)
+            if matched is None:
                 continue
-            # Re-check pattern as well so a stale pattern hit doesn't
-            # fire after the graph has moved on. We pass empty matches
-            # if there's no pattern.
-            p_matches: list[Any] = []
-            if behavior.pattern_matcher is not None:
-                p_matches = behavior.pattern_matcher.matches(ev, self.graph)
-                if not p_matches:
-                    continue
+            relations, p_matches = matched
             # Dispatch as normal (without re-scheduling — we are AT the
             # fire moment).
             if isinstance(behavior, RelationBehavior):
-                # For relation behaviors we'd need to refetch relations.
-                # Defer this rare combination to a future enhancement.
-                continue
-            if isinstance(behavior, LLMBehavior):
+                for relation in relations:
+                    if not self._budget_remaining():
+                        break
+                    self._invoke_relation(behavior, relation, ev, p_matches)
+            elif isinstance(behavior, LLMBehavior):
                 self._invoke_llm(behavior, ev, p_matches)
             else:
                 self._invoke(behavior, ev, p_matches)

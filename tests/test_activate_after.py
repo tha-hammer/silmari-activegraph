@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from activegraph import Graph, Runtime, behavior
+from activegraph import Event, Graph, Runtime, behavior, relation_behavior
 from activegraph.runtime.scheduler import parse_activate_after
 
 
@@ -62,6 +62,74 @@ def test_parse_rejects_garbage_string():
 
 
 # ---------- runtime end-to-end ---------------------------------------------
+
+
+def test_scheduled_relation_behavior_fires_for_current_match():
+    fired: list[tuple[str, str]] = []
+
+    @relation_behavior(
+        name="watch",
+        relation_type="depends_on",
+        on=["task.completed"],
+        activate_after=1,
+    )
+    def watch(relation, event, graph, ctx):
+        fired.append((relation.id, event.id))
+        graph.add_object(
+            "scheduled_marker",
+            {"relation_id": relation.id, "event_id": event.id},
+        )
+
+    g = Graph()
+    source = g.add_object("task", {})
+    target = g.add_object("task", {})
+    relation = g.add_relation(source.id, target.id, "depends_on")
+    runtime = Runtime(g, behaviors=[watch])
+    trigger = Event(
+        id=g.ids.event(),
+        type="task.completed",
+        payload={"task_id": source.id},
+        actor="user",
+        timestamp=g.clock.now(),
+    )
+    g.emit(trigger)
+
+    paused = runtime.run_quantum(max_queue_events=1, max_seconds=1.0)
+    assert paused.delayed_depth == 1
+
+    g.add_object("noise", {})
+    runtime.run_until_idle()
+
+    assert fired == [(relation.id, trigger.id)]
+    markers = [o for o in g.all_objects() if o.type == "scheduled_marker"]
+    assert [marker.data for marker in markers] == [
+        {"relation_id": relation.id, "event_id": trigger.id}
+    ]
+
+    scheduled = next(
+        event
+        for event in g.events
+        if event.type == "behavior.scheduled"
+        and event.payload["behavior"] == "watch"
+        and event.payload["event_id"] == trigger.id
+    )
+    started = next(
+        event
+        for event in g.events
+        if event.type == "relation_behavior.started"
+        and event.payload["behavior"] == "watch"
+        and event.payload["event_id"] == trigger.id
+        and event.payload["relation_id"] == relation.id
+    )
+    completed = next(
+        event
+        for event in g.events
+        if event.type == "behavior.completed"
+        and event.payload["behavior"] == "watch"
+        and event.payload["event_id"] == trigger.id
+    )
+    assert g.events.index(scheduled) < g.events.index(started)
+    assert g.events.index(started) < g.events.index(completed)
 
 
 def test_activate_after_fires_after_n_events():
