@@ -1,0 +1,19 @@
+PromptIdentityError: prompt identity hash mismatch
+
+What failed:
+  A fixture provider recomputed the declared prompt identity, but it did not match the runtime-supplied `prompt_hash`.
+
+Why:
+  The runtime and fixture providers must name identical prompt bytes before any provider call or fixture I/O; otherwise recording and offline replay would silently address different files.
+
+How to fix:
+  This is a framework bug, not a problem with your code.
+  Please file an issue and include the framework version, the
+  internal error location, and the full message above:
+      https://github.com/yoheinakajima/activegraph/issues/new
+
+    framework version:   activegraph 1.10.0
+    internal location:   activegraph.llm.recorded:_resolve_prompt_identity
+
+More:
+  https://docs.activegraph.ai/errors/llm-behavior-error

@@ -8611,3 +8611,32 @@ is included only as `"native"`. Message serialization continues to omit
 `tool_calls` when absent and preserve it when present. These domain distinctions
 are intentional; the shared owner does not make the public and per-turn hashes
 interchangeable.
+
+## v1.11 #4. Fixture identity uses declared determinism with bounded legacy reads
+
+`AssembledPrompt.deterministic` is the authority for runtime-driven fixture
+identity. `RecordedLLMProvider` and `RecordingLLMProvider` alone advertise the
+duck-typed `accepts_prompt_identity = True` capability. Runtime supplies the
+atomic `prompt_hash`/`deterministic` pair only when that marker is truthy;
+absent or false markers receive neither value. The runtime-checkable
+`LLMProvider` Protocol is deliberately unchanged, so existing structural and
+strict-signature providers remain compatible.
+
+The pair invariant is exact:
+
+- both values absent means a direct legacy call, whose only available behavior
+  is sampling-based inference;
+- both values present means declared canonical identity, and the fixture
+  provider MUST recompute and verify the supplied hash;
+- exactly one value present raises structured `PromptIdentityError(kind=
+  "incomplete_metadata_pair")`;
+- a supplied/local mismatch raises `PromptIdentityError(kind="hash_mismatch")`.
+
+Both internal errors occur before fixture probing/writing or a wrapped live
+provider call. Runtime re-raises them before generic provider translation, so
+they do not become retryable `llm.network_error` events. Recording writes only
+the canonical declared filename and never forwards fixture-only metadata to
+the inner provider. Replay probes the canonical filename first; only after a
+miss may it probe the legacy inferred filename, at most once and only when its
+hash differs. A total miss reports the canonical requested hash. This fallback
+is read compatibility for old fixtures, never a new-write policy.

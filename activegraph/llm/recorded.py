@@ -49,7 +49,7 @@ from decimal import Decimal
 from typing import Any, Optional
 
 from activegraph.llm import prompt_identity
-from activegraph.llm.errors import LLMBehaviorError
+from activegraph.llm.errors import LLMBehaviorError, PromptIdentityError
 from activegraph.llm.prompt import schema_to_json
 from activegraph.llm.provider import LLMProvider
 from activegraph.llm.types import LLMMessage, LLMResponse, ToolCall
@@ -61,6 +61,124 @@ def _now_iso() -> str:
         .isoformat(timespec="seconds")
         .replace("+00:00", "Z")
     )
+
+
+def _prompt_payload(
+    *,
+    model: str,
+    system: str,
+    messages: list[LLMMessage],
+    output_schema: Optional[type],
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+    deterministic: bool,
+    tools: Optional[list[dict[str, Any]]],
+    structured_output_mode: str,
+) -> dict[str, Any]:
+    return prompt_identity.build_prompt_identity_payload(
+        model=model,
+        system=system,
+        messages=messages,
+        output_schema_name=(
+            getattr(output_schema, "__name__", None) if output_schema else None
+        ),
+        output_schema_json=schema_to_json(output_schema),
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        deterministic=deterministic,
+        tools=tools,
+        structured_output_mode=structured_output_mode,
+    )
+
+
+def _resolve_prompt_identity(
+    *,
+    model: str,
+    system: str,
+    messages: list[LLMMessage],
+    output_schema: Optional[type],
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+    tools: Optional[list[dict[str, Any]]],
+    structured_output_mode: str,
+    prompt_hash: str | None,
+    deterministic: bool | None,
+    include_legacy_fallback: bool,
+) -> tuple[dict[str, Any], str, str | None]:
+    hash_supplied = prompt_hash is not None
+    deterministic_supplied = deterministic is not None
+    if hash_supplied != deterministic_supplied:
+        raise PromptIdentityError(
+            "incomplete_metadata_pair",
+            prompt_hash=prompt_hash,
+            deterministic=deterministic,
+        )
+
+    legacy_inferred_deterministic = temperature == 0.0 and top_p == 1.0
+    resolved_deterministic = (
+        bool(deterministic)
+        if deterministic_supplied
+        else legacy_inferred_deterministic
+    )
+    payload = _prompt_payload(
+        model=model,
+        system=system,
+        messages=messages,
+        output_schema=output_schema,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        deterministic=resolved_deterministic,
+        tools=tools,
+        structured_output_mode=structured_output_mode,
+    )
+    computed_hash = prompt_identity.hash_prompt_payload(payload)
+    if hash_supplied and prompt_hash != computed_hash:
+        raise PromptIdentityError(
+            "hash_mismatch",
+            prompt_hash=prompt_hash,
+            computed_hash=computed_hash,
+            deterministic=deterministic,
+        )
+
+    canonical_hash = computed_hash
+    legacy_hash: str | None = None
+    if (
+        include_legacy_fallback
+        and deterministic_supplied
+        and legacy_inferred_deterministic != resolved_deterministic
+    ):
+        legacy_payload = _prompt_payload(
+            model=model,
+            system=system,
+            messages=messages,
+            output_schema=output_schema,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            deterministic=legacy_inferred_deterministic,
+            tools=tools,
+            structured_output_mode=structured_output_mode,
+        )
+        candidate = prompt_identity.hash_prompt_payload(legacy_payload)
+        if candidate != canonical_hash:
+            legacy_hash = candidate
+    return payload, canonical_hash, legacy_hash
+
+
+def _find_fixture_path(
+    fixtures_dir: str, canonical_hash: str, legacy_hash: str | None
+) -> str | None:
+    for candidate_hash in (canonical_hash, legacy_hash):
+        if candidate_hash is None:
+            continue
+        path = os.path.join(fixtures_dir, f"{candidate_hash}.json")
+        if os.path.exists(path):
+            return path
+    return None
 
 
 # ---------- RecordedLLMProvider ---------------------------------------------
@@ -80,6 +198,7 @@ class RecordedLLMProvider(LLMProvider):
     # about which family it's replaying; declare the historical default
     # so existing fixtures stay reachable.
     default_model: str = "claude-sonnet-4-5"
+    accepts_prompt_identity = True
 
     def __init__(
         self, fixtures_dir: str, *, structured_output_mode: str = "prompt"
@@ -120,29 +239,32 @@ class RecordedLLMProvider(LLMProvider):
         timeout_seconds: float,
         tools: Optional[list[dict[str, Any]]] = None,
         structured_output_mode: str = "prompt",
+        prompt_hash: Optional[str] = None,
+        deterministic: Optional[bool] = None,
     ) -> LLMResponse:
-        payload = prompt_identity.build_prompt_identity_payload(
+        _, canonical_hash, legacy_hash = _resolve_prompt_identity(
             model=model,
             system=system,
             messages=messages,
-            output_schema_name=(
-                getattr(output_schema, "__name__", None) if output_schema else None
-            ),
-            output_schema_json=schema_to_json(output_schema),
+            output_schema=output_schema,
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
-            deterministic=(temperature == 0.0 and top_p == 1.0),
             tools=tools,
             structured_output_mode=structured_output_mode,
+            prompt_hash=prompt_hash,
+            deterministic=deterministic,
+            include_legacy_fallback=True,
         )
-        prompt_hash = prompt_identity.hash_prompt_payload(payload)
-        path = os.path.join(self._dir, f"{prompt_hash}.json")
-        if not os.path.exists(path):
+        path = _find_fixture_path(self._dir, canonical_hash, legacy_hash)
+        if path is None:
             raise LLMBehaviorError(
                 "llm.fixture_missing",
-                f"no recorded fixture for prompt_hash={prompt_hash} in {self._dir}",
-                payload_extras={"prompt_hash": prompt_hash, "fixtures_dir": self._dir},
+                f"no recorded fixture for prompt_hash={canonical_hash} in {self._dir}",
+                payload_extras={
+                    "prompt_hash": canonical_hash,
+                    "fixtures_dir": self._dir,
+                },
             )
         with open(path, "r") as f:
             data = json.load(f)
@@ -220,6 +342,8 @@ class RecordingLLMProvider(LLMProvider):
         self._dir = fixtures_dir
         os.makedirs(self._dir, exist_ok=True)
 
+    accepts_prompt_identity = True
+
     # v1.11 #1: delegate the inner provider's declared capabilities and
     # its acknowledgement flag, so Runtime's capability-binding
     # validation sees the SAME constraints whether a behavior is bound
@@ -276,7 +400,23 @@ class RecordingLLMProvider(LLMProvider):
         timeout_seconds: float,
         tools: Optional[list[dict[str, Any]]] = None,
         structured_output_mode: str = "prompt",
+        prompt_hash: Optional[str] = None,
+        deterministic: Optional[bool] = None,
     ) -> LLMResponse:
+        payload, canonical_hash, _ = _resolve_prompt_identity(
+            model=model,
+            system=system,
+            messages=messages,
+            output_schema=output_schema,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            tools=tools,
+            structured_output_mode=structured_output_mode,
+            prompt_hash=prompt_hash,
+            deterministic=deterministic,
+            include_legacy_fallback=False,
+        )
         inner_kwargs: dict[str, Any] = {}
         if structured_output_mode == "native":
             # Forwarded only when native, so inner providers that
@@ -295,30 +435,14 @@ class RecordingLLMProvider(LLMProvider):
             tools=tools,
             **inner_kwargs,
         )
-        payload = prompt_identity.build_prompt_identity_payload(
-            model=model,
-            system=system,
-            messages=messages,
-            output_schema_name=(
-                getattr(output_schema, "__name__", None) if output_schema else None
-            ),
-            output_schema_json=schema_to_json(output_schema),
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            deterministic=(temperature == 0.0 and top_p == 1.0),
-            tools=tools,
-            structured_output_mode=structured_output_mode,
-        )
-        prompt_hash = prompt_identity.hash_prompt_payload(payload)
         fixture = {
-            "prompt_hash": prompt_hash,
+            "prompt_hash": canonical_hash,
             "recorded_at": _now_iso(),
             "model": model,
             "prompt": payload,
             "response": response.to_dict(),
         }
-        path = os.path.join(self._dir, f"{prompt_hash}.json")
+        path = os.path.join(self._dir, f"{canonical_hash}.json")
         with open(path, "w") as f:
             json.dump(fixture, f, indent=2, sort_keys=True)
         return response

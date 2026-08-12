@@ -81,7 +81,11 @@ from activegraph.frame import Frame
 from activegraph.llm.cache import LLMCache
 from activegraph.llm.embedding import EmbeddingProvider
 from activegraph.llm.embedding_cache import EmbeddingCache, hash_embedding_request
-from activegraph.llm.errors import LLMBehaviorError, MissingProviderError
+from activegraph.llm.errors import (
+    LLMBehaviorError,
+    MissingProviderError,
+    PromptIdentityError,
+)
 from activegraph.llm.provider import LLMProvider
 from activegraph.llm import prompt_identity
 from activegraph.llm.types import LLMMessage, ToolCall
@@ -1777,6 +1781,14 @@ class Runtime:
                         if so_mode == "native"
                         else {}
                     )
+                    identity_kwargs: dict[str, Any] = {}
+                    if getattr(
+                        self.llm_provider, "accepts_prompt_identity", False
+                    ):
+                        identity_kwargs = {
+                            "prompt_hash": turn_hash,
+                            "deterministic": prompt.deterministic,
+                        }
                     turn_response = cast(LLMProvider, self.llm_provider).complete(
                         system=prompt.system,
                         messages=running_messages,
@@ -1788,7 +1800,13 @@ class Runtime:
                         timeout_seconds=b.timeout_seconds,
                         tools=tool_defs,
                         **native_kwargs,
+                        **identity_kwargs,
                     )
+                except PromptIdentityError:
+                    # This is an internal runtime/fixture identity invariant,
+                    # not a provider outage. Never translate, retry, or emit
+                    # provider-error bookkeeping for it.
+                    raise
                 except LLMBehaviorError as e:
                     latency = _monotonic() - call_t0
                     retryable = _is_transient_llm_reason(e.reason)

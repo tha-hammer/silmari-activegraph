@@ -52,6 +52,12 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
   bookkeeping: they persist and remain meaningful replay/diff history, but no
   longer schedule subscribers or advance the behavior queue tick. Resume also
   no longer requeues bookkeeping events that live dispatch would suppress.
+- Runtime-backed LLM fixture recording now keys contradictory sampling cases
+  from the behavior's declared `deterministic` flag, so the fixture filename
+  matches `llm.requested.prompt_hash`. Existing fixtures written under the old
+  sampling-inferred name remain readable through canonical-first fallback.
+  Fixture identity metadata is an atomic, opt-in pair; internal mismatches fail
+  before provider or file effects and are never retried as network failures.
 
 ## [1.10.0] — 2026-07-12
 

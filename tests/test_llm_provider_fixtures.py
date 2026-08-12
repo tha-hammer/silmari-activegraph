@@ -24,6 +24,9 @@ from activegraph.llm import (
     RecordedLLMProvider,
     RecordingLLMProvider,
 )
+from activegraph.llm import prompt_identity
+from activegraph.llm.errors import PromptIdentityError
+from activegraph.llm.prompt import schema_to_json
 
 
 class _Out(BaseModel):
@@ -65,6 +68,193 @@ def _kwargs():
         output_schema=_Out,
         timeout_seconds=30.0,
     )
+
+
+def _identity_hash(
+    deterministic: bool,
+    *,
+    tools=None,
+    structured_output_mode: str = "prompt",
+) -> str:
+    kwargs = _kwargs()
+    payload = prompt_identity.build_prompt_identity_payload(
+        model=kwargs["model"],
+        system=kwargs["system"],
+        messages=kwargs["messages"],
+        output_schema_name=_Out.__name__,
+        output_schema_json=schema_to_json(_Out),
+        max_tokens=kwargs["max_tokens"],
+        temperature=kwargs["temperature"],
+        top_p=kwargs["top_p"],
+        deterministic=deterministic,
+        tools=tools,
+        structured_output_mode=structured_output_mode,
+    )
+    return prompt_identity.hash_prompt_payload(payload)
+
+
+def _write_fixture(path, prompt_hash: str, raw_text: str) -> None:
+    data = {
+        "prompt_hash": prompt_hash,
+        "response": {
+            "raw_text": raw_text,
+            "parsed": {"n": 1},
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "cost_usd": "0",
+            "latency_seconds": 0,
+            "model": "claude-sonnet-4-5",
+            "finish_reason": "end_turn",
+        },
+    }
+    path.write_text(json.dumps(data))
+
+
+@pytest.mark.parametrize("provider_kind", ["recorded", "recording"])
+@pytest.mark.parametrize(
+    ("identity_kwargs", "kind"),
+    [
+        ({"prompt_hash": "only-hash"}, "incomplete_metadata_pair"),
+        ({"deterministic": False}, "incomplete_metadata_pair"),
+        (
+            {"prompt_hash": "not-the-computed-hash", "deterministic": False},
+            "hash_mismatch",
+        ),
+    ],
+)
+def test_prompt_identity_metadata_errors_precede_fixture_and_live_effects(
+    tmp_path, monkeypatch, provider_kind, identity_kwargs, kind
+):
+    inner = _StubInner()
+    provider = (
+        RecordedLLMProvider(str(tmp_path))
+        if provider_kind == "recorded"
+        else RecordingLLMProvider(inner, str(tmp_path))
+    )
+    probes: list[str] = []
+
+    def forbidden_probe(path):
+        probes.append(path)
+        raise AssertionError("fixture path probed before identity validation")
+
+    monkeypatch.setattr("activegraph.llm.recorded.os.path.exists", forbidden_probe)
+
+    with pytest.raises(PromptIdentityError) as exc_info:
+        provider.complete(**_kwargs(), **identity_kwargs)
+
+    assert exc_info.value.kind == kind
+    assert probes == []
+    assert inner.calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_declared_identity_prefers_canonical_fixture_without_legacy_probe(
+    tmp_path, monkeypatch
+):
+    canonical = _identity_hash(False)
+    legacy = _identity_hash(True)
+    _write_fixture(tmp_path / f"{canonical}.json", canonical, "canonical")
+    _write_fixture(tmp_path / f"{legacy}.json", legacy, "legacy")
+    original_exists = os.path.exists
+    probes: list[str] = []
+
+    def exists(path):
+        probes.append(path)
+        return original_exists(path)
+
+    monkeypatch.setattr("activegraph.llm.recorded.os.path.exists", exists)
+    response = RecordedLLMProvider(str(tmp_path)).complete(
+        **_kwargs(), prompt_hash=canonical, deterministic=False
+    )
+
+    assert response.raw_text == "canonical"
+    assert probes == [str(tmp_path / f"{canonical}.json")]
+
+
+def test_declared_identity_falls_back_once_to_distinct_legacy_hash(
+    tmp_path, monkeypatch
+):
+    canonical = _identity_hash(False)
+    legacy = _identity_hash(True)
+    _write_fixture(tmp_path / f"{legacy}.json", legacy, "legacy")
+    original_exists = os.path.exists
+    probes: list[str] = []
+
+    def exists(path):
+        probes.append(path)
+        return original_exists(path)
+
+    monkeypatch.setattr("activegraph.llm.recorded.os.path.exists", exists)
+    response = RecordedLLMProvider(str(tmp_path)).complete(
+        **_kwargs(), prompt_hash=canonical, deterministic=False
+    )
+
+    assert response.raw_text == "legacy"
+    assert probes == [
+        str(tmp_path / f"{canonical}.json"),
+        str(tmp_path / f"{legacy}.json"),
+    ]
+
+
+def test_declared_identity_total_miss_reports_canonical_hash(tmp_path) -> None:
+    canonical = _identity_hash(False)
+
+    with pytest.raises(LLMBehaviorError) as exc_info:
+        RecordedLLMProvider(str(tmp_path)).complete(
+            **_kwargs(), prompt_hash=canonical, deterministic=False
+        )
+
+    assert exc_info.value.reason == "llm.fixture_missing"
+    assert exc_info.value.payload_extras["prompt_hash"] == canonical
+
+
+def test_declared_identity_does_not_probe_equal_legacy_hash(
+    tmp_path, monkeypatch
+) -> None:
+    canonical = _identity_hash(True)
+    probes: list[str] = []
+
+    def missing(path):
+        probes.append(path)
+        return False
+
+    monkeypatch.setattr("activegraph.llm.recorded.os.path.exists", missing)
+    with pytest.raises(LLMBehaviorError):
+        RecordedLLMProvider(str(tmp_path)).complete(
+            **_kwargs(), prompt_hash=canonical, deterministic=True
+        )
+
+    assert probes == [str(tmp_path / f"{canonical}.json")]
+
+
+def test_declared_identity_round_trips_native_mode_and_nonempty_tools(
+    tmp_path,
+) -> None:
+    tools = [
+        {
+            "name": "lookup",
+            "description": "Lookup",
+            "input_schema": {"type": "object"},
+        }
+    ]
+    prompt_hash = _identity_hash(
+        False, tools=tools, structured_output_mode="native"
+    )
+    kwargs = _kwargs() | {
+        "tools": tools,
+        "structured_output_mode": "native",
+        "prompt_hash": prompt_hash,
+        "deterministic": False,
+    }
+    inner = _StubInner()
+
+    RecordingLLMProvider(inner, str(tmp_path)).complete(**kwargs)
+    fixture = json.loads((tmp_path / f"{prompt_hash}.json").read_text())
+    replayed = RecordedLLMProvider(str(tmp_path)).complete(**kwargs)
+
+    assert fixture["prompt"]["tools"] == tools
+    assert fixture["prompt"]["structured_output_mode"] == "native"
+    assert replayed.raw_text == '{"n": 1}'
 
 
 def test_recording_writes_fixture_with_recorded_at_outside_hash():
