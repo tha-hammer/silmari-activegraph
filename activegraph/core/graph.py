@@ -321,6 +321,11 @@ class Graph:
         `View.objects(type=...)` so call sites read the same inside
         and outside behaviors. `Graph.query(object_type=...)` is kept
         as a backward-compatible alias.
+
+        ``where`` exposes ordinary object data fields as bare-name shorthand.
+        The framework fields ``id``, ``type``, ``version``, ``data``, and
+        ``provenance`` are authoritative; use ``data.<field>`` for a domain
+        value that collides with one of those names.
         """
         # Type filter is pushed down to the store via find_objects; the
         # ``where`` predicate is evaluated in Python over that subset.
@@ -1181,14 +1186,22 @@ def evaluate_where(where: dict[str, Any], root: Any) -> bool:
 
 
 def _eval_where_on_object(where: dict[str, Any], obj: Object) -> bool:
-    """Where on a bare Object — keys are paths under data unless they start with one of the object fields."""
-    root = {
+    """Evaluate an object clause against the shared Graph/View root."""
+    return evaluate_where(where, _object_where_root(obj))
+
+
+def _object_where_root(obj: Object) -> dict[str, Any]:
+    """Build the authoritative object root used by every public query surface.
+
+    Domain fields remain convenient bare-name shorthand, while framework
+    metadata is authoritative when a domain field uses the same name.
+    Colliding domain values stay addressable through ``data.<field>``.
+    """
+    return {
+        **obj.data,
         "id": obj.id,
         "type": obj.type,
         "data": obj.data,
         "version": obj.version,
         "provenance": obj.provenance,
-        # also expose data fields at top level for convenience
-        **obj.data,
     }
-    return evaluate_where(where, root)

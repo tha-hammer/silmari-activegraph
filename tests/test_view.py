@@ -1,4 +1,8 @@
-from activegraph import FrozenClock, Graph, IDGen, Runtime, behavior
+import pytest
+
+from activegraph import FrozenClock, Graph, IDGen, Runtime, View, behavior
+
+from tests._object_query_helpers import OBJECT_QUERY_CASES, collision_graph
 
 
 def test_view_default_is_full_graph():
@@ -45,3 +49,16 @@ def test_view_scoped_around_event_with_depth_and_types():
     # Only types in include_types appear.
     assert "task" not in captured["objects"]
     assert "claim" in captured["objects"]
+
+
+@pytest.mark.parametrize(("where", "expected"), OBJECT_QUERY_CASES)
+def test_view_object_filters_match_graph_filters(where, expected):
+    graph, colliding_id, ordinary_id = collision_graph()
+    expected_ids = {
+        "colliding": [colliding_id],
+        "both": [colliding_id, ordinary_id],
+    }[expected]
+    view = View(graph.all_objects(), graph.all_relations(), graph.events)
+
+    assert [obj.id for obj in graph.objects(where=where)] == expected_ids
+    assert [obj.id for obj in view.objects(where=where)] == expected_ids

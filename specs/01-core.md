@@ -675,14 +675,12 @@ sequenceDiagram
    `ctx.view.objects()[0].data["x"] = 1` and silently corrupt state outside the event log. Same
    for `Event.payload` (`activegraph/core/event.py:3-5`). Both are convention-only.
 
-8. **`_eval_where_on_object` shadowing — a possible behavioral divergence between two APIs the
-   docstrings claim are mirrors.** Data fields are splatted at top level alongside the object's
-   own fields (`activegraph/core/graph.py:1174-1185`), so an object whose `data` contains `type`,
-   `id`, or `version` will have the data value win in a `where` clause. `View.objects` uses
-   `_object_root` instead (`activegraph/core/view.py:63-70`), which does **not** splat — so
-   `graph.objects(where=...)` and `view.objects(where=...)` can disagree on the same object
-   (docstring claim: `activegraph/core/graph.py:318-324`). Flagged, not asserted — neither path
-   was executed.
+8. **Resolved — Graph and View share one authoritative object-query root.** The root starts with
+   object data to preserve ordinary bare-field shorthand, then overwrites `id`, `type`,
+   `version`, `data`, and `provenance` with framework metadata. Thus the two public APIs agree;
+   bare framework names have exactly one meaning, while a colliding domain value remains
+   addressable as `data.<field>` (and a dict-valued domain field named `data` through
+   `data.data.<nested>`). `evaluate_where` grammar itself is unchanged.
 
 9. **`GraphStore.clear()`'s default depends on `remove_patch`, which the ABC raises
    `NotImplementedError` for** (`activegraph/core/graph_store.py:272-288`). A backend that

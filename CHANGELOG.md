@@ -44,6 +44,16 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
   `AnthropicProvider` now also sources from (additive, behavior-
   preserving — its own test suite is unmodified).
 
+### Changed
+
+- **Graph/View object-filter parity.** `Graph.objects(where=...)`, its
+  `Graph.query(...)` alias, and `View.objects(where=...)` now use one object
+  root. Ordinary data keys remain bare-name shorthand. Bare `id`, `type`,
+  `version`, and `data` now always select framework metadata; colliding domain
+  values move from those ambiguous bare forms to `data.id`, `data.type`,
+  `data.version`, and `data.data` (with a nested path such as
+  `data.data.nested` for dict contents). `provenance` remains canonical.
+
 ## [1.10.0] — 2026-07-12
 
 Runtime legibility and cooperative-host round (CONTRACT v1.10 #1–#3): the behavior-frame

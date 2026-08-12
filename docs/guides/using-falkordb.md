@@ -262,7 +262,11 @@ A few deliberate choices:
 - **`where` predicates still run in Python.** `graph.objects(where=...)`
   pushes the *type* filter down but applies the `where` clause in Python
   over the returned objects, because the structured `data` payload is stored
-  as a JSON string rather than as native, indexable properties. Likewise a
+  as a JSON string rather than as native, indexable properties. The Python
+  evaluator is shared with `View.objects(where=...)`: ordinary domain fields
+  are bare-name shorthand, bare `id` / `type` / `version` / `data` /
+  `provenance` are authoritative framework metadata, and colliding domain
+  fields use `data.<field>`. Likewise a
   pattern's node `{prop: value}` equality and `WHERE` clause are applied in
   Python over the chains `match_chain` returns. Other whole-graph consumers
   (diffing, prompt building, fork comparison, CLI

@@ -53,6 +53,20 @@ no kwargs returns every relation.
 preserved for backward compatibility; new code should use
 `graph.relations(...)`.
 
+`graph.objects(where=...)` and `graph.query(where=...)` share the same
+object-filter root as `View.objects(where=...)`. Ordinary data fields are
+available as convenient bare names:
+
+```python
+graph.objects(where={"confidence": {">=": 0.8}})
+```
+
+The bare names `id`, `type`, `version`, `data`, and `provenance` always mean
+framework metadata. If object data uses one of those names, address the domain
+value explicitly beneath `data`, such as `data.id`, `data.type`, or
+`data.version`. A dict-valued domain field named `data` is reached through its
+nested path, for example `data.data.nested`.
+
 But you can't mutate it except through events. There's no
 `graph.objects["x"] = ...` setter; every mutation goes through a
 method that emits an event.

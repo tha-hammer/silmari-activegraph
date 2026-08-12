@@ -5,6 +5,8 @@ import pytest
 
 from activegraph import FrozenClock, Graph, IDGen
 
+from tests._object_query_helpers import OBJECT_QUERY_CASES, collision_graph
+
 
 def _g():
     return Graph(ids=IDGen(), clock=FrozenClock())
@@ -135,6 +137,20 @@ def test_query_alias_still_works_with_positional_arg():
     g.add_object("task", {"title": "t"})
 
     assert {o.type for o in g.query("claim")} == {"claim"}
+
+
+@pytest.mark.parametrize(("where", "expected"), OBJECT_QUERY_CASES)
+def test_object_where_root_has_canonical_metadata_and_domain_shorthand(
+    where, expected
+):
+    graph, colliding_id, ordinary_id = collision_graph()
+    expected_ids = {
+        "colliding": [colliding_id],
+        "both": [colliding_id, ordinary_id],
+    }[expected]
+
+    assert [obj.id for obj in graph.objects(where=where)] == expected_ids
+    assert [obj.id for obj in graph.query(where=where)] == expected_ids
 
 
 # v1.0.4 #1: graph.relations(source=, target=, type=) as the canonical
