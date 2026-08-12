@@ -8594,3 +8594,22 @@ COMMITTED without locking the parent; therefore this amendment does not promise
 a stable Postgres prefix during concurrent parent mutation. Shared conformance
 tests intentionally exclude concurrent parent mutation. This fork guarantee is
 distinct from v0.8 #5, which governs migration transactionality only.
+
+## 2026-08-12 Set 4 amendment #3 — FalkorDB index provisioning
+
+Opening `FalkorDBGraphStore` provisions every required index and fails loud on
+syntax, permission, authentication, connection, and other server/client
+errors. The only ignored response is an instance of
+`redis.exceptions.ResponseError` whose text exactly equals
+`Attribute '<property>' is already indexed` for the property in the current
+index statement. Both the exception type and statement-specific property must
+match; classification/import failures preserve the original provisioning
+exception.
+
+Once an owned database client has been constructed, any graph-selection or
+index-provisioning failure closes it best-effort without allowing cleanup to
+replace the primary exception. An injected graph remains caller-owned. This
+type/text rule is the verified compatibility basis for FalkorDB Python 1.0.0
+through 1.6.2, redis-py 5.0.1 through 8.1.0, and FalkorDB 4.10.0 through
+4.18.3; it is not a timeless upstream guarantee. The live reopen canary must
+fail if a future supported version changes that response contract.
