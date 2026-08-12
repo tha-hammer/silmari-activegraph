@@ -15,7 +15,7 @@ from decimal import Decimal
 import pytest
 
 from activegraph import FrozenClock, Graph, Runtime, behavior, clear_registry, llm_behavior
-from activegraph.llm import LLMMessage, LLMResponse, RecordedLLMProvider, RecordingLLMProvider
+from activegraph.llm import LLMResponse, RecordedLLMProvider, RecordingLLMProvider
 from activegraph.llm.errors import PromptIdentityError
 from activegraph.llm.provider import LLMProvider
 from activegraph.llm.prompt import assemble_prompt

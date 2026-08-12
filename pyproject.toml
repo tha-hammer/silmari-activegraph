@@ -242,6 +242,7 @@ ignore_missing_imports = true
 # rest.
 files = [
     "activegraph/behaviors/base.py",
+    "activegraph/behaviors/_factory.py",
     "activegraph/behaviors/decorators.py",
     "activegraph/core/clock.py",
     "activegraph/core/event.py",
@@ -256,6 +257,7 @@ files = [
     "activegraph/packs/diligence/settings.py",
     "activegraph/llm/embedding_cache.py",
     "activegraph/llm/errors.py",
+    "activegraph/llm/prompt_identity.py",
     "activegraph/observability/logging.py",
     "activegraph/observability/migration.py",
     "activegraph/observability/metrics.py",
@@ -293,6 +295,7 @@ files = [
     "activegraph/store/url.py",
     "activegraph/tools/base.py",
     "activegraph/tools/context.py",
+    "activegraph/tools/_factory.py",
     "activegraph/tools/decorators.py",
     "activegraph/tools/errors.py",
 ]
@@ -303,6 +306,7 @@ files = [
 [[tool.mypy.overrides]]
 module = [
     "activegraph.behaviors.base",
+    "activegraph.behaviors._factory",
     "activegraph.behaviors.decorators",
     "activegraph.core.clock",
     "activegraph.core.event",
@@ -317,6 +321,7 @@ module = [
     "activegraph.packs.diligence.settings",
     "activegraph.llm.embedding_cache",
     "activegraph.llm.errors",
+    "activegraph.llm.prompt_identity",
     "activegraph.observability.logging",
     "activegraph.observability.migration",
     "activegraph.observability.metrics",
@@ -354,6 +359,7 @@ module = [
     "activegraph.store.url",
     "activegraph.tools.base",
     "activegraph.tools.context",
+    "activegraph.tools._factory",
     "activegraph.tools.decorators",
     "activegraph.tools.errors",
 ]

@@ -62,6 +62,9 @@ import random as _random
 import time as _time
 import traceback
 
+from activegraph.llm import prompt_identity
+from activegraph.runtime.event_policy import classify_event_type
+
 
 def _monotonic() -> float:
     return _time.monotonic()
@@ -87,7 +90,6 @@ from activegraph.llm.errors import (
     PromptIdentityError,
 )
 from activegraph.llm.provider import LLMProvider
-from activegraph.llm import prompt_identity
 from activegraph.llm.types import LLMMessage, ToolCall
 from activegraph.policy import Policy
 from activegraph.runtime.authority import (
@@ -104,7 +106,6 @@ from activegraph.runtime.context_reads import (
     context_read_payload,
 )
 from activegraph.runtime.diff import Diff, compute_diff
-from activegraph.runtime.event_policy import classify_event_type
 from activegraph.runtime.dev_override import (
     DevOverride,
     authority_allows,

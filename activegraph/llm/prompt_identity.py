@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from typing import Any, cast
 
 
 _OMIT_TOOLS = object()
@@ -12,7 +12,7 @@ _OMIT_TOOLS = object()
 
 def _message_dict(message: Any) -> dict[str, Any]:
     if hasattr(message, "to_dict"):
-        return message.to_dict()
+        return cast(dict[str, Any], message.to_dict())
     return dict(message)
 
 
