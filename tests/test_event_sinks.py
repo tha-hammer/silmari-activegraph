@@ -24,6 +24,7 @@ from activegraph import (
     OverflowPolicy,
     RecordingSink,
     Runtime,
+    RuntimeClosedError,
     SinkConfig,
     behavior,
 )
@@ -829,6 +830,91 @@ def test_close_timeout_then_terminal_failure_needs_close_retry_to_reap() -> None
     finally:
         sink.release_close.set()
         runtime.close_sinks(timeout=2.0)
+
+
+def test_runtime_context_manager_closes_every_graph_sink() -> None:
+    graph = Graph(run_id="run_runtime_scope")
+    runtime = Runtime(graph, behaviors=[])
+    sink = RecordingSink()
+    handle = graph.add_sink(sink, name="graph-attached")
+
+    with runtime as entered:
+        assert entered is runtime
+        graph.emit(_event(graph, 1))
+
+    assert handle.status().state.value == "closed"
+    assert [delivery.event.id for delivery in sink.deliveries] == ["evt_001"]
+    assert runtime.close() is True
+    with pytest.raises(RuntimeClosedError):
+        runtime.__enter__()
+
+
+def test_runtime_close_timeout_is_false_and_explicit_retry_is_safe() -> None:
+    graph = Graph(run_id="run_runtime_close_timeout")
+    runtime = Runtime(graph, behaviors=[])
+    sink = GatedFlushSink()
+    runtime.add_sink(sink, name="slow-runtime-close")
+    try:
+        assert runtime.close(timeout=0.01) is False
+        assert sink.flush_entered.wait(timeout=2.0)
+        with pytest.raises(RuntimeClosedError):
+            runtime.add_sink(RecordingSink(), name="too-late")
+        assert runtime.sink_statuses()[0].state.value == "closing"
+
+        sink.release_flush.set()
+        assert runtime.close(timeout=2.0) is True
+        assert runtime.close(timeout=2.0) is True
+    finally:
+        sink.release_flush.set()
+        runtime.close_sinks(timeout=2.0)
+
+
+def test_runtime_exit_preserves_user_error_and_chains_raised_close_error() -> None:
+    runtime = Runtime(Graph(run_id="run_runtime_dual_failure"), behaviors=[])
+    close_error = OSError("unexpected close failure")
+
+    def raise_on_close(timeout: float | None = 5.0) -> bool:
+        raise close_error
+
+    runtime.close = raise_on_close  # type: ignore[method-assign]
+    with pytest.raises(ValueError, match="user failure") as excinfo:
+        with runtime:
+            raise ValueError("user failure")
+    assert excinfo.value.__context__ is close_error
+
+
+def test_runtime_exit_ignores_ordinary_false_close_result() -> None:
+    runtime = Runtime(Graph(run_id="run_runtime_false_exit"), behaviors=[])
+    runtime.close = lambda timeout=5.0: False  # type: ignore[method-assign]
+    with pytest.raises(ValueError, match="user failure") as excinfo:
+        with runtime:
+            raise ValueError("user failure")
+    assert excinfo.value.__context__ is None
+
+
+def test_runtime_close_preserves_shared_adapter_reference_counts() -> None:
+    sink = RecordingSink()
+    graph_a = Graph(run_id="run_runtime_shared_a")
+    graph_b = Graph(run_id="run_runtime_shared_b")
+    runtime_a = Runtime(graph_a, behaviors=[], sinks=[sink])
+    runtime_b = Runtime(graph_b, behaviors=[], sinks=[sink])
+    try:
+        assert runtime_a.flush_sinks(timeout=2.0)
+        assert runtime_b.flush_sinks(timeout=2.0)
+        assert sink._open_count == 2
+
+        assert runtime_a.close() is True
+        assert sink._open_count == 1
+        graph_b.emit(_event(graph_b, 1))
+        assert runtime_b.flush_sinks(timeout=2.0)
+        assert [delivery.context.run_id for delivery in sink.deliveries] == [
+            "run_runtime_shared_b"
+        ]
+        assert runtime_b.close() is True
+        assert sink._open_count == 0
+    finally:
+        runtime_a.close_sinks(timeout=2.0)
+        runtime_b.close_sinks(timeout=2.0)
 
 
 def test_close_timeout_retains_status_and_can_be_retried() -> None:

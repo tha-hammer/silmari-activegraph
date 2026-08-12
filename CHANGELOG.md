@@ -15,6 +15,11 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
 
 ## [Unreleased]
 
+- Added deterministic `Runtime.close()` and context-manager sink ownership.
+  Closing delegates to the existing graph-wide sink lifecycle, preserves
+  ordinary timeout/partial-failure results as `False`, and rejects later
+  Runtime mutations with `RuntimeClosedError` while keeping inspection usable.
+
 ### Added
 
 - **`ClaudeCodeProvider`** (CONTRACT v1.11 #1). A third `LLMProvider`,

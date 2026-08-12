@@ -7,9 +7,9 @@ decoration (against any live Runtime via the WeakSet below).
 
 The WeakSet is module-level so the registration decorators can
 look it up without importing ``Runtime`` at module load. Runtimes
-self-register inside ``__init__`` after wiring; the WeakSet
-auto-cleans GC'd Runtimes — no explicit ``Runtime.close()`` is
-required.
+self-register inside ``__init__`` after wiring. The WeakSet auto-cleans GC'd
+Runtimes, and successful deterministic ``Runtime.close()`` removes its entry
+immediately.
 
 The single-behavior validator here is intentionally narrow: it
 only does the cross-provider mismatch check (recognized name
@@ -40,6 +40,12 @@ def track_runtime(rt: "Runtime") -> None:
     """Register a live Runtime for cross-provider validation. Called
     by ``Runtime.__init__`` after the provider and graph are wired."""
     _LIVE_RUNTIMES.add(rt)
+
+
+def untrack_runtime(rt: "Runtime") -> None:
+    """Remove a successfully closed Runtime from live validation."""
+
+    _LIVE_RUNTIMES.discard(rt)
 
 
 def live_runtimes() -> list["Runtime"]:

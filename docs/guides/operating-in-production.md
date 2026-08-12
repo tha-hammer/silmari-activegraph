@@ -278,7 +278,7 @@ from activegraph import (
 )
 
 graph = Graph()
-rt = Runtime(
+with Runtime(
     graph,
     sinks=[
         SinkConfig(
@@ -288,12 +288,10 @@ rt = Runtime(
             overflow_policy=OverflowPolicy.DROP_NEWEST,
         )
     ],
-)
-
-rt.run_goal("build the report")
-assert rt.flush_sinks(timeout=5.0)
-print(rt.sink_statuses())
-rt.close_sinks(timeout=5.0)
+) as rt:
+    rt.run_goal("build the report")
+    assert rt.flush_sinks(timeout=5.0)
+    print(rt.sink_statuses())
 ```
 
 The defaults are capacity 1024 and `drop_newest`. The other declared
@@ -307,6 +305,14 @@ name. If a timed-out close later reaches CLOSED or FAILED, only close/remove
 reaps closing ownership. A terminal failure remains queryable until explicit
 removal or name reuse. A failed close retry can therefore return `False` while
 still releasing closing ownership and retaining the failure snapshot.
+
+`Runtime.close(timeout=5.0)` is the deterministic ownership boundary for every
+sink attached to its Graph and is called automatically by the Runtime context
+manager. It delegates to `close_sinks`: an ordinary timeout or partial adapter
+failure returns `False`, remains inspectable through `sink_statuses()`, and may
+be explicitly retried. Closing rejects later Runtime mutations with
+`RuntimeClosedError`; read-only inspection remains available. It does not close
+the event store or remove graph listeners.
 
 Normal `Runtime.load`, `fork`, and strict replay never redeliver history
 to live sinks. Passing `sinks=` to those APIs attaches them only after the

@@ -53,6 +53,7 @@ from activegraph.runtime.config_errors import (
     IncompatibleRuntimeState,
     InvalidArgumentType,
     InvalidRuntimeConfiguration,
+    RuntimeClosedError,
 )
 from activegraph.runtime.errors import ReplayDivergenceError
 from activegraph.runtime.exec_errors import (
@@ -236,6 +237,7 @@ __all__ = [
     "ReservedFieldError",
     "RunRecord",
     "Runtime",
+    "RuntimeClosedError",
     "RunQuantumResult",
     "RuntimeContextRequiredError",
     "RuntimeStatus",

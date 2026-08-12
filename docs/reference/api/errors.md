@@ -116,3 +116,5 @@ per-error recovery prose see the
 ::: activegraph.InvalidArgumentType
 
 ::: activegraph.IncompatibleRuntimeState
+
+::: activegraph.RuntimeClosedError

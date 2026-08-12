@@ -7,7 +7,7 @@ specific backend that isn't attached, state that's already set and
 can't be re-set. The errors are caller-actionable: the developer
 either fixes the call or restructures their setup.
 
-Three classes here cover the audit:
+Four classes here cover the audit and runtime lifecycle:
 
 - :class:`InvalidRuntimeConfiguration` — most ValueError shapes
   (conflicting args, missing required args, out-of-range values).
@@ -18,6 +18,8 @@ Three classes here cover the audit:
   specific runtime state (e.g., fork requires a SQLite-backed
   runtime; graph already has a store attached). Multi-inherits
   :class:`RuntimeError`.
+- :class:`RuntimeClosedError` — a mutating operation was attempted after
+  deterministic Runtime shutdown. It preserves the same RuntimeError lineage.
 
 See CONTRACT v1.0 PR-F for the audit table mapping each migrated
 raise site to its class.
@@ -121,4 +123,32 @@ class IncompatibleRuntimeState(ConfigurationError, RuntimeError):
             why=why,
             how_to_fix=how_to_fix,
             context=context,
+        )
+
+
+class RuntimeClosedError(IncompatibleRuntimeState):
+    """A mutating Runtime operation was attempted after ``close()``.
+
+    The class intentionally shares :class:`IncompatibleRuntimeState`'s
+    documentation category while giving callers a precise catch target.
+    """
+
+    def __init__(self, operation: str) -> None:
+        super().__init__(
+            f"Runtime is closed; {operation} is unavailable",
+            what_failed=(
+                f"Runtime.{operation} was called after Runtime.close(). "
+                "Closed runtimes reject state-changing operations."
+            ),
+            why=(
+                "Runtime.close() is the deterministic sink-ownership boundary. "
+                "Allowing later mutations would silently resume a resource whose "
+                "outbound observers have already been detached and closed."
+            ),
+            how_to_fix=(
+                "Create a new Runtime for further work. Read-only inspection "
+                "methods, sink_statuses(), and explicit close retries remain "
+                "available on this closed Runtime."
+            ),
+            context={"operation": operation},
         )

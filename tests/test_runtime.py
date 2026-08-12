@@ -1,13 +1,21 @@
 """Runtime loop, lifecycle events, failure handling, budget enforcement."""
 
+import gc
+import weakref
+
+import pytest
+
 from activegraph import (
     FrozenClock,
     Graph,
     IDGen,
+    RecordingSink,
     Runtime,
+    RuntimeClosedError,
     behavior,
     relation_behavior,
 )
+from activegraph.runtime._live import live_runtimes
 
 
 def _g():
@@ -123,3 +131,66 @@ def test_print_graph_runs_without_error(capsys):
     out = capsys.readouterr().out
     assert "graph:" in out
     assert "task#" in out
+
+
+def test_successful_close_untracks_runtime_and_allows_read_only_surfaces():
+    graph = _g()
+    runtime = Runtime(graph, behaviors=[])
+    assert runtime in live_runtimes()
+
+    assert runtime.close() is True
+    assert runtime not in live_runtimes()
+    assert runtime.run_id == graph.run_id
+    assert runtime.errors == []
+    assert runtime.status().run_id == graph.run_id
+    assert runtime.sink_statuses() == ()
+    assert runtime.dev_overrides() == []
+    assert runtime.authority_ceiling() == "none"
+    assert runtime.loaded_packs() == []
+    assert runtime.pending_approvals() == []
+    assert runtime.trace.lines() == []
+
+    runtime_ref = weakref.ref(runtime)
+    del runtime
+    del graph
+    gc.collect()
+    assert runtime_ref() is None
+
+
+def test_closed_runtime_rejects_mutating_entry_points():
+    runtime = Runtime(_g(), behaviors=[])
+    other = Runtime(_g(), behaviors=[])
+    assert runtime.close() is True
+
+    mutators = (
+        lambda: runtime.add_sink(RecordingSink()),
+        lambda: runtime.remove_sink("missing"),
+        lambda: runtime.dev_override(
+            actor="developer",
+            reason="test",
+            target_gate="tool.execute",
+            scope="one",
+            resulting_authority="R0",
+        ),
+        lambda: runtime.set_authority_ceiling("R0", actor="test", reason="test"),
+        lambda: runtime.evaluate_capability_authority(
+            capability="test", action_class="R0"
+        ),
+        lambda: runtime.run_goal("too late"),
+        runtime.run_until_idle,
+        runtime.run_quantum,
+        lambda: runtime.run_until(lambda graph: True),
+        lambda: runtime.embed(["too late"], model="test"),
+        lambda: runtime.load_pack(object()),
+        lambda: runtime.disable_pack("missing"),
+        lambda: runtime.approve("missing"),
+        lambda: runtime.save_state("unused.db"),
+        lambda: runtime.fork("evt_missing"),
+        lambda: runtime.promote(other),
+    )
+    try:
+        for mutate in mutators:
+            with pytest.raises(RuntimeClosedError):
+                mutate()
+    finally:
+        other.close()

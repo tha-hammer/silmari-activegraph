@@ -51,6 +51,7 @@ from activegraph import (
     RegistrationError,
     ReplayDivergenceError,
     ReplayError,
+    RuntimeClosedError,
     RuntimeContextRequiredError,
     SchemaVersionMismatch,
     StorageError,
@@ -1026,11 +1027,12 @@ def test_invalid_tool_registration_snapshot() -> None:
 
 
 def test_config_leaves_inherit_from_configuration_error() -> None:
-    """The three ConfigurationError leaves are in the v1.0 hierarchy."""
+    """Runtime configuration/lifecycle leaves share the hierarchy."""
     for cls in (
         InvalidRuntimeConfiguration,
         InvalidArgumentType,
         IncompatibleRuntimeState,
+        RuntimeClosedError,
     ):
         assert issubclass(cls, ConfigurationError), cls
         assert issubclass(cls, ActiveGraphError), cls
@@ -1045,6 +1047,13 @@ def test_config_leaves_preserve_legacy_base_classes() -> None:
     assert issubclass(InvalidRuntimeConfiguration, ValueError)
     assert issubclass(InvalidArgumentType, TypeError)
     assert issubclass(IncompatibleRuntimeState, RuntimeError)
+    assert issubclass(RuntimeClosedError, RuntimeError)
+
+
+def test_runtime_closed_error_is_structured_and_names_operation() -> None:
+    err = RuntimeClosedError("run_goal")
+    _assert_format_compliant(err)
+    assert err.context == {"operation": "run_goal"}
 
 
 def test_pr_f_cross_category_leaves_are_execution() -> None:

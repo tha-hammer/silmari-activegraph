@@ -8575,3 +8575,20 @@ Tested against `claude-agent-sdk==0.2.135` and `claude` CLI `2.1.227`
 exactly — `_load_sdk_bindings()` checks the installed SDK version at
 call time and refuses (terminal `llm.request_error`) to run against
 any other.
+
+# Unreleased — deterministic Runtime sink ownership
+
+`Runtime.close(timeout: float | None = 5.0) -> bool` delegates to the existing
+graph-wide `close_sinks()` operation and owns exactly the same set: every sink
+attached to the Runtime's Graph. It does not close stores or remove listeners.
+The first call closes the Runtime to subsequent state-changing Runtime methods;
+those methods raise `RuntimeClosedError`, while read-only inspection and
+explicit close retries remain available. Repeated close is safe.
+
+`Runtime.__enter__()` returns the open Runtime and raises `RuntimeClosedError`
+after close. `Runtime.__exit__()` returns `None` and never suppresses a user
+exception. An ordinary timeout or partial adapter failure remains the existing
+exception-free `False` result; status stays queryable and no automatic retry is
+performed. Only if close unexpectedly raises while a user exception is active
+does the user exception remain primary with the close exception attached as
+its `__context__`.
