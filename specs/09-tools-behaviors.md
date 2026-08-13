@@ -525,11 +525,8 @@ Error taxonomy:
 `ToolError`'s docstring lists 11 conventional codes (`tools/errors.py:277-291`), but its constructor
 accepts any reason string. Its tailored prose table covers only the first six (`:127-134`); other
 `ToolError` reasons use `_tool_fallback_prose`
-(`:137-149`, dispatched at `:305-309`). That fallback currently says the calling behavior can read
-the reason and decide how to proceed, but Runtime ends the behavior after any handled tool failure
-(`runtime/runtime.py:2450-2460`); the prose is therefore stale. `_REASON_PREFIX_TO_DOC_SLUG` maps the
-`tool.` prefix to the `tool-error` doc page for the WARNING log's `More:` URL —
-`runtime/runtime.py:326-331`.
+(`:137-149`, dispatched at `:305-309`). `_REASON_PREFIX_TO_DOC_SLUG` maps the `tool.` prefix to the
+`tool-error` doc page for the WARNING log's `More:` URL — `runtime/runtime.py:326-331`.
 
 ### tools <-> core (event log & replay cache)
 
@@ -693,43 +690,28 @@ Message sources: `runtime/registry.py:91-104`; `runtime/runtime.py:1697-1732`, `
 
 ### Still open or intentionally bounded
 
-1. **Recorded tool failures are not replayed as failures.** `ToolCache.from_events` and
-   `RecordedToolProvider` preserve `CachedToolResponse.error`, but `_invoke_tool` never inspects it
-   after either a cache hit or an invoker return and emits `tool.responded` with `error: None`
-   (`tools/cache.py:127-149`, `tools/recorded.py:100-105`,
-   `runtime/runtime.py:2669-2768`).
-
-2. **Global behavior decorators accept required annotated extras that Runtime cannot inject.** The
-   shared signature validator treats an annotation as sufficient when behavior factories pass
-   `allow_annotated_extras=True`, but only pack loader wrappers inject settings; the three direct
-   Runtime call sites pass exactly the standard handler arguments (`_signature.py:23-27`,
-   `:49-54`, `:107-116`, `:197-204`; `behaviors/_factory.py:82-88`, `:132-138`, `:183-189`;
-   `runtime/runtime.py:1868`, `:2530`, `:3033`).
-
-3. **Tailored `ToolError` prose covers only six of the 11 documented reason codes.**
+1. **Tailored `ToolError` prose covers only six of the 11 documented reason codes.**
    `tool.unrecorded_external_io` therefore uses the generic fallback. `tool.unknown_tool` is a
    distinct `UnknownToolError` with its own prose, while `tool.max_turns_exhausted` is emitted from a
    `RuntimeError`, so neither passes through `ToolError`'s table (`tools/errors.py:127-149`,
-   `:215-321`; `runtime/runtime.py:2473-2481`). The fallback also incorrectly tells the calling
-   behavior it can read the reason and continue even though Runtime ends the behavior after the
-   failure (`runtime/runtime.py:2450-2460`).
+   `:215-321`; `runtime/runtime.py:2473-2481`).
 
-4. **`_normalize_args(tool, args)` retains an unused `tool` parameter.** Its docstring now says so
+2. **`_normalize_args(tool, args)` retains an unused `tool` parameter.** Its docstring now says so
    and the body truthfully delegates all shapes to `canonicalize_args` (`tools/recorded.py:63-70`).
    This is minor public/internal surface, not two hidden normalization branches.
 
-5. **`priority` is deliberately reserved metadata.** Behavior objects retain it, while
+3. **`priority` is deliberately reserved metadata.** Behavior objects retain it, while
    `Registry.match` and the delayed queue preserve registration/FIFO order
    (`behaviors/base.py:65`, `:98-100`; `runtime/registry.py:91-104`; `runtime/scheduler.py:64-99`).
    Activating priority would require a separate contract amendment.
 
-6. **`ctx.llm_provider` is deliberately LLM-invocation-only.** It is the exact configured provider
+4. **`ctx.llm_provider` is deliberately LLM-invocation-only.** It is the exact configured provider
    for `@llm_behavior` and `None` for plain/relation contexts. Direct `complete()` calls remain
    unsupported because they bypass Runtime-owned events, cache, budget, retry, tools, provenance,
    and replay; use `@llm_behavior` for generation and `ctx.embed()` for embeddings
    (`runtime/runtime.py:187-215`, `:1954-1966`).
 
-7. **The fixture invokers and reference tools are intentional public leaves.**
+5. **The fixture invokers and reference tools are intentional public leaves.**
    `RecordedToolProvider`, `RecordingToolProvider`, `web_fetch`, and `make_graph_query_tool` have no
    in-package consumers beyond exports/registration, but all are part of `activegraph.tools.__all__`
    (`tools/__init__.py:50-64`).
