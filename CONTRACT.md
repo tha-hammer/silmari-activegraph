@@ -1653,13 +1653,16 @@ does not ship adapters.
 `status(recent: int = 20)` — single parameter controls the tail
 length. The CLI's `inspect --tail N` passes through.
 
-State is derived **from the event log**, not from in-memory
-bookkeeping. This means a freshly-loaded runtime and the runtime that
-saved the log agree on state. Walk back through events: if the most
-recent terminal lifecycle event is `runtime.budget_exhausted` →
-`exhausted`; if it's `runtime.idle` → `idle`; otherwise `stopped`.
-`running` is reserved for cross-thread observation of an in-progress
-loop (single-threaded today; documented for future async use).
+While no public drain is active, state is derived **from the event
+log**: walk back through events; if the most recent terminal lifecycle
+event is `runtime.budget_exhausted` → `exhausted`; if it is
+`runtime.idle` → `idle`; otherwise `stopped`. A lock-protected,
+process-local reference count around `run_goal`, `run_until_idle`,
+`run_until`, and `run_quantum` temporarily overlays that dormant state
+with `running`. The count, including nested drains, is always cleared
+in `finally`; it is neither an event nor persisted state. Same-instance
+cross-thread observers can see the overlay, but the lock protects only
+the count, not concurrent Runtime mutation.
 
 There is **no `last_error` field**. Errors are events; filter
 `recent_events` for type `behavior.failed`, or query the event store
@@ -2302,12 +2305,13 @@ the same layout for reproducible demos.
 
 ## v0.9 #20. runtime.status() is log-derived (re-affirm)
 
-Already true for v0.8 but worth pinning here: `runtime.status()` is
+Already true for v0.8 outside active drains: dormant terminal state is
 computed from the event log, not from in-memory caches. After
-`load_pack`, status reflects the `pack.loaded` event. Live runtime
-and `activegraph inspect` see identical state because both read from
-the same source of truth. This is the property that lets operators
-trust the dashboard.
+`load_pack`, status reflects the `pack.loaded` event. A live Runtime and
+`activegraph inspect` therefore agree when the live instance has no
+active drain. During a drain, only the same process and instance can see
+the non-persisted `running` overlay; `inspect` loads a separate dormant
+Runtime and is not a cross-process liveness probe.
 
 The operator guide gets a short section on this property.
 
@@ -2767,7 +2771,7 @@ step.
 
 ## v1.0 #3. The error message format is locked
 
-Every framework error follows this exact shape:
+Structured framework errors follow this exact shape:
 
 ```
 <ErrorClass>: <one-line summary>
@@ -2784,6 +2788,15 @@ How to fix:
 More:
   https://docs.activegraph.ai/errors/<error-class-slug>
 ```
+
+**Narrow compatibility waiver:** `SandboxStartupError` is rooted in
+`ConfigurationError` and has its own documentation slug, but retains its
+published one-positional-message rendering in this ancestry-only cycle.
+Therefore `str(exc)` remains the exact legacy startup text,
+`exc.args == (str(exc),)`, the structured fields/context are empty, and the
+message has no `More:` block. That rendering is deprecated for a separately
+reviewed next-major conversion with new snapshots, tracked by AF-wse. This is
+not precedent for new unstructured errors.
 
 Snapshot-tested per-error-class. Doc URL must resolve to a real
 page; broken links fail CI. Until DNS for `docs.activegraph.ai` is
@@ -2837,6 +2850,7 @@ or implementation-detail voice, send the PR back.
 ```
 ActiveGraphError
 ├── ConfigurationError      # runtime construction problems
+│   └── SandboxStartupError # sandbox preflight setup; also RuntimeError
 ├── RegistrationError       # behavior/tool/pack registration
 │   ├── PackConflictError
 │   ├── MissingProviderError
@@ -2892,7 +2906,9 @@ transition:
   fields. `__str__` produces the locked format.
 - **Legacy**: pass a single positional message. `__str__` returns that
   message verbatim. Format-noncompliant but valid Python, so existing
-  raises in unmigrated leaves keep working through PR-B → PR-F.
+  raises keep working. `SandboxStartupError` deliberately retains this
+  compatibility branch while its ancestry is repaired; AF-wse tracks
+  the next-major structured-rendering migration.
 
 `ActiveGraphError.is_structured()` returns True for the first mode, False
 for the second. Snapshot tests in `tests/test_errors_format.py` only run
@@ -7528,6 +7544,16 @@ cause if not, so consumers fail loud at boot. Pinned by
 `test_preflight_fails_loud_with_the_cause_on_a_restricted_env`,
 `test_explicit_code_channel_rescues_a_restricted_child`, and
 `test_env_allow_list_stays_closed_secrets_do_not_leak`.
+
+`SandboxStartupError` is a setup/configuration leaf with bases
+`(ConfigurationError, RuntimeError)`: framework-wide catches now include it,
+while existing built-in `RuntimeError` handlers select the same branch. It is
+exported only by `activegraph.sandbox`, uses the stable
+`sandbox-startup-error` documentation slug, and the raise site still passes
+the exact single positional message above. The narrow legacy-rendering waiver
+is recorded under v1.0 #3 and is tracked for next-major conversion by AF-wse;
+actual trial timeout/import/materialization failures remain `TrialReport`
+outcomes rather than acquiring implicit preflight behavior.
 
 Post-release addendum (v1.7.1, a macOS soak surfaced a third defect —
 exposed BECAUSE 1c's import fix let the child reach limit

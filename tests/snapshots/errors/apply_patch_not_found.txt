@@ -1,0 +1,18 @@
+ApplyPatchNotFoundError: unknown patch: patch_404
+
+What failed:
+  graph.apply_patch('patch_404', ...) could not find a patch with id 'patch_404'. No lifecycle event was emitted.
+
+Why:
+  Applying or rejecting a patch is a transition of an existing proposal. The supplied id is absent from this graph, so the runtime cannot determine a target, validate the current lifecycle state, or record the requested transition.
+
+How to fix:
+  Check the id and lifecycle state before the transition:
+      patch = graph.get_patch('patch_404')
+      if patch is not None and patch.status == 'proposed':
+          graph.apply_patch(patch.id, ...)
+
+  Use the patch id returned by graph.propose_patch() from this graph and run.
+
+More:
+  https://docs.activegraph.ai/errors/apply-patch-not-found-error

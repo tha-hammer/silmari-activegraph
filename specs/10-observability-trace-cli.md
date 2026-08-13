@@ -297,12 +297,13 @@ serialization   ::= status_to_dict( RuntimeStatus ) -> json-object   (* tuples �
 
 Contract notes (CONTRACT v0.8 #11):
 
-1. **Cheap to call**: "No graph traversal beyond a tail-slice of the event log" — `runtime/runtime.py:2593-2597`. In practice `status()` *does* walk the log backwards to derive `state` (`runtime/runtime.py:2645-2653`) — bounded by the distance to the last terminal lifecycle event, not O(1). See Open question 5.
+1. **Cheap to call**: no graph traversal; outside a local drain, `status()` walks the log backwards only to the latest terminal lifecycle event. During a local drain the active-count overlay avoids that scan.
 2. **All returned data is immutable** — every dataclass is `frozen=True`; collections are tuples — `observability/status.py:24-73`.
 3. **There is deliberately no `last_error` field.** "Errors are events; filter `recent_events` for type `behavior.failed`… Convenience accessors that look the same as the source of truth but mean different things are bug-bait" — `observability/status.py:9-12`.
 4. `recent < 0` raises `InvalidRuntimeConfiguration` rather than coercing — `runtime/runtime.py:2601-2632`.
-5. `state` is **log-derived**, so a freshly loaded runtime and the runtime that saved the log agree — `runtime/runtime.py:2643-2645`. Default `"stopped"`; only `runtime.budget_exhausted` → `"exhausted"` and `runtime.idle` → `"idle"` are recognized.
-6. `registered_behaviors` is empty when `self.registry is None` (pre-run) — the intended operator signal, not a bug — `runtime/runtime.py:2665-2668`.
+5. `state` is log-derived while no local public drain is active: default `"stopped"`; `runtime.budget_exhausted` → `"exhausted"`; `runtime.idle` → `"idle"`. A lock-protected, non-persisted active-drain reference count temporarily takes precedence as `"running"`. Nested drains count independently and unwind in `finally`. The count lock does not make Runtime mutation thread-safe.
+6. Same-instance observers may see `"running"`; freshly loaded runtimes and `activegraph inspect` remain dormant/log-derived. Live-versus-loaded equality applies outside active drains.
+7. `registered_behaviors` is empty when `self.registry is None` (pre-run) — the intended operator signal, not a bug.
 
 ### A4. observability.migration -> store
 
@@ -342,6 +343,7 @@ Contract notes (CONTRACT v0.8 #5 revised, v1.0 CLI follow-on):
 5. `MigrationReport.ok` is True when nothing **failed** — a `skipped` run (already present at destination) still counts as success — `migration.py:69`. The CLI's summary line counts only `status == "ok"` (`cli/main.py:1148`), so `skipped` runs are invisible in the printed count while still passing `report.ok`.
 6. `skip_corrupted=True` produces a **partial** destination run; the operator is put on notice via `skipped_events` — `migration.py:93-96`; CLI help repeats it in caps — `cli/main.py:1077-1080`.
 7. Skip-corrupted needs driver-specific raw-row iteration because "Python generators die after raising" — `iter_events()` can't be wrapped per-row — `migration.py:16-18`, `:224-231`.
+8. **CLI compatibility preflight:** before calling `migrate()`, the CLI lists source runs first and destination runs second. A source `SchemaVersionMismatch` exits 4 without touching a fresh destination; a destination mismatch exits 4 before any per-run report or write. Preflighting a fresh destination eagerly creates only its current schema and metadata. This does not add cross-version reading to the library, whose direct source-raise and destination-failed-report behavior remains unchanged.
 
 ## B. Trace seams
 
@@ -479,6 +481,9 @@ migrate         ::= "migrate" "--from" URL "--to" URL
 URL             ::= "sqlite:///" PATH | "postgres://" ...
 exit-code       ::= 0 (* ok *)        | 1 (* generic *)   | 2 (* usage *)
                   | 3 (* not found *) | 4 (* corruption *) | 5 (* divergence *)
+schema-mismatch ::= SchemaVersionMismatch -> stderr-once , exit-code 4
+                    (* exact leaf at every CLI store boundary; direct
+                       library calls still raise or report normally *)
 ```
 
 Contract notes (CONTRACT v0.8 #12–#13):
@@ -493,6 +498,8 @@ Contract notes (CONTRACT v0.8 #12–#13):
 8. Cross-store `fork` is explicitly unsupported; the guidance is fork-then-migrate — `cli/main.py:599-605`.
 9. `--set` overrides are validated against `pack.loaded` events at or before the fork point; an unmatched pack is a usage error — `cli/main.py:613-623`, `:764-784`.
 10. `migrate` exits `EXIT_GENERIC_ERROR` when `not report.ok` — `cli/main.py:1152-1153`.
+11. Every store-opening command maps the exact `SchemaVersionMismatch` leaf to one structured stderr rendering and exit 4. The old `RuntimeError` string match remains only in the two legacy helper paths where it already existed.
+12. `migrate` performs a source-first, destination-second compatibility preflight. A fresh destination may therefore be initialized with empty current-schema tables after the source succeeds; no migration report or run write precedes both checks. Cross-version migration remains a separate design concern.
 
 ### C2. cli -> library (the lazy-import discipline)
 
@@ -594,8 +601,11 @@ concrete error leaves in the package root under one of the seven categories** �
 `runtime/config_errors.py:33,66,96`; `runtime/registration_errors.py:21,79,140,193,250`;
 `runtime/patterns.py:60`; `runtime/scheduler.py:91`; `store/errors.py:27,41,53,66`;
 `store/url.py:42`; `tools/errors.py:152,215,277`; `packs/__init__.py:91,149,161,171,181,347,360`.
-The single outlier is `SandboxStartupError(RuntimeError)` at `sandbox/__init__.py:172`, which does
-not root in `ActiveGraphError`. `MissingOptionalDependency` is raised from five subsystems:
+`SandboxStartupError(ConfigurationError, RuntimeError)` at `sandbox/__init__.py:174` now roots in
+`ActiveGraphError` while preserving built-in `RuntimeError` catches. It remains a subsystem-only
+export and intentionally uses the legacy one-message constructor until AF-wse's separately
+reviewed next-major structured-rendering migration. `MissingOptionalDependency` is raised from
+five subsystems:
 `observability/otel.py:122`, `observability/prometheus.py:122`, `packs/__init__.py:53`,
 `store/postgres.py:74`, `store/falkordb.py:82,97`.
 
@@ -629,7 +639,10 @@ internal-bug    ::= internal_bug_fields( summary, what_happened, why_invariant,
 
 Contract notes (CONTRACT v1.0 #3, #4):
 
-1. **Every framework error inherits from `ActiveGraphError`** and renders in the locked five-block format — `errors.py:1-19`, `:117-124`. Verified: 34/35 exception classes comply.
+1. **Every framework error inherits from `ActiveGraphError`.** Structured errors render in the
+   locked five-block format — `errors.py:1-25`, `:124-131`. `SandboxStartupError` is the explicit
+   narrow exception to rendering only: its ancestry is compliant, while exact one-line
+   `str`/`.args` stay compatible until AF-wse.
 2. **The seven category bases are stable** — `errors.py:141-212`. External code can `except RegistrationError:` today and have it cover leaves that migrate later — `errors.py:136-138`.
 3. **Dual construction mode** during the v1.0 transition: structured (summary + 3 named fields → locked format) or legacy (single positional message → verbatim). `is_structured()` gates which — `errors.py:83-111`, `:126-129`.
 4. **Every concrete leaf multi-inherits a builtin** so existing `except ValueError:` / `except LookupError:` code keeps working — e.g. `ApprovalNotFoundError(ExecutionError, LookupError)`, `InvalidStoreURL(StorageError, ValueError)`, `MissingOptionalDependency(RegistrationError, ImportError)` (`errors.py:215`).
@@ -780,10 +793,10 @@ sequenceDiagram
    budget freshness is Runtime-owned, pattern observation uses the shared
    matcher seam, and strict replay counts one escaping closed-kind divergence.
 
-2. **`RuntimeState` declares `"running"` but `status()` can never return it.**
-   `observability/status.py:20` includes `"running"` in the Literal, but the derivation at
-   `runtime/runtime.py:2643-2653` only ever produces `"stopped"` (default), `"exhausted"`, or
-   `"idle"`. Either dead state or an unimplemented case.
+2. **Resolved — `running` is a process-local active-drain overlay.** All four public drains use a
+   lock-protected reference count, so same-instance observers see `running`, nested
+   `run_goal -> run_until_idle` cannot clear the outer state, and exceptional unwind restores the
+   exact dormant log-derived state. The count is not persisted; CLI inspection remains dormant.
 
 3. **`activegraph inspect --runs` is referenced but does not exist.** The `promote` not-found
    error tells the operator `"(activegraph inspect {url} --runs lists them)"` (`cli/main.py:915`),
@@ -837,10 +850,11 @@ sequenceDiagram
     (`cli/quickstart.py:433-437`); a developer who renames the behavior silently gets 0. The code
     itself flags this as "a finding worth surfacing in v1.1" (`:429-432`).
 
-11. **`SandboxStartupError(RuntimeError)`** at `sandbox/__init__.py:172` is the only exception class
-    in the package not rooted in `ActiveGraphError` — it violates CONTRACT v1.0 #4's "every framework
-    error inherits from `ActiveGraphError`" (`errors.py:5`). Flagged rather than assumed intentional;
-    the child-process boundary may make it deliberate.
+11. **`SandboxStartupError(ConfigurationError, RuntimeError)` is no longer an ancestry outlier.**
+    The `ConfigurationError`/`ActiveGraphError` route repairs the framework hierarchy, while the
+    built-in base preserves existing startup handlers. The remaining one-line rendering is an
+    explicit deprecated compatibility waiver tracked by AF-wse, not a claim that the leaf already
+    obeys the five-block format; the class stays out of top-level exports.
 
 12. **`DOCS_BASE_URL` is documented as knowingly 404ing.** `errors.py:37-42` states the URL "renders
     the same 404 the rc2 user-test surfaced" until Pages/DNS land, and that the v1.1 #9

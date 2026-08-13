@@ -7,6 +7,8 @@ validation reverts to untyped, state stays, memory is not reclaimed
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 from pydantic import BaseModel
 
@@ -18,7 +20,10 @@ from activegraph.packs import (
     PackNotFoundError,
     behavior as pack_behavior,
     relation_behavior as pack_relation_behavior,
+    llm_behavior as pack_llm_behavior,
+    tool as pack_tool,
 )
+from activegraph.llm import LLMResponse
 
 
 class _NoteSchema(BaseModel):
@@ -130,6 +135,62 @@ def test_reload_reenables():
     assert rt.get_tool("candidate.shout").name == "candidate.shout"
     # And it can be disabled again.
     assert rt.disable_pack("candidate") is True
+
+
+def test_disable_reload_rebuilds_pack_tool_binding_with_fresh_identity():
+    @pack_tool(name="lookup")
+    def lookup(args, ctx):
+        return {"ok": True}
+
+    @pack_llm_behavior(name="worker", on=["goal.created"], tools=[lookup])
+    def worker(event, graph, ctx, out):
+        pass
+
+    pack = Pack(
+        name="bindings",
+        version="1.0",
+        behaviors=(worker,),
+        tools=(lookup,),
+    )
+
+    class Provider:
+        def __init__(self):
+            self.names = []
+
+        def complete(self, **kwargs):
+            self.names.append([t["name"] for t in kwargs.get("tools") or []])
+            return LLMResponse(
+                raw_text="done",
+                parsed=None,
+                input_tokens=1,
+                output_tokens=1,
+                cost_usd=Decimal("0"),
+                latency_seconds=0,
+                model=kwargs["model"],
+                finish_reason="end_turn",
+            )
+
+        def estimate_cost(self, **kwargs):
+            return Decimal("0")
+
+        def count_tokens(self, **kwargs):
+            return 1
+
+    provider = Provider()
+    rt = Runtime(Graph(), llm_provider=provider)
+    rt.load_pack(pack)
+    rt.run_goal("first")
+    first_tool = rt.get_tool("bindings.lookup")
+    assert rt.get_behavior("bindings.worker").tools[0] is first_tool
+
+    assert rt.disable_pack("bindings") is True
+    assert rt.load_pack(pack) is True
+    rt.run_goal("second")
+    second_tool = rt.get_tool("bindings.lookup")
+
+    assert second_tool is not first_tool
+    assert rt.get_behavior("bindings.worker").tools[0] is second_tool
+    assert provider.names == [["bindings.lookup"], ["bindings.lookup"]]
 
 
 def test_disable_resolves_short_name_ambiguity():

@@ -118,6 +118,38 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
   `Decimal("0.0")` representation), and pack timeout/determinism values now
   normalize to the same exact types as global tools. Pack export aliases still
   point to the loader clone without touching the module-global registry.
+- **Type, taxonomy, and evaluation-semantics compatibility repairs.** Six
+  public boundaries now fail or report with their intended types:
+  - Missing graph objects and patches raise structured operation-specific
+    framework leaves. Object/apply misses retain `KeyError` routing and reject
+    misses retain `AttributeError` routing, but `str(error)` changes from the
+    old quoted/raw built-in text to the structured framework format and
+    `args` becomes `(str(error),)`. Catch `ObjectNotFoundError` or the shared
+    `PatchNotFoundError` for stable framework semantics.
+  - `Graph.objects(where=...)`, its `Graph.query(...)` alias, and
+    `View.objects(where=...)` share one object root. Ordinary data keys remain
+    bare-name shorthand. Bare `id`, `type`, `version`, `data`, and
+    `provenance` are canonical metadata; colliding domain values use
+    `data.id`, `data.type`, `data.version`, or nested `data.data.*` paths.
+  - Every store-opening CLI path maps exact `SchemaVersionMismatch` to exit 4
+    with one stderr rendering. `migrate` preflights the source before the
+    destination; a compatible source plus fresh destination eagerly creates
+    current schema metadata but no run/event rows. This is not a cross-version
+    reader; that broader design remains separate.
+  - Mutable `LLMBehavior.tools` declarations resolve once per registry pass to
+    canonical Tool objects, with owner-aware short-name precedence. Loaded
+    pack-local refs now introspect as canonical Tools; compare `.name`, not
+    identity across reloads. Returned unique short calls are canonicalized
+    before cache/events/messages/hashes/replay; missing or ambiguous aliases
+    fail as `UnknownToolError` before successful persistence.
+  - `Runtime.status()` reports process-local `running` while any public drain
+    is active, including nested drains, then resumes exact log-derived
+    `stopped` / `idle` / `exhausted` state. `activegraph inspect` remains a
+    dormant persisted-log view, not a cross-process liveness probe.
+  - `SandboxStartupError` is now both `ConfigurationError` and `RuntimeError`
+    with its own docs slug. Its exact legacy one-line `str`/`args` is retained
+    under a narrow compatibility waiver; structured rendering is deferred to
+    the separately tracked next-major follow-up.
 
 ## [1.10.0] — 2026-07-12
 

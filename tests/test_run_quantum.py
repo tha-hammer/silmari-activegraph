@@ -53,6 +53,7 @@ def test_quantum_yields_without_a_false_idle_and_finishes_once():
     assert first.queue_depth == 1
     assert first.idle is False
     assert first.budget_exhausted is False
+    assert runtime.status().state != "running"
     assert not [event for event in runtime.graph.events if event.type == "runtime.idle"]
 
     quanta = 1
@@ -84,6 +85,7 @@ def test_partial_quantum_remains_restart_recoverable(tmp_path):
     runtime = _chain_runtime(persist_to=path)
     result = runtime.run_quantum(max_queue_events=1, max_seconds=1.0)
     assert result.idle is False
+    assert runtime.status().state == "stopped"
     run_id = runtime.graph.run_id
     runtime.graph.store.close()
 
@@ -92,6 +94,7 @@ def test_partial_quantum_remains_restart_recoverable(tmp_path):
     behaviors = get_registry()
     resumed = Runtime.load(path, run_id=run_id, behaviors=behaviors)
     assert resumed.status().queue_depth > 0
+    assert resumed.status().state == "stopped"
     resumed.run_until_idle()
     assert [obj.data["ordinal"] for obj in resumed.graph.objects(type="unit")] == list(range(6))
 

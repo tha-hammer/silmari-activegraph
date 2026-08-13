@@ -1,8 +1,8 @@
 """ActiveGraphError hierarchy. CONTRACT v1.0 #3, #4 — the error format and
 the class tree are public contract.
 
-Every framework error inherits from `ActiveGraphError` and renders in the
-locked format:
+Every framework error inherits from `ActiveGraphError`. Structured errors
+render in the locked format:
 
     <ErrorClass>: <one-line summary>
 
@@ -23,6 +23,12 @@ their categories one PR at a time (CONTRACT v1.0 #C1 — the rewrite ships
 as a PR series, not one PR). PR-A lands the foundation plus ReplayError
 as the reference category; subsequent PRs migrate the other categories
 without changing the bases.
+
+One narrow compatibility waiver remains: ``SandboxStartupError`` now has
+framework ancestry but still uses the legacy one-message constructor so its
+published ``str`` and ``args`` do not change in an ancestry-only release.
+That rendering is deprecated for conversion in the separately reviewed
+next-major migration tracked by AF-wse.
 
 `_doc_slug` on each class is the URL slug for the error's doc page. The
 base URL is the primary `docs.activegraph.ai` domain (CONTRACT v1.0 #C6,
@@ -84,15 +90,16 @@ class ActiveGraphError(Exception):
 
         - **Structured** (the v1.0 target): pass ``summary`` plus the three
           named fields. ``__str__`` produces the locked format.
-        - **Legacy**: pass a single positional message. Used by error
-          leaves that have not yet migrated under the v1.0 PR series.
-          ``__str__`` returns the message verbatim — format-noncompliant
-          but valid Python, so existing raises keep working.
+        - **Legacy**: pass a single positional message. ``__str__`` returns
+          the message verbatim — format-noncompliant but valid Python, so
+          existing raises keep working. ``SandboxStartupError`` deliberately
+          retains this branch while its ancestry is repaired; AF-wse tracks
+          the separately reviewed next-major structured-rendering migration.
 
         PR-A converts the ReplayError leaves (the reference category).
-        PR-B through PR-F convert the rest one PR at a time. The legacy
-        branch goes away once every leaf is migrated; until then this
-        gateway is the bridge.
+        PR-B through PR-F convert the rest one PR at a time. New errors should
+        use structured construction; the sandbox waiver is compatibility
+        debt, not precedent for new legacy leaves.
         """
         self._summary = summary_or_message
         self.what_failed = what_failed or ""

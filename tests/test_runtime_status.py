@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import tempfile
+import threading
 
 import pytest
 
@@ -117,6 +118,109 @@ class TestStatusState:
                     os.remove(path + suffix)
                 except FileNotFoundError:
                     pass
+
+
+class TestLiveRunningState:
+    @pytest.mark.parametrize(
+        "drain",
+        ["run_goal", "run_until_idle", "run_quantum", "run_until"],
+    )
+    def test_running_overlay_covers_every_public_drain(self, drain):
+        entered = threading.Event()
+        release = threading.Event()
+        errors = []
+
+        @behavior(name="blocking", on=["object.created", "goal.created"])
+        def blocking(event, graph, ctx):
+            entered.set()
+            assert release.wait(2), "test did not release blocking behavior"
+
+        graph = Graph()
+        runtime = Runtime(graph)
+        if drain != "run_goal":
+            graph.add_object("work", {})
+
+        def invoke():
+            try:
+                if drain == "run_goal":
+                    runtime.run_goal("block")
+                elif drain == "run_until_idle":
+                    runtime.run_until_idle()
+                elif drain == "run_quantum":
+                    runtime.run_quantum(
+                        max_queue_events=1, max_seconds=10.0
+                    )
+                else:
+                    runtime.run_until(lambda graph: False)
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                errors.append(exc)
+
+        worker = threading.Thread(target=invoke)
+        worker.start()
+        try:
+            assert entered.wait(2), f"{drain} never entered behavior"
+            assert runtime.status().state == "running"
+            assert status_to_dict(runtime.status())["state"] == "running"
+        finally:
+            release.set()
+            worker.join(2)
+
+        assert not worker.is_alive()
+        assert errors == []
+        assert runtime.status().state == "idle"
+
+    def test_nested_run_goal_stays_running_after_inner_drain_returns(
+        self, monkeypatch
+    ):
+        runtime = Runtime(Graph(), behaviors=[])
+        original = runtime.run_until_idle
+        inner_returned = threading.Event()
+        release_outer = threading.Event()
+        errors = []
+
+        def pause_after_inner():
+            original()
+            inner_returned.set()
+            assert release_outer.wait(2), "test did not release outer drain"
+
+        monkeypatch.setattr(runtime, "run_until_idle", pause_after_inner)
+
+        def invoke():
+            try:
+                runtime.run_goal("nested")
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                errors.append(exc)
+
+        worker = threading.Thread(target=invoke)
+        worker.start()
+        try:
+            assert inner_returned.wait(2), "inner drain did not return"
+            assert runtime.status().state == "running"
+            assert status_to_dict(runtime.status())["state"] == "running"
+        finally:
+            release_outer.set()
+            worker.join(2)
+
+        assert not worker.is_alive()
+        assert errors == []
+        assert runtime.status().state == "idle"
+
+    def test_raising_run_until_predicate_clears_running_overlay(self):
+        class StopFailure(Exception):
+            pass
+
+        runtime = Runtime(Graph(), behaviors=[])
+        runtime.graph.add_object("work", {})
+
+        def fail(_graph):
+            assert runtime.status().state == "running"
+            raise StopFailure("predicate failed")
+
+        with pytest.raises(StopFailure, match="predicate failed"):
+            runtime.run_until(fail)
+
+        assert runtime.status().state == "stopped"
+        assert status_to_dict(runtime.status())["state"] == "stopped"
 
 
 class TestStatusToDict:

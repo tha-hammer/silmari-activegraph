@@ -18,6 +18,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
+from activegraph.tools.base import Tool
+
+
+ToolRef = Tool | str
+
 if TYPE_CHECKING:
     from activegraph.core.event import Event
     from activegraph.core.graph import Graph, Relation
@@ -135,7 +140,7 @@ class LLMBehavior(Behavior):
     timeout_seconds: float = 60.0
     prompt_template: Optional[str] = None
     # v0.7
-    tools: list[Any] = field(default_factory=list)  # Tool | str names
+    tools: list[ToolRef] = field(default_factory=list)
     max_tool_turns: int = 6
 
     def build_prompt(

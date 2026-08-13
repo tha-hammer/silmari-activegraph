@@ -13,7 +13,14 @@ import os
 
 import pytest
 
-from activegraph import Graph, Runtime, behavior, clear_registry
+from activegraph import (
+    ActiveGraphError,
+    ConfigurationError,
+    Graph,
+    Runtime,
+    behavior,
+    clear_registry,
+)
 from activegraph import sandbox
 from activegraph.packs.manifest import compute_bundle_hash, compute_content_hash
 from activegraph.sandbox import (
@@ -650,6 +657,67 @@ def test_preflight_fails_loud_with_the_cause_on_a_restricted_env():
     with pytest.raises(SandboxStartupError) as excinfo:
         sandbox._preflight_with(_bare_env(), python_flags=("-S",), timeout=30.0)
     assert "ModuleNotFoundError" in str(excinfo.value)
+
+
+def _raise_deterministic_startup_failure(monkeypatch):
+    def failed_child(job, *, env, wall_clock, python_flags=()):
+        assert job["preflight"] is True
+        return 17, "", "deterministic child import failure\n", False
+
+    monkeypatch.setattr(sandbox, "_run_child", failed_child)
+    return preflight(timeout=1.0)
+
+
+def test_preflight_startup_error_preserves_legacy_message_and_fields(monkeypatch):
+    message = (
+        "trial child could not start (exit 17): "
+        "deterministic child import failure"
+    )
+    with pytest.raises(SandboxStartupError) as excinfo:
+        _raise_deterministic_startup_failure(monkeypatch)
+
+    err = excinfo.value
+    assert isinstance(err, SandboxStartupError)
+    assert isinstance(err, ConfigurationError)
+    assert isinstance(err, ActiveGraphError)
+    assert isinstance(err, RuntimeError)
+    assert str(err) == message
+    assert err.args == (message,)
+    assert err.what_failed == ""
+    assert err.why == ""
+    assert err.how_to_fix == ""
+    assert err.context == {}
+    assert err.is_structured() is False
+    assert err.doc_url == (
+        "https://docs.activegraph.ai/errors/sandbox-startup-error"
+    )
+
+
+def test_preflight_startup_error_remains_catchable_as_runtime_error(monkeypatch):
+    try:
+        _raise_deterministic_startup_failure(monkeypatch)
+    except RuntimeError as err:
+        assert type(err) is SandboxStartupError
+    else:
+        pytest.fail("SandboxStartupError was not caught as RuntimeError")
+
+
+def test_preflight_startup_error_is_catchable_as_configuration_error(monkeypatch):
+    try:
+        _raise_deterministic_startup_failure(monkeypatch)
+    except ConfigurationError as err:
+        assert type(err) is SandboxStartupError
+    else:
+        pytest.fail("SandboxStartupError was not caught as ConfigurationError")
+
+
+def test_preflight_startup_error_is_catchable_as_activegraph_error(monkeypatch):
+    try:
+        _raise_deterministic_startup_failure(monkeypatch)
+    except ActiveGraphError as err:
+        assert type(err) is SandboxStartupError
+    else:
+        pytest.fail("SandboxStartupError was not caught as ActiveGraphError")
 
 
 def test_explicit_code_channel_rescues_a_restricted_child():

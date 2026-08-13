@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from pydantic import BaseModel, ValidationError
 
-from activegraph.behaviors.base import Behavior, LLMBehavior, RelationBehavior
+from activegraph.behaviors.base import Behavior, LLMBehavior, RelationBehavior, ToolRef
 from activegraph.core.event import Event
 from activegraph.packs import (
     EmptySettings,
@@ -44,6 +44,7 @@ from activegraph.packs import (
     PackSettingsMissingError,
     PackVersionConflictError,
     PendingApproval,
+    _validate_pack_tool_membership,
 )
 from activegraph.tools.base import Tool
 
@@ -59,6 +60,11 @@ def load_pack_into_runtime(
     """Implementation of `Runtime.load_pack`. Returns True if the pack
     was newly loaded, False if it was already loaded (idempotency).
     """
+    # Pack contents are shallowly mutable. Revalidate behavior Tool
+    # membership before even initializing per-runtime pack state so a
+    # post-construction edit cannot create a partial load.
+    _validate_pack_tool_membership(pack)
+
     # ---- 1. idempotency ---------------------------------------------------
     state = _ensure_pack_state(rt)
     existing = state.loaded_packs.get(pack.name)
@@ -225,38 +231,48 @@ def load_pack_into_runtime(
                     f"already registered globally"
                 )
 
-    # ---- 4. mutate. From here on we MUST succeed or the runtime is
-    # in a partial state. The remaining operations are all in-memory
-    # dict insertions plus one event emission.
+    # ---- 4. prepare canonical copies and wrappers -----------------------
+    # Nothing below this header mutates Runtime/Graph state until every
+    # copy and wrapper that can raise has been constructed successfully.
+    canonical_tools: list[Tool] = []
+    tool_copies_by_identity: dict[int, tuple[Tool, Tool]] = {}
+    for source_tool in pack.tools:
+        canonical = f"{pack.name}.{source_tool.name}"
+        renamed = _rename_tool(source_tool, canonical)
+        renamed._pack_owner = pack.name  # type: ignore[attr-defined]
+        canonical_tools.append(renamed)
+        tool_copies_by_identity[id(source_tool)] = (source_tool, renamed)
 
+    canonical_to_pack_behavior: dict[str, Any] = {}
+    for b in pack.behaviors:
+        canonical = f"{pack.name}.{b.name}"
+        wrapped = _wrap_behavior_for_pack(
+            b,
+            pack,
+            settings_obj,
+            tool_copies_by_identity=tool_copies_by_identity,
+        )
+        canonical_to_pack_behavior[canonical] = wrapped
+
+    # ---- 5. mutate. From here on the remaining operations are in-memory
+    # inserts plus validator installation and one event emission.
     state.loaded_packs[pack.name] = pack
     state.pack_settings[pack.name] = settings_obj
     # v1.4: re-loading is how a disabled pack comes back.
     state.disabled_packs.discard(pack.name)
 
-    # behaviors: wrap with typed-settings injection, rename to canonical
-    canonical_to_pack_behavior: dict[str, Any] = {}
     for b in pack.behaviors:
         canonical = f"{pack.name}.{b.name}"
-        wrapped = _wrap_behavior_for_pack(b, pack, settings_obj)
-        # The wrapped object is a fresh Behavior/LLMBehavior/RelationBehavior
-        # with `name = canonical`.
-        canonical_to_pack_behavior[canonical] = wrapped
         state.behavior_owners[canonical] = pack.name
         _add_short_name(state.behavior_short_to_canonical, b.name, canonical)
 
-    # tools: rename to canonical, hold for merge into tool_registry
-    # by `_ensure_registry` (which rebuilds the registry from scratch
-    # on each call).
-    for t in pack.tools:
-        canonical = f"{pack.name}.{t.name}"
-        renamed = _rename_tool(t, canonical)
-        # v1.4: ownership stamp, symmetric with behaviors — this is
-        # what disable_pack filters on.
-        renamed._pack_owner = pack.name  # type: ignore[attr-defined]
-        rt._pack_tools.append(renamed)
+    rt._pack_tools.extend(canonical_tools)
+    for source_tool in pack.tools:
+        canonical = f"{pack.name}.{source_tool.name}"
         state.tool_owners[canonical] = pack.name
-        _add_short_name(state.tool_short_to_canonical, t.name, canonical)
+        _add_short_name(
+            state.tool_short_to_canonical, source_tool.name, canonical
+        )
 
     # object types: attach schemas to graph for validation
     for ot in pack.object_types:
@@ -287,7 +303,7 @@ def load_pack_into_runtime(
     if rt.graph is not None:
         _install_graph_validators(rt.graph, state)
 
-    # ---- 5. emit pack.loaded event ---------------------------------------
+    # ---- 6. emit pack.loaded event ---------------------------------------
     payload = _build_pack_loaded_payload(pack, settings_obj)
     rt.graph.emit(
         Event(
@@ -301,7 +317,7 @@ def load_pack_into_runtime(
         )
     )
 
-    # ---- 6. manifest warning tier (CONTRACT v1.6 #1) ----------------------
+    # ---- 7. manifest warning tier (CONTRACT v1.6 #1) ----------------------
     _warn_on_manifest_violations(pack)
     return True
 
@@ -593,7 +609,13 @@ def _field_model_schema(field: Any) -> type[BaseModel] | None:
 # ---------------------------------------------------------------- wrap behavior
 
 
-def _wrap_behavior_for_pack(b: Any, pack: Pack, settings_obj: BaseModel):
+def _wrap_behavior_for_pack(
+    b: Any,
+    pack: Pack,
+    settings_obj: BaseModel,
+    *,
+    tool_copies_by_identity: dict[int, tuple[Tool, Tool]],
+):
     """Return a fresh Behavior/LLMBehavior/RelationBehavior whose `name`
     is canonical and whose `fn`/`handler` has typed-settings injection
     applied.
@@ -626,7 +648,9 @@ def _wrap_behavior_for_pack(b: Any, pack: Pack, settings_obj: BaseModel):
             top_p=b.top_p,
             timeout_seconds=b.timeout_seconds,
             prompt_template=_resolve_prompt_template(b, pack),
-            tools=_resolve_pack_tool_refs(b.tools, pack),
+            tools=_resolve_pack_tool_refs(
+                b.tools, pack, tool_copies_by_identity
+            ),
             max_tool_turns=b.max_tool_turns,
         )
         new_b._pack_local = True  # type: ignore[attr-defined]
@@ -705,22 +729,32 @@ def _resolve_description(b: LLMBehavior, pack: Pack) -> str:
     return "\n\n".join(parts)
 
 
-def _resolve_pack_tool_refs(tool_refs: list, pack: Pack) -> list:
-    """Rename pack-local tool references on this behavior to their
-    canonical form. Strings stay as-is — name resolution happens in
-    Runtime._ensure_registry via the short-name table.
+def _resolve_pack_tool_refs(
+    tool_refs: list[ToolRef],
+    pack: Pack,
+    tool_copies_by_identity: dict[int, tuple[Tool, Tool]],
+) -> list[ToolRef]:
+    """Replace own-pack object refs with their one canonical Tool copy.
+
+    Strings remain mutable authoring references for Runtime's owner-aware
+    per-registry-pass resolver; global Tool objects remain object refs.
     """
-    out = []
-    for t in tool_refs:
-        if isinstance(t, Tool) and getattr(t, "_pack_local", False):
-            # Try to find the matching pack tool and use its canonical
-            # name. We can't actually rename the Tool object here (the
-            # canonical version will live in rt.tool_registry); the
-            # behavior should reference by name, so substitute.
-            short = t.name
-            out.append(f"{pack.name}.{short}")
+    out: list[ToolRef] = []
+    for ref in tool_refs:
+        if isinstance(ref, Tool) and getattr(ref, "_pack_local", False):
+            pair = tool_copies_by_identity.get(id(ref))
+            if pair is None or pair[0] is not ref:
+                # Defensive: both Pack construction and load preflight
+                # should already have emitted this exact category.
+                from activegraph.packs import PackValidationError
+
+                raise PackValidationError(
+                    f"Pack {pack.name!r}: pack-local tool {ref.name!r} is "
+                    f"not the same object as a tool declared by the same Pack"
+                )
+            out.append(pair[1])
         else:
-            out.append(t)
+            out.append(ref)
     return out
 
 

@@ -152,6 +152,13 @@ activegraph migrate --from sqlite:///path/to/dev.db \
 
 Migration semantics:
 
+- The CLI preflights the source schema first, then the destination.
+  Either mismatch prints `SchemaVersionMismatch` once and exits 4
+  before a migration report or run write. A source mismatch does not
+  touch a fresh destination.
+- With a compatible source, preflighting a fresh destination eagerly
+  creates only its current schema and metadata. This validates
+  compatibility; it is not a cross-version schema reader.
 - Each run in the source migrates in **a single transaction** against
   the destination. If a run fails partway, that run's destination
   state is unchanged (Postgres rolls back).
@@ -499,8 +506,12 @@ The cardinality rule above is your guide.
 ## Runtime introspection
 
 `runtime.status(recent: int = 20)` returns a `RuntimeStatus` — a
-frozen dataclass. Calling it is cheap: no graph traversal, no event
-log scan. It is safe to call from any thread.
+frozen dataclass. Calling it is cheap: no graph traversal, and outside
+an active drain it scans backward only to the latest terminal runtime
+event. A same-process observer of the same Runtime instance sees
+`running` while any public drain is active. The small internal lock
+protects this liveness count only; it does not make concurrent Runtime
+mutation safe.
 
 ```python
 status = rt.status()
@@ -679,24 +690,35 @@ the whole run; the skipped event ids appear in the per-run report's
 `skipped_events`. The resulting destination run is partial — the
 operator is on notice.
 
+The command's source-first schema preflight is intentionally fail-closed.
+For a schema-incompatible source, use a build that can read that source
+and any required staged migration path; this command does not bypass the
+store's version guard.
+
 ---
 
 ## Runbook
 
 ### A run is stuck
 
-Call `runtime.status()` (or `activegraph inspect`). Check `state`:
+Call `runtime.status()` on the live Runtime instance. Check `state`:
 
 - `idle` — the queue is empty, the budget is fine, the run is waiting
   for new input. This is the normal terminal state for a goal-driven
   run. Not stuck.
 - `exhausted` — the run hit a budget limit. The `budget` field shows
   which dimension. Raise the limit or accept the partial result.
-- `running` — the run is actually working. `queue_depth` should be
+- `running` — this same process and Runtime instance currently has a
+  public drain active. `queue_depth` should be
   decreasing. If it's increasing or steady, a behavior is producing
   events faster than the runtime processes them. Check the trace.
 - `stopped` — the runtime is loaded but no `run_until_idle()` call is
   in progress. Call it.
+
+`activegraph inspect` loads a separate Runtime from the persisted log.
+It reports dormant `stopped` / `idle` / `exhausted` state and cannot
+observe another process's non-persisted `running` overlay. Use process
+supervision and metrics for cross-process liveness.
 
 ### A run is over budget
 

@@ -56,11 +56,15 @@ from activegraph.runtime.config_errors import (
 )
 from activegraph.runtime.errors import ReplayDivergenceError
 from activegraph.runtime.exec_errors import (
+    ApplyPatchNotFoundError,
     ApprovalNotFoundError,
     InternalEvaluatorError,
     InvalidPatchLifecycleState,
+    ObjectNotFoundError,
+    PatchNotFoundError,
     PromoteConflictError,
     PromoteLineageError,
+    RejectPatchNotFoundError,
     ReservedFieldError,
     RuntimeContextRequiredError,
 )
@@ -150,6 +154,7 @@ __all__ = [
     "ActiveGraphError",
     "AmbiguousBehaviorError",
     "AmbiguousToolError",
+    "ApplyPatchNotFoundError",
     "ApprovalNotFoundError",
     "AuthorityDecision",
     "Behavior",
@@ -201,6 +206,7 @@ __all__ = [
     "NoOpMetrics",
     "NonSerializableEventError",
     "Object",
+    "ObjectNotFoundError",
     "OpenTelemetryMetrics",
     "ObjectType",
     "OverflowPolicy",
@@ -217,6 +223,7 @@ __all__ = [
     "PackVersionConflictError",
     "PatternError",
     "Patch",
+    "PatchNotFoundError",
     "PendingApproval",
     "Policy",
     "PrometheusMetrics",
@@ -233,6 +240,7 @@ __all__ = [
     "RelationType",
     "ReplayDivergenceError",
     "ReplayError",
+    "RejectPatchNotFoundError",
     "ReservedFieldError",
     "RunRecord",
     "Runtime",

@@ -69,6 +69,13 @@ Reusable adapter tests live at
 
 ::: activegraph.sandbox.SandboxStartupError
 
+`SandboxStartupError` is a `ConfigurationError`, an `ActiveGraphError`, and a
+built-in `RuntimeError`. The `RuntimeError` ancestry preserves existing startup
+handlers. Its one-line `str` and `.args` are also intentionally unchanged in
+this ancestry-only cycle; structured rendering is deprecated for conversion in
+the separately tracked next-major work AF-wse. Import the leaf from
+`activegraph.sandbox`, not from the package root.
+
 ## Inputs
 
 ::: activegraph.sandbox.PackSource

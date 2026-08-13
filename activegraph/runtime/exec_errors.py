@@ -21,6 +21,12 @@ ExecutionError on closer reading):
 - :class:`InvalidPatchLifecycleState` — ``graph.apply_patch`` was
   called on a patch that isn't in ``"proposed"`` state. Fires during
   the patch lifecycle, mid-execution.
+- :class:`ObjectNotFoundError` — ``graph.patch_object`` could not find
+  its target object.
+- :class:`PatchNotFoundError` and its operation-specific leaves —
+  ``graph.apply_patch`` or ``graph.reject_patch`` could not find the
+  requested patch. The leaves retain each operation's historical
+  builtin catch without making both operations inherit both builtins.
 
 PR-G adds:
 
@@ -142,6 +148,106 @@ class RuntimeContextRequiredError(ExecutionError, RuntimeError):
                 "policy gate as well so propose_object isn't reached."
             ),
             context={"method": method},
+        )
+
+
+class ObjectNotFoundError(ExecutionError, KeyError):
+    """``graph.patch_object`` target lookup miss.
+
+    Multi-inherits :class:`KeyError` so existing handlers around object
+    mutation keep selecting their historical branch while callers gain
+    the stable :class:`ExecutionError` taxonomy and semantic id field.
+    """
+
+    _doc_slug = "object-not-found-error"
+
+    def __init__(self, *, object_id: str) -> None:
+        self.object_id = object_id
+        ExecutionError.__init__(
+            self,
+            f"unknown object: {object_id}",
+            what_failed=(
+                f"graph.patch_object({object_id!r}, ...) could not find an "
+                f"object with id {object_id!r}. No patch or event was created."
+            ),
+            why=(
+                "patch_object updates an existing projected object and must "
+                "read its current version before it can create the patch. "
+                "The supplied id is absent from this graph, so there is no "
+                "target or version against which the update can be applied."
+            ),
+            how_to_fix=(
+                f"Check the id before patching:\n"
+                f"    obj = graph.get_object({object_id!r})\n"
+                f"    if obj is not None:\n"
+                f"        graph.patch_object(obj.id, updates)\n"
+                f"\n"
+                f"If the object belongs to a different run, load that run "
+                f"or create the object in this graph before patching it."
+            ),
+            context={"object_id": object_id},
+        )
+
+
+class PatchNotFoundError(ExecutionError):
+    """Stable category for public patch lookup misses.
+
+    Catch this class when apply and reject misses share one recovery
+    path. The raised operation-specific leaves separately retain the
+    historical ``KeyError`` (apply) and ``AttributeError`` (reject)
+    routes without broadening either operation to the other builtin.
+    """
+
+    _doc_slug = "patch-not-found-error"
+
+    def __init__(self, *, patch_id: str, operation: str) -> None:
+        self.patch_id = patch_id
+        self.operation = operation
+        ExecutionError.__init__(
+            self,
+            f"unknown patch: {patch_id}",
+            what_failed=(
+                f"graph.{operation}({patch_id!r}, ...) could not find a "
+                f"patch with id {patch_id!r}. No lifecycle event was emitted."
+            ),
+            why=(
+                "Applying or rejecting a patch is a transition of an existing "
+                "proposal. The supplied id is absent from this graph, so the "
+                "runtime cannot determine a target, validate the current "
+                "lifecycle state, or record the requested transition."
+            ),
+            how_to_fix=(
+                f"Check the id and lifecycle state before the transition:\n"
+                f"    patch = graph.get_patch({patch_id!r})\n"
+                f"    if patch is not None and patch.status == 'proposed':\n"
+                f"        graph.{operation}(patch.id, ...)\n"
+                f"\n"
+                f"Use the patch id returned by graph.propose_patch() from "
+                f"this graph and run."
+            ),
+            context={"patch_id": patch_id, "operation": operation},
+        )
+
+
+class ApplyPatchNotFoundError(PatchNotFoundError, KeyError):
+    """``graph.apply_patch`` lookup miss, retaining ``KeyError``."""
+
+    _doc_slug = "apply-patch-not-found-error"
+
+    def __init__(self, *, patch_id: str) -> None:
+        PatchNotFoundError.__init__(
+            self, patch_id=patch_id, operation="apply_patch"
+        )
+
+
+class RejectPatchNotFoundError(PatchNotFoundError, AttributeError):
+    """``graph.reject_patch`` lookup miss, retaining ``AttributeError``."""
+
+    _doc_slug = "reject-patch-not-found-error"
+
+    def __init__(self, *, patch_id: str) -> None:
+        PatchNotFoundError.__init__(
+            self, patch_id=patch_id, operation="reject_patch"
         )
 
 

@@ -22,6 +22,7 @@ from activegraph import (
     ActiveGraphError,
     AmbiguousBehaviorError,
     AmbiguousToolError,
+    ApplyPatchNotFoundError,
     ApprovalNotFoundError,
     BehaviorNotFoundError,
     ConfigurationError,
@@ -42,15 +43,18 @@ from activegraph import (
     MissingProviderError,
     MissingToolError,
     NonSerializableEventError,
+    ObjectNotFoundError,
     PackConflictError,
     PackError,
     PackNotFoundError,
     PackSchemaViolation,
     PackVersionConflictError,
     PatternError,
+    PatchNotFoundError,
     RegistrationError,
     ReplayDivergenceError,
     ReplayError,
+    RejectPatchNotFoundError,
     RuntimeContextRequiredError,
     SchemaVersionMismatch,
     StorageError,
@@ -61,6 +65,7 @@ from activegraph import (
 )
 from activegraph.errors import GITHUB_NEW_ISSUE_URL, internal_bug_fields
 from activegraph.llm.errors import PromptIdentityError
+from activegraph.sandbox import SandboxStartupError
 
 
 SNAPSHOTS_DIR = Path(__file__).parent / "snapshots" / "errors"
@@ -192,6 +197,33 @@ def test_active_graph_error_is_the_root() -> None:
         PackError,
     ):
         assert issubclass(cls, ActiveGraphError), cls
+
+
+def test_sandbox_startup_error_has_narrow_legacy_format_waiver() -> None:
+    message = "trial child could not start (exit 17): deterministic failure"
+    err = SandboxStartupError(message)
+
+    assert issubclass(SandboxStartupError, ConfigurationError)
+    assert issubclass(SandboxStartupError, ActiveGraphError)
+    assert issubclass(SandboxStartupError, RuntimeError)
+    assert type(err) is SandboxStartupError
+    assert str(err) == message
+    assert err.args == (message,)
+    assert err.what_failed == ""
+    assert err.why == ""
+    assert err.how_to_fix == ""
+    assert err.context == {}
+    assert err.is_structured() is False
+    assert err.doc_url == (
+        "https://docs.activegraph.ai/errors/sandbox-startup-error"
+    )
+
+
+def test_sandbox_startup_error_stays_out_of_top_level_exports() -> None:
+    import activegraph
+
+    assert "SandboxStartupError" not in activegraph.__all__
+    assert not hasattr(activegraph, "SandboxStartupError")
 
 
 def test_doc_slug_is_unique_per_category() -> None:
@@ -477,6 +509,9 @@ def test_storage_leaves_preserve_legacy_base_classes() -> None:
     assert issubclass(EventNotFoundError, KeyError)
     # DuplicateEventError multi-inherits ValueError for the same reason.
     assert issubclass(DuplicateEventError, ValueError)
+    # SchemaVersionMismatch is a framework storage leaf, not the stale
+    # RuntimeError shape that older CLI helpers used to string-match.
+    assert not issubclass(SchemaVersionMismatch, RuntimeError)
 
 
 def test_invalid_store_url_bare_path_snapshot() -> None:
@@ -1085,6 +1120,63 @@ def test_pr_f_cross_category_leaves_are_execution() -> None:
     assert issubclass(InvalidPatchLifecycleState, ExecutionError)
     assert not issubclass(RuntimeContextRequiredError, ConfigurationError)
     assert not issubclass(InvalidPatchLifecycleState, ConfigurationError)
+
+
+def test_graph_lookup_leaves_preserve_exact_hierarchy_and_builtin_routing() -> None:
+    assert issubclass(ObjectNotFoundError, ExecutionError)
+    assert issubclass(ObjectNotFoundError, ActiveGraphError)
+    assert issubclass(ObjectNotFoundError, KeyError)
+    assert not issubclass(ObjectNotFoundError, AttributeError)
+
+    assert issubclass(PatchNotFoundError, ExecutionError)
+    assert issubclass(PatchNotFoundError, ActiveGraphError)
+    assert not issubclass(PatchNotFoundError, KeyError)
+    assert not issubclass(PatchNotFoundError, AttributeError)
+
+    assert issubclass(ApplyPatchNotFoundError, PatchNotFoundError)
+    assert issubclass(ApplyPatchNotFoundError, KeyError)
+    assert not issubclass(ApplyPatchNotFoundError, AttributeError)
+
+    assert issubclass(RejectPatchNotFoundError, PatchNotFoundError)
+    assert issubclass(RejectPatchNotFoundError, AttributeError)
+    assert not issubclass(RejectPatchNotFoundError, KeyError)
+
+
+@pytest.mark.parametrize(
+    ("err", "field", "value", "slug", "snapshot"),
+    [
+        (
+            ObjectNotFoundError(object_id="task#404"),
+            "object_id",
+            "task#404",
+            "object-not-found-error",
+            "object_not_found",
+        ),
+        (
+            ApplyPatchNotFoundError(patch_id="patch_404"),
+            "patch_id",
+            "patch_404",
+            "apply-patch-not-found-error",
+            "apply_patch_not_found",
+        ),
+        (
+            RejectPatchNotFoundError(patch_id="patch_404"),
+            "patch_id",
+            "patch_404",
+            "reject-patch-not-found-error",
+            "reject_patch_not_found",
+        ),
+    ],
+)
+def test_graph_lookup_leaf_format_and_semantic_fields(
+    err, field, value, slug, snapshot
+) -> None:
+    _assert_format_compliant(err)
+    assert getattr(err, field) == value
+    assert err.context[field] == value
+    assert err.doc_url.endswith(f"/errors/{slug}")
+    assert err.args == (str(err),)
+    _check_snapshot(snapshot, err)
 
 
 # --- Reverse-audit-order snapshots (hardest first) ---

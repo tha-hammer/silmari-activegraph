@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 
 import pytest
 
 from activegraph import Graph, Runtime, behavior, clear_registry
 from activegraph.observability.migration import migrate
+from activegraph.store.errors import SchemaVersionMismatch
 
 
 def _register_simple():
@@ -104,6 +106,39 @@ class TestSQLiteToSQLiteMigration:
         )
         assert len(progress) == 2
         assert progress == [r.run_id for r in report.runs]
+
+    def test_source_schema_mismatch_still_raises_before_reporting(self):
+        _make_run(self.src)
+        with sqlite3.connect(self.src) as conn:
+            conn.execute(
+                "UPDATE meta SET value = 'future' WHERE key = 'schema_version'"
+            )
+
+        with pytest.raises(SchemaVersionMismatch):
+            migrate(f"sqlite:///{self.src}", f"sqlite:///{self.dst}")
+
+        assert not os.path.exists(self.dst)
+
+    def test_destination_schema_mismatch_remains_failed_write_report(self):
+        run_id = _make_run(self.src)
+        from activegraph.store.sqlite import SQLiteEventStore
+
+        assert SQLiteEventStore.list_runs(self.dst) == []
+        with sqlite3.connect(self.dst) as conn:
+            conn.execute(
+                "UPDATE meta SET value = 'future' WHERE key = 'schema_version'"
+            )
+
+        report = migrate(f"sqlite:///{self.src}", f"sqlite:///{self.dst}")
+
+        assert not report.ok
+        assert len(report.runs) == 1
+        assert report.runs[0].run_id == run_id
+        assert report.runs[0].status == "failed"
+        assert report.runs[0].events_migrated == 0
+        assert "write failure: SchemaVersionMismatch:" in (
+            report.runs[0].error or ""
+        )
 
 
 class TestMigrationFailureLeavesDestUnchanged:

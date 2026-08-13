@@ -18,8 +18,9 @@ One of three actions:
 #    message names the recorded schema_version; check CHANGELOG.md
 #    for which version shipped it.
 
-# 2. Migrate runs from the old store to a fresh store written by
-#    this build. The destination has the current schema.
+# 2. With an activegraph build that can read old.db, migrate its runs
+#    to a fresh store that build can write. Use any required staged or
+#    version-specific migration steps before opening it with this build.
 activegraph migrate --from sqlite:///old.db --to sqlite:///new.db
 
 # 3. If the store is empty or expendable, delete and start fresh.
@@ -52,16 +53,27 @@ except SchemaVersionMismatch as e:
     print(e.context["driver"])            # "sqlite" | "postgres"
 ```
 
-The store file itself is readable with the schema_version's source
-build — no data is lost. Migration moves runs across schema versions
-without modifying the source.
+The store file itself is readable with the schema version's source
+build — no data is lost. The current CLI's migration preflight does
+not bypass schema checks and does not make this build a cross-version
+reader. Use a build compatible with the source plus any required
+staged migration path; cross-version migration design is tracked
+separately.
 
 ## When does this fire
 
-Whenever a store opens via `Runtime.load`, `activegraph inspect`,
-`activegraph migrate` (source side), or any other operation that
-calls `_ensure_schema`. The check runs once per store-open, against
-the meta table's recorded `schema_version`.
+Whenever a store opens via `Runtime.load`, a store-backed CLI command
+(`inspect`, `replay`, `fork`, `diff`, `promote`, or `export-trace`),
+or any other operation that calls `_ensure_schema`. The CLI prints the
+typed error once and exits 4; direct Python callers receive
+`SchemaVersionMismatch`.
+
+`activegraph migrate` checks the source first and the destination
+second. An incompatible source exits 4 without touching a fresh
+destination. A compatible source followed by a fresh destination
+eagerly initializes only the destination's current schema and metadata.
+An incompatible destination exits 4 before migration starts. These
+preflights validate compatibility; they do not translate schemas.
 
 A fresh store auto-populates `schema_version` from the current build,
 so this error never fires on a store this build created. It fires
@@ -76,9 +88,10 @@ either produce wrong-shape Python objects or drop fields the writer
 considered important. Either way, the audit trail would be corrupted
 in a way the operator wouldn't notice until later.
 
-The framework refuses the open and asks the operator to choose:
-upgrade, migrate, or discard. All three are explicit, all three
-preserve the audit trail.
+The framework refuses the open and asks the operator to choose a
+compatible build, a supported staged migration, or discard an
+expendable store. Each action is explicit rather than risking the
+audit trail.
 
 See [`failure-model`](../../concepts/failure-model.md) for the
 broader principle.
@@ -88,9 +101,7 @@ broader principle.
 - [`CorruptedEventPayloadError`](corrupted-event-payload-error.md) —
   fires when a row's payload bytes don't parse, distinct from
   schema mismatch.
-- `activegraph migrate` in the [CLI reference](../cli/) — the
-  canonical recovery path when you can't or don't want to switch
-  activegraph versions.
+- `activegraph migrate` in the [CLI reference](../cli/) — copies runs
+  only when the installed build can read both endpoint schemas.
 - [Migration from v0.7](../../cookbook/migration-from-v0-7.md) — the
-  cross-version migration runbook when schema_version differs
-  across milestones.
+  upgrade runbook, including the compatibility boundary.

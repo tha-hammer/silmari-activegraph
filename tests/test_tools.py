@@ -42,6 +42,8 @@ from activegraph.tools.recorded import (
     RecordingToolProvider,
 )
 
+from tests._object_query_helpers import collision_graph
+
 
 # ---------- @tool registration ---------------------------------------------
 
@@ -280,3 +282,33 @@ def test_graph_query_factory_does_not_register_globally():
     before = len(get_tool_registry())
     _ = make_graph_query_tool(g)
     assert len(get_tool_registry()) == before
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        {"confidence": 0.9},
+        {"id": "claim#1"},
+        {"data.id": "domain-id"},
+        {"data.data.nested": True},
+    ],
+)
+def test_graph_query_tool_uses_canonical_object_where_root(where):
+    graph, colliding_id, _ = collision_graph()
+    graph_query = make_graph_query_tool(graph)
+    ctx = ToolContext(
+        behavior_name="b",
+        event_id="e",
+        frame=None,
+        idempotency_key="k",
+        timeout_seconds=1.0,
+    )
+
+    response = DirectToolInvoker().invoke(
+        graph_query,
+        GraphQueryInput(object_type="claim", where=where),
+        ctx,
+    )
+
+    assert response.error is None
+    assert [ref["id"] for ref in response.output["refs"]] == [colliding_id]

@@ -1,0 +1,18 @@
+ObjectNotFoundError: unknown object: task#404
+
+What failed:
+  graph.patch_object('task#404', ...) could not find an object with id 'task#404'. No patch or event was created.
+
+Why:
+  patch_object updates an existing projected object and must read its current version before it can create the patch. The supplied id is absent from this graph, so there is no target or version against which the update can be applied.
+
+How to fix:
+  Check the id before patching:
+      obj = graph.get_object('task#404')
+      if obj is not None:
+          graph.patch_object(obj.id, updates)
+
+  If the object belongs to a different run, load that run or create the object in this graph before patching it.
+
+More:
+  https://docs.activegraph.ai/errors/object-not-found-error
