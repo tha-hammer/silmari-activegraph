@@ -5,45 +5,45 @@
 `sandbox/` runs candidate pack code under trial in a **fresh interpreter subprocess**, against a
 **fork** of a saved run, from artifacts **pinned by bundle hash** — so the parent process is
 outside the blast radius of a runaway candidate, and the bytes trialed are the bytes a proposal
-recorded (`activegraph/sandbox/__init__.py:1-8`). The division of authority is fixed: the parent
+recorded (`activegraph/sandbox/__init__.py:1-23`). The division of authority is fixed: the parent
 creates the fork with full `fork()` semantics and hands the child only the fork's **run id**; the
-child appends to that run and nothing else (`activegraph/sandbox/__init__.py:11-14`,
-`CONTRACT.md:7456-7459`).
+child appends to that run and nothing else (`activegraph/sandbox/__init__.py:407-458`,
+`CONTRACT.md:7478-7481`).
 
 This is explicitly **crash/state isolation, not a security sandbox** — there is no syscall,
 network, or filesystem confinement, and the shared-SQLite caveat (a hostile child could open the
 store file directly and touch other runs) is *stated rather than solved*
-(`activegraph/sandbox/__init__.py:46-56`, `CONTRACT.md:7485-7490`). Those limits are encoded as
+(`activegraph/sandbox/__init__.py:47-61`, `CONTRACT.md:7507-7512`). Those limits are encoded as
 machine-readable contract data, not prose (`activegraph/sandbox/executor.py:25-36`).
 
 CONTRACT v1.8 #9–#12 lifted the implementation behind a serialized, provider-neutral
 `TrialExecutor` protocol. `run_forked_trial` is now a compatibility wrapper over the default local
-adapter, not a second execution path (`activegraph/sandbox/__init__.py:58-61`,
-`CONTRACT.md:8057-8064`).
+adapter, not a second execution path (`activegraph/sandbox/__init__.py:546-576`,
+`CONTRACT.md:8088-8108`).
 
 ## Component map
 
 ```mermaid
 graph TD
     subgraph parent["PARENT PROCESS — activegraph/sandbox/"]
-        RFT["run_forked_trial()<br/>compat wrapper<br/>__init__.py:533"]
-        LOCAL["_run_forked_trial_local()<br/>the real implementation<br/>__init__.py:378"]
-        PRE["preflight()<br/>__init__.py:349"]
-        ENV["_child_env() + _child_code_paths()<br/>closed allow-list, computed PYTHONPATH<br/>__init__.py:183,207"]
-        SPAWN["_run_child()<br/>the ONLY process spawn<br/>__init__.py:261"]
-        PARSE["_parse_report_tail() / _stderr_tail()<br/>__init__.py:235,247"]
-        EXEC["TrialExecutor Protocol<br/>executor.py:218"]
-        LSTE["LocalSubprocessTrialExecutor<br/>executor.py:234"]
-        REC["RecordingTrialExecutor<br/>deterministic double<br/>executor.py:266"]
-        SPEC["TrialSpecification / TrialResult<br/>canonical JSON wire types<br/>executor.py:39,151"]
+        RFT["run_forked_trial()<br/>compat wrapper<br/>__init__.py:546"]
+        LOCAL["_run_forked_trial_local()<br/>the real implementation<br/>__init__.py:391"]
+        PRE["preflight()<br/>__init__.py:362"]
+        ENV["_child_env() + _child_code_paths()<br/>closed allow-list, computed PYTHONPATH<br/>__init__.py:196,220"]
+        SPAWN["_run_child()<br/>the ONLY process spawn<br/>__init__.py:274"]
+        PARSE["_parse_report_tail() / _stderr_tail()<br/>__init__.py:248,260"]
+        EXEC["TrialExecutor Protocol<br/>executor.py:224"]
+        LSTE["LocalSubprocessTrialExecutor<br/>executor.py:240"]
+        REC["RecordingTrialExecutor<br/>deterministic double<br/>executor.py:272"]
+        SPEC["TrialSpecification / TrialResult<br/>canonical JSON wire types<br/>executor.py:39,157"]
         CONF["TrialExecutorConformance<br/>adapter test suite<br/>conformance.py:17"]
     end
 
     subgraph child["CHILD PROCESS — python -m activegraph.sandbox._child"]
-        MAIN["main()<br/>_child.py:194"]
+        MAIN["main()<br/>_child.py:195"]
         RL["_apply_rlimits()<br/>RLIMIT_AS / RLIMIT_CPU<br/>_child.py:57"]
         MAT["_materialize_pack()<br/>pin -> manifest -> import -> surface<br/>_child.py:120"]
-        SCEN["_resolve_scenario()<br/>_child.py:171"]
+        SCEN["_resolve_scenario()<br/>_child.py:172"]
         REP["_report()<br/>one JSON line, then SystemExit<br/>_child.py:28"]
     end
 
@@ -67,50 +67,50 @@ graph TD
 
 ## Key types & entry points
 
-### Parent side — `activegraph/sandbox/__init__.py` (598 lines)
+### Parent side — `activegraph/sandbox/__init__.py` (611 lines)
 
-- `TRIAL_OUTCOMES` — the closed outcome set: `completed | scenario_failed | limits_exceeded | materialization_failed | crashed` — `activegraph/sandbox/__init__.py:82-88`
-- `_EXIT_TO_OUTCOME` — child exit-code → outcome map (`0/30/40/50`) — `activegraph/sandbox/__init__.py:91-96`
-- `PackSource(root_dir, expected_bundle_hash, manifest_required=True)` — the hash is required and must be exact lowercase `sha256:` plus 64 hex characters (`activegraph/sandbox/__init__.py`)
-- `TrialLimits(wall_clock_seconds=120.0, max_rss_bytes=None, max_events=2000, max_llm_calls=0, env_passthrough=())` — `activegraph/sandbox/__init__.py:118-142`
-- `TrialReport(outcome, fork_run_id, events_appended, behavior_failures, detail, exit_code, warnings=())` — `activegraph/sandbox/__init__.py:145-169`
-- `SandboxStartupError(ConfigurationError, RuntimeError)` — preflight-only setup leaf, exported from `activegraph.sandbox` but not the package root — `activegraph/sandbox/__init__.py:174-184`
-- `_child_code_paths() -> list[str]` — resolves the explicit code channel from the parent's `sys.path` — `activegraph/sandbox/__init__.py:187-208`
-- `_child_env(limits) -> dict[str,str]` — closed allow-list plus computed `PYTHONPATH` — `activegraph/sandbox/__init__.py:211-236`
-- `_stderr_tail(stderr, max_lines=20, max_chars=1500)` — `activegraph/sandbox/__init__.py:239-248`
-- `_parse_report_tail(stdout) -> dict` — last valid JSON line carrying `outcome` or `preflight` — `activegraph/sandbox/__init__.py:247-258`
-- `_run_child(job, *, env, wall_clock, python_flags=())` — the **only** process spawn in the subsystem — `activegraph/sandbox/__init__.py:261-292`
-- `_PREFLIGHT_PROBE_RSS = 1024 * 2**20` — `activegraph/sandbox/__init__.py:302`
-- `_limits_job_block(limits, *, probe)` — derives `cpu_seconds` for the child — `activegraph/sandbox/__init__.py:305-317`
-- `_preflight_with(env, *, limits, python_flags, timeout=30.0)` — testable seam — `activegraph/sandbox/__init__.py:320-346`
-- `preflight(*, limits=TrialLimits(), timeout=30.0) -> tuple[str, ...]` — `activegraph/sandbox/__init__.py:349-375`
-- `_run_forked_trial_local(...) -> TrialReport` — the real implementation — `activegraph/sandbox/__init__.py:378-530`
-- `run_forked_trial(...) -> TrialReport` — compatibility wrapper over the local adapter — `activegraph/sandbox/__init__.py:533-563`
+- `TRIAL_OUTCOMES` — the closed outcome set: `completed | scenario_failed | limits_exceeded | materialization_failed | crashed` — `activegraph/sandbox/__init__.py:81-91`
+- `_EXIT_TO_OUTCOME` — child exit-code → outcome map (`0/30/40/50`) — `activegraph/sandbox/__init__.py:93-99`
+- `PackSource(root_dir, expected_bundle_hash, manifest_required=True)` — the hash is required and must be exact lowercase `sha256:` plus 64 hex characters — `activegraph/sandbox/__init__.py:102-126`
+- `TrialLimits(wall_clock_seconds=120.0, max_rss_bytes=None, max_events=2000, max_llm_calls=0, env_passthrough=())` — `activegraph/sandbox/__init__.py:129-153`
+- `TrialReport(outcome, fork_run_id, events_appended, behavior_failures, detail, exit_code, warnings=())` — `activegraph/sandbox/__init__.py:156-180`
+- `SandboxStartupError(ConfigurationError, RuntimeError)` — preflight-only setup leaf, exported from `activegraph.sandbox` but not the package root — `activegraph/sandbox/__init__.py:183-193`
+- `_child_code_paths() -> list[str]` — resolves the explicit code channel from the parent's `sys.path` — `activegraph/sandbox/__init__.py:196-217`
+- `_child_env(limits) -> dict[str,str]` — closed allow-list plus computed `PYTHONPATH` — `activegraph/sandbox/__init__.py:220-245`
+- `_stderr_tail(stderr, max_lines=20, max_chars=1500)` — `activegraph/sandbox/__init__.py:248-257`
+- `_parse_report_tail(stdout) -> dict` — last valid JSON line carrying `outcome` or `preflight` — `activegraph/sandbox/__init__.py:260-271`
+- `_run_child(job, *, env, wall_clock, python_flags=())` — the **only** process spawn in the subsystem — `activegraph/sandbox/__init__.py:274-305`
+- `_PREFLIGHT_PROBE_RSS = 1024 * 2**20` — `activegraph/sandbox/__init__.py:308-315`
+- `_limits_job_block(limits, *, probe)` — derives `cpu_seconds` for the child — `activegraph/sandbox/__init__.py:318-330`
+- `_preflight_with(env, *, limits, python_flags, timeout=30.0)` — testable seam — `activegraph/sandbox/__init__.py:333-359`
+- `preflight(*, limits=TrialLimits(), timeout=30.0) -> tuple[str, ...]` — `activegraph/sandbox/__init__.py:362-388`
+- `_run_forked_trial_local(...) -> TrialReport` — the real implementation — `activegraph/sandbox/__init__.py:391-543`
+- `run_forked_trial(...) -> TrialReport` — compatibility wrapper over the local adapter — `activegraph/sandbox/__init__.py:546-576`
 
-### Provider-neutral seam — `activegraph/sandbox/executor.py` (392 lines)
+### Provider-neutral seam — `activegraph/sandbox/executor.py` (401 lines)
 
 - `TrialIsolationGuarantees(process, filesystem, network, syscalls, environment, security_sandbox, notes=())` — `activegraph/sandbox/executor.py:12-22`
 - `LOCAL_SUBPROCESS_ISOLATION` — the local adapter's declared claims, `security_sandbox=False` — `activegraph/sandbox/executor.py:25-36`
-- `TrialSpecification` with `.to_json()` / `.from_json()` — `activegraph/sandbox/executor.py:39-112`
-- `TrialBudgetUse(events_appended, behavior_failures, limits)` — `activegraph/sandbox/executor.py:115-121`
-- `TrialArtifactReference(name, uri, media_type=None, digest=None)` — `activegraph/sandbox/executor.py:124-131`
-- `TrialEventLogReference(store_path, run_id)` — `activegraph/sandbox/executor.py:134-139`
-- `TrialFailureDetails(kind, message, exit_code=None)` — `activegraph/sandbox/executor.py:142-148`
-- `TrialResult` with `.from_report()` / `.to_report()` — `activegraph/sandbox/executor.py:151-215`
-- `TrialExecutor` — `@runtime_checkable Protocol` — `activegraph/sandbox/executor.py:218-231`
-- `LocalSubprocessTrialExecutor` — `activegraph/sandbox/executor.py:234-263`
-- `RecordingTrialExecutor(results, *, isolation_guarantees=None)` — deterministic double — `activegraph/sandbox/executor.py:266-302`
+- `TrialSpecification` with `.to_json()` / `.from_json()` — `activegraph/sandbox/executor.py:39-118`
+- `TrialBudgetUse(events_appended, behavior_failures, limits)` — `activegraph/sandbox/executor.py:121-127`
+- `TrialArtifactReference(name, uri, media_type=None, digest=None)` — `activegraph/sandbox/executor.py:130-137`
+- `TrialEventLogReference(store_path, run_id)` — `activegraph/sandbox/executor.py:140-145`
+- `TrialFailureDetails(kind, message, exit_code=None)` — `activegraph/sandbox/executor.py:148-154`
+- `TrialResult` with `.from_report()` / `.to_report()` — `activegraph/sandbox/executor.py:157-221`
+- `TrialExecutor` — `@runtime_checkable Protocol` — `activegraph/sandbox/executor.py:224-237`
+- `LocalSubprocessTrialExecutor` — `activegraph/sandbox/executor.py:240-269`
+- `RecordingTrialExecutor(results, *, isolation_guarantees=None)` — deterministic double — `activegraph/sandbox/executor.py:272-308`
 
-### Child side — `activegraph/sandbox/_child.py` (319 lines, a **separate process entry point**)
+### Child side — `activegraph/sandbox/_child.py` (320 lines, a **separate process entry point**)
 
-- `python -m activegraph.sandbox._child` — `activegraph/sandbox/_child.py:318-319`
+- `python -m activegraph.sandbox._child` — `activegraph/sandbox/_child.py:319-320`
 - `_LIMIT_WARNINGS: list[str]` — module global collecting degradations — `activegraph/sandbox/_child.py:25`
 - `_report(outcome, *, fork_run_id, events_appended, behavior_failures, detail, exit_code)` — prints one JSON line, then `SystemExit` — `activegraph/sandbox/_child.py:28-54`
 - `_apply_rlimits(limits) -> list[str]` — `activegraph/sandbox/_child.py:57-109`
 - `_mem_off(reason) -> str` — the memory-degradation warning text — `activegraph/sandbox/_child.py:112-117`
-- `_materialize_pack(job) -> Pack` — the pin-first chain — `activegraph/sandbox/_child.py:120-168`
-- `_resolve_scenario(root, scenario) -> Optional[Callable]` — `activegraph/sandbox/_child.py:171-191`
-- `main()` — `activegraph/sandbox/_child.py:194-315`
+- `_materialize_pack(job) -> Pack` — the pin-first chain — `activegraph/sandbox/_child.py:120-169`
+- `_resolve_scenario(root, scenario) -> Optional[Callable]` — `activegraph/sandbox/_child.py:172-192`
+- `main()` — `activegraph/sandbox/_child.py:195-316`
 
 ### Adapter conformance — `activegraph/sandbox/conformance.py` (79 lines)
 
@@ -121,14 +121,14 @@ graph TD
 
 ### sandbox <-> callers (public API — a dangling boundary)
 
-**Nothing inside `activegraph/` imports `sandbox/`.** A repo-wide grep for `sandbox` in `*.py`
-outside `activegraph/sandbox/` returns exactly one hit, a prose docstring mention at
-`activegraph/packs/manifest.py:16`. `activegraph/__init__.py` has no `sandbox` reference at all,
+**Nothing inside `activegraph/` imports `sandbox/`.** The few Python matches outside
+`activegraph/sandbox/` are prose or comments (`activegraph/packs/manifest.py:16,35,452` and
+`activegraph/errors.py:95-101`), not callers. `activegraph/__init__.py` has no `sandbox` reference,
 and the docs state this is deliberate (`docs/reference/api/sandbox.md:20-24`: "it is intentionally
-not re-exported at the top level"). `sandbox/` is a **leaf, opt-in subsystem** whose real consumer
-— the evolution pack in the separate `activegraph-packs` package (`CONTRACT.md:7988-7989`) — lives
-outside this repo. In-repo consumers are the tests (`tests/test_sandbox_trial.py:19-26`,
-`tests/test_trial_executor.py:11-23`).
+not re-exported at the top level"). `sandbox/` is therefore a **leaf, opt-in subsystem**; the
+repository describes evolution-pack participation as a design boundary, but contains no
+verifiable external call site. In-repo executable consumers are tests
+(`tests/test_sandbox_trial.py:26-34`, `tests/test_trial_executor.py:11-28`).
 
 ```ebnf
 trial-request        ::= run_forked_trial( store_path ,
@@ -141,7 +141,8 @@ pack_source          ::= PackSource( root_dir , expected_bundle_hash , manifest_
 expected_bundle_hash ::= "sha256:" 64*LOWER-HEXDIG       (* mandatory *)
 manifest_required    ::= true | false                   (* default true *)
 extra_packs          ::= "(" { pack_source } ")"        (* loaded BEFORE the candidate *)
-scenario             ::= "" | rel-path [ "::" func-name ]   (* default func "main" *)
+scenario             ::= "" | rooted-path [ "::" func-name ]
+                       (* resolved from pack root; `..` containment is not enforced; default "main" *)
 limits               ::= TrialLimits( wall_clock_seconds , max_rss_bytes ,
                                       max_events , max_llm_calls , env_passthrough )
 
@@ -156,31 +157,33 @@ probe-response       ::= warnings | raise SandboxStartupError
 warnings             ::= "(" { degradation-string } ")"     (* () == fully clean *)
 ```
 
-`activegraph/sandbox/__init__.py:82-88, 99-142, 145-169, 349-351, 533-543`.
+`activegraph/sandbox/__init__.py:81-180,391-401,546-556`.
 
 **Contract notes.**
-- `run_forked_trial` **never raises for in-trial failures** — those are *outcomes*. It raises only
-  for parent-side setup problems (bad store, bad fork point), with the same errors `Runtime.load` /
-  `Runtime.fork` raise (`activegraph/sandbox/__init__.py:416-418`).
+- `PackSource` construction can raise `ValueError` for a malformed pin, and the serialized executor
+  seam raises `ValueError` for malformed identity or pin fields before forking
+  (`activegraph/sandbox/__init__.py:120-126`; `activegraph/sandbox/executor.py:78-118,311-387`).
+  Classified in-trial failures are returned as outcomes; parent-side validation/load/fork errors
+  can raise.
 - `preflight` returns degradation warnings (empty tuple = fully clean) and raises
   `SandboxStartupError` carrying the child's stderr tail when a child cannot start
-  (`activegraph/sandbox/__init__.py:348-350`).
+  (`activegraph/sandbox/__init__.py:333-388`).
 - `SandboxStartupError` is catchable through `ConfigurationError`, `ActiveGraphError`, and the
   built-in `RuntimeError`. Its exact one-line `str`/`.args` remain on the legacy constructor branch
   under the narrow AF-wse next-major structured-rendering waiver; `.doc_url` already uses the
   class-specific `sandbox-startup-error` slug.
 - **The store is the record.** `events_appended` and `behavior_failures` are re-read from the
-  fork's run by the parent *after* the child exits; the stdout tail is a signal only and never
-  overrides the store — `activegraph/sandbox/__init__.py:489-518`, `:148-152`,
-  `CONTRACT.md:7478-7484`.
-- **Outcome classification is total and closed** (`activegraph/sandbox/__init__.py:451-466`):
+  fork's run by the parent *after* the child exits; the stdout count fields are a signal only and
+  never override the store — `activegraph/sandbox/__init__.py:502-533`,
+  `CONTRACT.md:7500-7506`.
+- **Outcome classification is total and closed** (`activegraph/sandbox/__init__.py:464-489`):
   `timed_out` → `limits_exceeded`; a parseable tail whose `outcome` is outside `TRIAL_OUTCOMES` →
   `crashed`; no tail → `_EXIT_TO_OUTCOME.get(exit_code, "crashed")`, with **exit 0 and no tail
   forced to `crashed`** ("exit 0 with no tail is itself suspicious; say so",
-  `activegraph/sandbox/__init__.py:463-465`).
+  `activegraph/sandbox/__init__.py:474-489`).
 - **A degraded net is announced, never silent.** Child warnings are lifted into
   `TrialReport.warnings`, folded into `detail` as `[degraded: ...]`, and logged at WARNING —
-  `activegraph/sandbox/__init__.py:482-487`.
+  `activegraph/sandbox/__init__.py:491-500`, `CONTRACT.md:7564-7591`.
 
 ### sandbox <-> orchestration (the v1.8 `TrialExecutor` adapter boundary)
 
@@ -188,30 +191,31 @@ Orchestrators serialize a trial to canonical JSON and hand it to any `TrialExecu
 never passes live objects across this seam, so a remote adapter (Docker, E2B, Modal) is a drop-in
 replacement for `LocalSubprocessTrialExecutor`. Every adapter must also *declare* what isolation it
 actually provides — the guarantees are contract data an orchestrator can branch on, not marketing
-(`CONTRACT.md:8051-8055`).
+(`CONTRACT.md:8050-8073`).
 
 ```ebnf
 executor-call      ::= executor "." execute( serialized-specification )
                      | executor "." isolation_guarantees
 
 serialized-specification ::= canonical-json      (* sort_keys=True, separators=(",",":") *)
-canonical-json     ::= "{" "schema_version" ":" 2 ","
-                           "store_path"     ":" nonempty-string ","
-                           "parent_run_id"  ":" nonempty-string ","
-                           "at_event"       ":" nonempty-string ","
-                           "pack_source"    ":" pack-source-obj ","
-                           "scenario"       ":" string ","
-                           "limits"         ":" limits-obj ","
-                           "label"          ":" nonempty-string ","
-                           "extra_packs"    ":" "[" { pack-source-obj } "]" "}"
-pack-source-obj    ::= "{" "root_dir" ":" nonempty-string ","
-                           "expected_bundle_hash" ":" expected_bundle_hash ","
-                           "manifest_required" ":" boolean "}"
-limits-obj         ::= "{" "wall_clock_seconds" ":" number ","
-                           "max_rss_bytes"  ":" ( integer | null ) ","
+canonical-json     ::= "{" "at_event"       ":" nonempty-string ","
+                           "extra_packs"     ":" "[" { pack-source-obj } "]" ","
+                           "label"           ":" nonempty-string ","
+                           "limits"          ":" limits-obj ","
+                           "pack_source"     ":" pack-source-obj ","
+                           "parent_run_id"   ":" nonempty-string ","
+                           "scenario"        ":" string ","
+                           "schema_version"  ":" 2 ","
+                           "store_path"      ":" nonempty-string "}"
+                       (* keys shown in their emitted lexicographic byte order *)
+pack-source-obj    ::= "{" "expected_bundle_hash" ":" expected_bundle_hash ","
+                           "manifest_required" ":" boolean ","
+                           "root_dir" ":" nonempty-string "}"
+limits-obj         ::= "{" "env_passthrough" ":" "[" { string } "]" ","
                            "max_events"     ":" ( integer | null ) ","
                            "max_llm_calls"  ":" ( integer | null ) ","
-                           "env_passthrough" ":" "[" { string } "]" "}"
+                           "max_rss_bytes"  ":" ( integer | null ) ","
+                           "wall_clock_seconds" ":" number "}"
 
 executor-response  ::= TrialResult | raise ValueError    (* validation precedes work *)
 TrialResult        ::= status , budget_use , artifacts , event_log ,
@@ -228,7 +232,7 @@ isolation          ::= TrialIsolationGuarantees( process , filesystem , network 
                                                  security_sandbox , notes )
 ```
 
-`activegraph/sandbox/executor.py:12-22, 39-112, 115-215, 218-231`.
+`activegraph/sandbox/executor.py:12-118,121-237`.
 
 **Contract notes.**
 - **Validation precedes any work.** Newly constructed specifications and emitted JSON use the
@@ -237,31 +241,36 @@ isolation          ::= TrialIsolationGuarantees( process , filesystem , network 
   in-memory v2 specification. Missing, empty, or malformed pins in v1 or v2 fail at their full
   nested path before a fork/import. Booleans, floats, and strings are not integer versions;
   `store_path`/`parent_run_id`/`at_event`/`label` must be non-empty strings; limits numerics are
-  type-checked with `bool` explicitly rejected as an int — `activegraph/sandbox/executor.py:75-112`,
-  `:305-378`. Malformed input raises `ValueError` before the executor does anything.
+  type-checked with `bool` explicitly rejected as an int — `activegraph/sandbox/executor.py:78-118`,
+  `:311-387`. Malformed input raises `ValueError` before the executor does anything. The schema-v2
+  amendment superseding the historical empty-pin language is `CONTRACT.md:9059-9079`.
 - **`to_json` is canonical** (`sort_keys=True, separators=(",",":")` —
-  `activegraph/sandbox/executor.py:69`); round-trip idempotence is pinned by the conformance suite
+  `activegraph/sandbox/executor.py:59-75`); round-trip idempotence is pinned by the conformance suite
   (`activegraph/sandbox/conformance.py:45-51`).
 - **Wire purity.** The serialized specification contains no live `Runtime`, callable, provider
   client, ambient environment, or unserialized Python object; adapters may not reinterpret the trial
-  by reading ambient parent state — `CONTRACT.md:8021-8029`.
-- **Result shape invariant.** `failure is None` **iff** `status == "completed"`, and when set,
-  `failure.kind == status` — `activegraph/sandbox/executor.py:176-184`, pinned at
-  `activegraph/sandbox/conformance.py:64-68`. `to_report()` is lossless for the legacy fields —
-  `activegraph/sandbox/executor.py:204-215`, `CONTRACT.md:8044-8046`.
+  by reading ambient parent state — `CONTRACT.md:8050-8073`.
+- **Result shape invariant at the adapter seam.** `TrialResult.from_report()` and the conformance
+  suite enforce `failure is None` **iff** `status == "completed"`; when set,
+  `failure.kind == status` — `activegraph/sandbox/executor.py:171-208`, pinned at
+  `activegraph/sandbox/conformance.py:53-71`. Direct `TrialResult(...)` construction has no
+  `__post_init__` validation. `to_report()` is lossless for the legacy fields —
+  `activegraph/sandbox/executor.py:210-221`, `CONTRACT.md:8075-8093`.
 - The local adapter declares `process="fresh_interpreter_subprocess"`,
   `filesystem="shared_host_filesystem"`, `network="unconfined"`, `syscalls="unconfined"`,
   `environment="closed_allowlist_plus_explicit_code_paths"`, `security_sandbox=False` —
-  `activegraph/sandbox/executor.py:25-36`. `RecordingTrialExecutor` declares its own absence of
-  execution honestly (`activegraph/sandbox/executor.py:276-284`) and raises `RuntimeError` when its
-  fixture list is exhausted (`activegraph/sandbox/executor.py:300-301`).
+  `activegraph/sandbox/executor.py:25-36`, `CONTRACT.md:8095-8099`.
+  `RecordingTrialExecutor` declares its own absence of execution honestly
+  (`activegraph/sandbox/executor.py:272-308`) and raises `RuntimeError` when its fixture list is
+  exhausted (`activegraph/sandbox/executor.py:300-308`).
 
 ### sandbox-parent <-> sandbox-child (the process boundary)
 
-The parent spawns exactly one subprocess per trial and feeds it a single JSON job on stdin
-(`activegraph/sandbox/__init__.py:261-292`). This is a **fresh interpreter, not `os.fork()`** — no
-inherited Python state, no shared clients (`activegraph/sandbox/__init__.py:14-16`, `:277`). Two
-channels are kept rigorously separate (v1.7, `CONTRACT.md:7506-7530`): the **environment**
+For a trial that reaches child launch, the parent spawns exactly one subprocess and feeds it a
+single JSON job on stdin (`activegraph/sandbox/__init__.py:274-305`). Parent validation/load/fork
+failures launch none. This is a **fresh interpreter, not `os.fork()`** — no
+inherited Python state, no shared clients (`activegraph/sandbox/__init__.py:1-23`, `:290`). Two
+channels are kept rigorously separate (`CONTRACT.md:7528-7552`): the **environment**
 allow-list is closed and is a security control, while **code location** is an explicit channel
 computed from the parent's resolved `sys.path` and never forwarded from ambient env.
 
@@ -269,14 +278,15 @@ computed from the parent's resolved `sys.path` and never forwarded from ambient 
 spawn              ::= sys.executable { python-flag } "-m"
                        "activegraph.sandbox._child"
                        stdin=PIPE stdout=PIPE stderr=PIPE env=child-env
-python-flag        ::= "-S"                    (* TEST-ONLY seam; production passes none *)
+python-flag        ::= string                  (* arbitrary tuple seam; production passes none;
+                                                  tests use "-S" *)
 
 child-env          ::= [ "PATH" ] [ "HOME" ] [ "LANG" ]
                        { passthrough-key } "PYTHONPATH"
 passthrough-key    ::= <name in limits.env_passthrough AND present in os.environ>
 PYTHONPATH         ::= code-channel [ os.pathsep passed-through-PYTHONPATH ]
 code-channel       ::= activegraph-root { os.pathsep sys-path-dir }
-                       (* derived from parent sys.path; NEVER an ambient forward *)
+                       (* derived from parent sys.path; not an ambient env forward *)
 
 job                ::= trial-job | preflight-job          (* one JSON object on stdin *)
 preflight-job      ::= "{" "preflight" ":" true "," "limits" ":" limits-block "}"
@@ -299,9 +309,10 @@ limits-block       ::= "{" "max_rss_bytes"  ":" ( integer | null ) ","
                        (* cpu_seconds = int(wall_clock_seconds) + 5; wall_clock
                           itself is PARENT-side only and never crosses *)
 
-child-output       ::= { arbitrary-stdout-line } report-line
+child-output       ::= { arbitrary-stdout-line } [ report-line ]
                        (* parent scans stdout BACKWARDS for the last line that
-                          JSON-parses to an object with "outcome" or "preflight" *)
+                          JSON-parses to an object with "outcome" or "preflight";
+                          hard crashes may produce no report line *)
 report-line        ::= trial-report-json | preflight-report-json
 trial-report-json  ::= "{" "outcome"           ":" outcome ","
                            "fork_run_id"       ":" string ","
@@ -327,40 +338,44 @@ parent-resolution  ::= if timed_out                          -> "limits_exceeded
 authoritative-counts ::= store-reread( store_path , fork_run_id )
 ```
 
-`activegraph/sandbox/__init__.py:207-232, 261-292, 305-317, 428-448, 451-466, 489-518`;
-`activegraph/sandbox/_child.py:28-54, 210-215`.
+`activegraph/sandbox/__init__.py:196-245,274-305,318-330,441-500,502-533`;
+`activegraph/sandbox/_child.py:28-54,195-216`.
 
 **Contract notes.**
 - **Environment allow-list is closed and is a security control.** Only `PATH`, `HOME`, `LANG` plus
-  explicit `env_passthrough` cross — `activegraph/sandbox/__init__.py:219-226`. No ambient parent
-  env (API keys, `REPLIT_*`) reaches candidate code.
+  explicit `env_passthrough` cross — `activegraph/sandbox/__init__.py:220-245`. If a caller names
+  `PYTHONPATH` explicitly it is appended after the computed code channel; otherwise no ambient
+  parent `PYTHONPATH` or API-key environment reaches candidate code.
 - **Code location is an explicit channel.** `PYTHONPATH` is computed from the parent's resolved
   `sys.path` (the `activegraph.__file__` root first, then real `sys.path` directories; non-directory
   entries, the empty-CWD entry, and zip imports dropped) —
-  `activegraph/sandbox/__init__.py:183-204`, `:227-231`.
+  `activegraph/sandbox/__init__.py:196-217`, `:220-245`.
 - **A crash never swallows its own cause.** stderr is PIPED, never `DEVNULL`
-  (`activegraph/sandbox/__init__.py:280`); on `crashed`, the stderr tail is folded into `detail` —
-  `activegraph/sandbox/__init__.py:473-476`, `:235-244`, `CONTRACT.md:7520-7523`.
-- **Detail truncation.** The child truncates `detail` to 500 characters
-  (`activegraph/sandbox/_child.py:44`); scenario tracebacks are limited to 3 frames
-  (`activegraph/sandbox/_child.py:290`).
+  (`activegraph/sandbox/__init__.py:293`); on `crashed`, the stderr tail is folded into `detail` —
+  `activegraph/sandbox/__init__.py:481-489`, `:248-257`, `CONTRACT.md:7528-7552`.
+- **Detail truncation.** The child truncates its own report `detail` to 500 characters
+  (`activegraph/sandbox/_child.py:44`); parent-added stderr and warnings can make the final public
+  `TrialReport.detail` longer. Scenario tracebacks are limited to 3 frames
+  (`activegraph/sandbox/_child.py:291`).
 - On `subprocess.TimeoutExpired` the parent calls `proc.kill()` then a second `communicate()` to
-  reap — `activegraph/sandbox/__init__.py:284-292`.
+  reap — `activegraph/sandbox/__init__.py:297-305`.
 
 ### sandbox-parent <-> runtime / core (fork creation, wall-kill marker, store re-read)
 
 The parent uses `Runtime` for everything persistent — `sandbox/` **never imports `store/`
 directly**. It loads the parent run, forks it (which is where SQLite-only and the promote-block cut
-guard are enforced), then explicitly drops its handle before the child starts. After the child
-exits, it re-loads the fork read-only for the authoritative counts, and on a wall-clock kill appends
-one marker event first.
+guard are enforced), then drops its local fork-runtime reference before the child starts. After the
+child exits, it re-loads the fork to derive authoritative counts, and on a wall-clock kill appends
+one marker event first. The loaded runtime has a writable attached store; this is not a read-only
+handle.
 
 ```ebnf
 fork-creation      ::= Runtime.load( store_path , run_id=parent_run_id , behaviors=[] )
                        "." fork( at_event= , label= , behaviors=[] )
                        -> fork_run_id , initial_events
                        (* parent then DROPS the handle: `del fork_rt` *)
-setup-failure      ::= IncompatibleRuntimeState | <same errors as Runtime.load/fork>
+setup-failure      ::= ValueError | IncompatibleRuntimeState
+                     | <same errors as Runtime.load/fork>
                        (* these PROPAGATE; they are not trial outcomes *)
 
 store-reread       ::= Runtime.load( store_path , run_id=fork_run_id , behaviors=[] )
@@ -382,26 +397,27 @@ wall-kill-marker   ::= graph.emit( Event(
                        (* only on timeout *)
 ```
 
-`activegraph/sandbox/__init__.py:420-426, 489-520`; `activegraph/runtime/runtime.py:3250-3276`
-(`load`), `:3393-3412` (`fork`); `activegraph/core/graph.py:564-576`;
+`activegraph/sandbox/__init__.py:433-461,502-533`; `activegraph/runtime/runtime.py:3745-3817`
+(`load`), `:3905-4009` (`fork`); `activegraph/core/graph.py:584-626`;
 `activegraph/core/event.py:14-32`.
 
 **Contract notes.**
 - `fork()` requires a **SQLite-backed** runtime or raises `IncompatibleRuntimeState`
-  (`activegraph/runtime/runtime.py:3429-3438`) and refuses a cut that would slice a promote block
-  (`activegraph/runtime/runtime.py:3466-3471`, CONTRACT v1.3 #4). Full fork semantics — lineage,
+  (`activegraph/runtime/runtime.py:3945-3981`) and refuses a cut that would slice a promote block
+  (`activegraph/runtime/runtime.py:3983-3989,5146-5200`, CONTRACT v1.3 #4). Full fork semantics — lineage,
   cut guard — are enforced **in the parent**.
-- `del fork_rt  # the child owns the fork from here` — `activegraph/sandbox/__init__.py:426`.
+- `del fork_rt  # the child owns the fork from here` drops the local reference; it does not
+  explicitly close a handle — `activegraph/sandbox/__init__.py:439`.
 - `Graph.emit` validates, projects, **durably appends**, offers to sinks, and notifies listeners
-  (`activegraph/core/graph.py:564-576`), so the wall-kill marker is a persisted fact, not a log line.
+  (`activegraph/core/graph.py:584-626`), so the wall-kill marker is a persisted fact, not a log line.
 - **Parent-owned wall-kill marker (v1.8 #11).** The contract calls it an *external stop fact*:
   load/replay projects the killed prefix and never re-races the clock; a failure to append is
-  surfaced in `detail` and never silently claimed as recorded — `CONTRACT.md:8066-8074`.
+  surfaced in `detail` and never silently claimed as recorded — `CONTRACT.md:8110-8118`.
 - Behavior failures are read via `fork_view.trace.failures()`
-  (`activegraph/sandbox/__init__.py:518`; `activegraph/trace/printer.py:550-562`), i.e. the run's
+  (`activegraph/sandbox/__init__.py:528-530`; `activegraph/trace/printer.py:550-564`), i.e. the run's
   `behavior.failed` events.
 - A store re-read failure is caught and appended to `detail` rather than raised —
-  `activegraph/sandbox/__init__.py:519-520`.
+  `activegraph/sandbox/__init__.py:532-533`.
 
 ### sandbox-child <-> packs (materialization)
 
@@ -411,7 +427,7 @@ disk *before any import*, then the manifest is loaded, then the module is import
 identical chain, in order, **before** the candidate.
 
 ```ebnf
-materialize        ::= pin-check [ manifest-check ] import surface-check
+materialize        ::= pin-check [ manifest-check ] import pack-selection [ surface-check ]
 pin-check          ::= verify_bundle_hash( expected_bundle_hash , pack_root )
                        (* unconditional, including when manifest checks are disabled *)
 manifest-check     ::= load_manifest( pack_root ) -> PackManifest
@@ -422,34 +438,40 @@ import             ::= spec_from_file_location( module-name ,
                        exec_module
 module-name        ::= manifest.name | pack_root.name
 surface-check      ::= verify_surface( manifest , pack )
+                       (* present iff manifest-check was present *)
 pack-selection     ::= exactly-one module-level Pack
                        [ filtered to Pack.name == manifest.name ]
-failure            ::= PackManifestError | RuntimeError -> materialization_failed , exit 50
+failure            ::= Exception -> materialization_failed , exit 50
 ```
 
-`activegraph/sandbox/_child.py:120-168`; `activegraph/packs/manifest.py:177-185` (`load_manifest`),
-`:384-400` (`verify_surface`), `:591-618` (`verify_bundle_hash`).
+`activegraph/sandbox/_child.py:120-169`; `activegraph/packs/manifest.py:226-435` (`load_manifest`),
+`:437-544` (`verify_surface`), `:645-672` (`verify_bundle_hash`).
 
 **Contract notes.**
-- Order is fixed and is the whole point: `verify_bundle_hash` (which covers `manifest.toml`) →
-  `load_manifest` → import → `verify_surface` — `activegraph/sandbox/_child.py:138-167`,
-  `CONTRACT.md:7464-7469`.
+- Order is fixed: `verify_bundle_hash` is unconditional and precedes import. When
+  `manifest_required=True`, `load_manifest` runs before import and `verify_surface` after pack
+  selection; both manifest operations are skipped together when false —
+  `activegraph/sandbox/_child.py:120-169`, `CONTRACT.md:7486-7491`.
 - `verify_bundle_hash` raises `PackManifestError` on a malformed pin (must be `sha256:` + 64
-  lowercase hex) or a hash mismatch (`activegraph/packs/manifest.py:591-618`).
+  lowercase hex) or a hash mismatch (`activegraph/packs/manifest.py:645-672`).
 - `verify_surface` is a two-way check over `object_types` / `relation_types` / `behaviors` / `tools`
-  / `settings_schema` plus `capabilities` (with `risk_class` agreement) —
-  `activegraph/packs/manifest.py:384-400`.
-- The pack module must expose **exactly one** module-level `Pack`, matching the manifest name when a
-  manifest is required — otherwise `RuntimeError` → `materialization_failed`
-  (`activegraph/sandbox/_child.py:156-164`).
+  / `settings_schema` plus `capabilities` (risk/action classes); `consumes` remains outside this
+  surface subset — `activegraph/packs/manifest.py:437-544`.
+- Without a manifest the module must expose exactly one module-level `Pack`. With a manifest, all
+  module-level packs are filtered by `manifest.name` and exactly one matching pack is required;
+  differently named pack objects are ignored. Failure becomes `materialization_failed`
+  (`activegraph/sandbox/_child.py:146-169,227-240`).
 - Any one `extra_packs` entry failing its pins is `materialization_failed` for the whole trial —
-  `activegraph/sandbox/_child.py:229`, `:260-262`, `CONTRACT.md:7492-7504`.
+  `activegraph/sandbox/_child.py:227-240`, `tests/test_sandbox_trial.py:593-632`,
+  `CONTRACT.md:7514-7526`.
 
 ### sandbox-child <-> runtime (trial execution)
 
 Inside the child, the fork is loaded with **no LLM provider**, the trusted extra packs are loaded,
-then the candidate, then the scenario (or `run_until_idle()`) drives it. Outcome classification
-happens entirely in the child and is reported as an exit code plus a JSON tail.
+then the candidate, then the scenario (or `run_until_idle()`) drives it. Materialization and drive
+exceptions are classified in the child. Exceptions from `Runtime.load` or `rt.load_pack` occur
+outside the classification `try`, produce no JSON report, and are classified as `crashed` by the
+parent.
 
 ```ebnf
 child-run          ::= load-fork { load-extra-pack } load-candidate drive classify
@@ -459,9 +481,10 @@ load-fork          ::= Runtime.load( store_path , run_id=fork_run_id ,
 budget             ::= { "max_events" ":" integer } [ "max_llm_calls" ":" positive-integer ]
 load-extra-pack    ::= rt.load_pack( trusted-pack )      (* in order, before the candidate *)
 load-candidate     ::= rt.load_pack( candidate-pack )
+load-failure       ::= Runtime.load/load_pack Exception -> no report -> parent "crashed"
 drive              ::= scenario-fn( rt ) | rt.run_until_idle()
 scenario-fn        ::= "def" func-name "(" rt ")" "->" None
-                       (* resolved from the CANDIDATE's pack_root only *)
+                       (* rooted at candidate pack_root; containment is not enforced *)
 classify           ::= MemoryError                       -> limits_exceeded , exit 40
                      | Exception                         -> scenario_failed  , exit 30
                      | any "runtime.budget_exhausted" in events[initial:]
@@ -471,38 +494,39 @@ counts             ::= ( max(0, len(rt.graph.events) - initial_events) ,
                          len(rt.trace.failures()) )
 ```
 
-`activegraph/sandbox/_child.py:194-315`, `:254-262`, `:271`, `:295-298`;
-`activegraph/runtime/runtime.py:2777-2788` (`load_pack`), `:1072` (`run_until_idle`),
-`:2746-2765` (`runtime.budget_exhausted` emission); `activegraph/trace/printer.py:550`.
+`activegraph/sandbox/_child.py:242-316`; `activegraph/runtime/runtime.py:3261-3273`
+(`load_pack`), `:1494-1501` (`run_until_idle`), `:3230-3255`
+(`runtime.budget_exhausted` emission); `activegraph/trace/printer.py:550-564`.
 
 **Contract notes.**
 - **Key-freedom is structural.** The child configures no LLM provider, so `max_llm_calls=0` (the
   default) needs no budget dimension — an LLM-calling candidate fails loud at *registration*
-  (`MissingProviderError`, `activegraph/runtime/runtime.py:968`, class at
-  `activegraph/llm/errors.py:200`) rather than reaching a network —
-  `activegraph/sandbox/__init__.py:126-134`, `CONTRACT.md:7475-7477`.
-- `load_pack` returns `bool`, raises `PackVersionConflictError` / `PackConflictError`, and is
-  pre-mutation: a failed load leaves the runtime as it was
-  (`activegraph/runtime/runtime.py:2777-2788`).
-- **Three independent nets** (`CONTRACT.md:7470-7474`): (1) rlimits in the child — `RLIMIT_AS` from
+  (`MissingProviderError`, `activegraph/runtime/runtime.py:1243-1263`, class at
+  `activegraph/llm/errors.py:202`) rather than reaching a network —
+  `activegraph/sandbox/_child.py:255-260`, `CONTRACT.md:7492-7499`.
+- `load_pack` returns `bool` and performs conflict/version checks before its mutation phase. It is
+  not accurate to promise that every failed load leaves the runtime unchanged: loader state and
+  registries mutate at `activegraph/packs/loader.py:257-305` before the final `pack.loaded` emit at
+  `:306-318`, without rollback around an emit failure.
+- **Three independent nets** (`CONTRACT.md:7492-7499`): (1) rlimits in the child — `RLIMIT_AS` from
   `max_rss_bytes`, `RLIMIT_CPU` from `cpu_seconds = int(wall_clock_seconds) + 5`
-  (`activegraph/sandbox/__init__.py:316`, `activegraph/sandbox/_child.py:103-108`); (2) parent-side
-  wall-clock kill (`activegraph/sandbox/__init__.py:289-292`); (3) the runtime's own `Budget`
-  (`max_events`) inside the child (`activegraph/sandbox/_child.py:243-252`).
-- **rlimits only ever LOWER, and degrade loudly.** The target is clamped to the existing hard limit
+  (`activegraph/sandbox/__init__.py:318-330`, `activegraph/sandbox/_child.py:57-109`); (2) parent-side
+  wall-clock kill (`activegraph/sandbox/__init__.py:297-305`); (3) the runtime's own `Budget`
+  (`max_events`) inside the child (`activegraph/sandbox/_child.py:244-260`).
+- **rlimits only ever LOWER.** The target is clamped to the existing hard limit
   (`min(requested, hard)` unless hard is `RLIM_INFINITY`) so the call never raises a hard limit
-  (`activegraph/sandbox/_child.py:86-92`). A `ValueError`/`OSError` (Darwin rejects `RLIMIT_AS`) or a
-  missing `resource` module (Windows) is recorded as a warning, never a crash and never a silent
-  skip (`activegraph/sandbox/_child.py:78-81`, `:93-101`, `:112-117`). **Memory-budget enforcement
-  is Linux-only in v1**; on macOS/Windows the wall-clock and event budgets are the active nets —
-  `CONTRACT.md:7543-7546`.
+  (`activegraph/sandbox/_child.py:86-92`). A requested memory cap that cannot be applied produces a
+  warning (`:78-81,93-101,112-117`). If `resource` is unavailable, however, a requested CPU cap is
+  silently skipped; the parent wall clock and runtime event budget remain active. **Memory-budget
+  enforcement is Linux-only in v1** — `CONTRACT.md:7564-7591`.
 
 ### sandbox <-> adapter authors (conformance)
 
 `TrialExecutorConformance` ships **inside the package** as the reusable suite third-party executor
-adapters (Docker, E2B, Modal) must pass (`activegraph/sandbox/conformance.py:17`,
-`CONTRACT.md:8076-8082`). No such adapter exists in-repo (`CONTRACT.md:8091`); the in-repo subclass
-is the test at `tests/test_trial_executor.py:27`.
+adapters (Docker, E2B, Modal) must pass (`activegraph/sandbox/conformance.py:17-76`,
+`CONTRACT.md:8120-8131`). No such adapter exists in-repo; the in-repo subclass is the test at
+`tests/test_trial_executor.py:31-59`. The typed artifact field remains an unimplemented storage
+seam (`CONTRACT.md:8133-8142`).
 
 ```ebnf
 conformance-mixin  ::= class Adapter-Tests( TrialExecutorConformance ):
@@ -521,12 +545,12 @@ inherited-cases    ::= test_protocol_and_isolation_are_declared
 
 | Error | Where | When |
 |---|---|---|
-| `SandboxStartupError(ConfigurationError, RuntimeError)` | defined `activegraph/sandbox/__init__.py:174`, raised `:348-350` | child cannot start / never reports `preflight: ok`; one-line legacy rendering retained until AF-wse |
-| `ValueError` | `activegraph/sandbox/executor.py:78, 80, 83, 92, 96, 308, 322, 327, 330, 333, 355, 362, 369, 371` | malformed or unversioned specification |
-| `RuntimeError` | `activegraph/sandbox/executor.py:301` | `RecordingTrialExecutor` fixtures exhausted |
-| `RuntimeError` | `activegraph/sandbox/_child.py:151, 160, 183, 188` | pack/scenario import problems → `materialization_failed` / `scenario_failed` |
-| `PackManifestError` | raised in `activegraph/packs/manifest.py:177, 384, 591`; caught at `activegraph/sandbox/_child.py:231` | pin/manifest/surface violations → `materialization_failed` |
-| `IncompatibleRuntimeState` | `activegraph/runtime/runtime.py:3437` via `fork()` | non-SQLite store — **propagates out of** `run_forked_trial` |
+| `SandboxStartupError(ConfigurationError, RuntimeError)` | defined `activegraph/sandbox/__init__.py:183-193`, raised `:357-359` | child cannot start / never reports `preflight: ok`; one-line legacy rendering retained until AF-wse |
+| `ValueError` | `activegraph/sandbox/executor.py:53-57,81-107,311-387` | malformed or unversioned specification |
+| `RuntimeError` | `activegraph/sandbox/executor.py:300-308` | `RecordingTrialExecutor` fixtures exhausted |
+| `RuntimeError` | `activegraph/sandbox/_child.py:151-164,183-191` | pack/scenario import problems → `materialization_failed` / `scenario_failed` |
+| `PackManifestError` | defined `activegraph/packs/manifest.py:126-164`; caught by `Exception` at `activegraph/sandbox/_child.py:227-240` | pin/manifest/surface violations → `materialization_failed` |
+| `IncompatibleRuntimeState` | `activegraph/runtime/runtime.py:3947-3981` via `fork()` | non-SQLite store — **propagates out of** `run_forked_trial` |
 
 ## Sequence: a wall-clock-killed trial, end to end
 
@@ -561,6 +585,7 @@ sequenceDiagram
     C->>RT: Runtime.load(store_path, run_id=fork_run_id, behaviors=[], budget=budget)
     Note over C,RT: no llm_provider argument — key-freedom is structural
     C->>RT: rt.load_pack(each extra pack, in order), then rt.load_pack(candidate)
+    Note over C,RT: load/load_pack exceptions occur before the drive classifier<br/>no child report → parent classifies crashed
     C->>RT: scenario_fn(rt) — or rt.run_until_idle()
 
     P--xC: wall clock exceeded → proc.kill(), second communicate() to reap
@@ -577,81 +602,81 @@ sequenceDiagram
     E-->>O: TrialResult
 ```
 
-Sources: `activegraph/sandbox/__init__.py:378-530` (parent flow), `:261-292` (spawn/kill),
-`:489-518` (marker + re-read); `activegraph/sandbox/_child.py:194-315` (child flow);
-`activegraph/sandbox/executor.py:234-263` (adapter wrapping).
+Sources: `activegraph/sandbox/__init__.py:391-543` (parent flow), `:274-305` (spawn/kill),
+`:502-533` (marker + re-read); `activegraph/sandbox/_child.py:195-316` (child flow);
+`activegraph/sandbox/executor.py:240-269` (adapter wrapping).
 
 ## Open questions
 
 1. **`sandbox/` has zero in-package callers — confirmed, not a grep artifact.** Nothing under
-   `activegraph/` imports it; `activegraph/__init__.py` has no `sandbox` reference; the only in-tree
-   mention outside the package is a prose docstring at `activegraph/packs/manifest.py:16`. It is a
-   deliberate leaf whose consumer (the `activegraph-packs` evolution pack,
-   `CONTRACT.md:7988-7989`) lives outside this repo. It should be drawn as a **dangling public
-   boundary**, not an internal edge. The `sandbox -> core, packs, runtime` outbound row is accurate;
-   `store/` is reached only *through* `Runtime`.
+   `activegraph/` imports it; `activegraph/__init__.py` has no `sandbox` reference. Outside matches
+   are prose/comments at `activegraph/packs/manifest.py:16,35,452` and
+   `activegraph/errors.py:95-101`, not callers. It is a deliberate **dangling public boundary**.
+   The repository does not verify the separate evolution-pack call site; `sandbox -> core, packs,
+   runtime` is accurate, and `store/` is reached only through `Runtime`.
 
 2. **Deliberate circular import between `__init__.py` and `executor.py`.**
    `activegraph/sandbox/executor.py:9` imports `PackSource, TrialLimits, TrialReport` from
-   `activegraph.sandbox`, while `activegraph/sandbox/__init__.py:566` imports back from
+   `activegraph.sandbox`, while `activegraph/sandbox/__init__.py:579-590` imports back from
    `activegraph.sandbox.executor` at the **bottom** of the module (with `# noqa: E402`), and
-   `activegraph/sandbox/executor.py:247` re-imports `_run_forked_trial_local` lazily inside
+   `activegraph/sandbox/executor.py:252-264` re-imports `_run_forked_trial_local` lazily inside
    `execute`. It works, but any new top-of-module import in `executor.py` touching
    `activegraph.sandbox` symbols defined *after* line 566 will break at import time.
 
 3. **`conformance.py` imports `pytest` at module scope** (`activegraph/sandbox/conformance.py:7`) —
-   a shipped runtime module with a hard test-framework dependency. `store/conformance.py`,
-   `store/graph_conformance.py`, and `sinks/conformance.py` reportedly follow the same pattern; if
-   confirmed, this is a package-wide convention worth naming as such rather than a sandbox quirk.
+   a shipped runtime module with a hard test-framework dependency. `store/conformance.py` and
+   `sinks/conformance.py` follow the same convention; `store/graph_conformance.py` does not import
+   pytest.
 
-4. **Schema v2 closes the historical empty-pin posture.** Schema v1 intentionally allowed an
+4. **Resolved: schema v2 closes the historical empty-pin posture.** Schema v1 intentionally allowed an
    empty `expected_bundle_hash`; that history remains recorded in CONTRACT v1.8 #9. The
    2026-08-12 Set 4 amendment #4 makes v2 the only emitted form and requires the candidate plus
    every extra to carry an exact lowercase SHA-256 pin. Pinned v1 input migrates to v2; unpinned v1
    is rejected before executor work. The child verifies every accepted pin unconditionally.
 
 5. **`max_llm_calls > 0` is accepted and reaches the child's `Budget`, but is inert.**
-   `activegraph/sandbox/_child.py:251-252` sets the budget dimension, yet the child configures no
-   provider at all (`activegraph/sandbox/_child.py:254-259`), so the dimension can never be
+   `activegraph/sandbox/_child.py:247-260` sets the budget dimension, yet the child configures no
+   provider at all (`activegraph/sandbox/_child.py:255-260`), so the dimension can never be
    consumed. The docstring says it is "recorded for a future provider-wiring seam"
-   (`activegraph/sandbox/__init__.py:129-134`) — a knowingly-dead code path, not a bug.
+   (`activegraph/sandbox/__init__.py:133-139`) — a knowingly-dead code path, not a bug.
 
 6. **`TrialArtifactReference` is a typed placeholder.** `LocalSubprocessTrialExecutor` never
    populates `artifacts`; `TrialResult.from_report`'s default `artifacts=()` is always used
-   (`activegraph/sandbox/executor.py:172`, `:259-263`). `CONTRACT.md:8096-8097` confirms there is
+   (`activegraph/sandbox/executor.py:178`, `:249-269`). `CONTRACT.md:8133-8142` confirms there is
    "no artifact upload/storage subsystem; the typed empty-or-reference field is the compatibility
    seam."
 
 7. **`trial.wall_clock_exhausted` is write-only within this repo.** The parent emits it
-   (`activegraph/sandbox/__init__.py:501`) but no `activegraph/` code reads it — grep finds only the
+   (`activegraph/sandbox/__init__.py:511-527`) but no `activegraph/` code reads it — grep finds only the
    emitter, `CHANGELOG.md:217`, and `tests/test_sandbox_trial.py:217`. `apply_event`
-   (`activegraph/core/graph.py:1001-1008`) ignores unknown types, so it projects as a no-op fact.
-   Contrast `runtime.budget_exhausted`, which *is* read (`activegraph/runtime/runtime.py:2648`,
-   `:4377`, `activegraph/sandbox/_child.py:295-298`). It belongs in the event catalogue as an
+   (`activegraph/core/graph.py:1027-1103`) ignores unknown types, so it projects as a no-op fact.
+   Contrast `runtime.budget_exhausted`, which *is* read
+   (`activegraph/runtime/runtime.py:3130-3137,4925-4950`,
+   `activegraph/sandbox/_child.py:295-308`). It belongs in the event catalogue as an
    **external stop fact for downstream consumers, with no internal reader.**
 
 8. **Timed-out trials count the parent's own marker in `events_appended`.**
-   `activegraph/sandbox/__init__.py:497` snapshots `stop_sequence` *before* the emit, but
-   `events_appended` is computed at `:515-517` *after* it — so a wall-clock-killed trial reports one
+   `activegraph/sandbox/__init__.py:510` snapshots `stop_sequence` *before* the emit, but
+   `events_appended` is computed at `:528-530` *after* it — so a wall-clock-killed trial reports one
    more appended event than the child actually produced. Possibly intended (the marker *is* an event
    in the fork's log), but it is not stated anywhere and reads as child work. Worth confirming with
    whoever owns v1.8 #11.
 
 9. **`scenario` path is not containment-checked.** `_resolve_scenario` does
-   `(root / path_part).resolve()` (`activegraph/sandbox/_child.py:178`) with no assertion that the
+   `(root / path_part).resolve()` (`activegraph/sandbox/_child.py:177-180`) with no assertion that the
    result stays under `root`, so `scenario="../../thing.py"` would execute code outside the
    candidate's pack root. `scenario` is a *parent*-supplied field, not candidate-supplied, so this
    is not a candidate-escape vector — but it is an unvalidated input at a seam whose sibling inputs
    (`pack_root`, pins) are all strictly validated.
 
 10. **Asymmetric `sys.modules` handling.** The pack module is registered in `sys.modules`
-    (`activegraph/sandbox/_child.py:153`) but the scenario module (`"_trial_scenario"`) is not
-    (`activegraph/sandbox/_child.py:179-185`). A scenario file that relies on being importable by
+    (`activegraph/sandbox/_child.py:153-155`) but the scenario module (`"_trial_scenario"`) is not
+    (`activegraph/sandbox/_child.py:180-186`). A scenario file that relies on being importable by
     name, or a pack with two scenarios, therefore behaves differently from the pack module.
 
 11. **`python_flags` on `_run_child` is a documented test-only seam**
-    (`activegraph/sandbox/__init__.py:273-274`, used with `-S` to simulate a restricted env at
-    `tests/test_sandbox_trial.py:559-588`). Do not model it as production surface.
+    (`activegraph/sandbox/__init__.py:284-287`, used with `-S` in
+    `tests/test_sandbox_trial.py:651-678,691-697,761-778`). Do not model it as production surface.
 
 12. **Not verifiable from this repo:** the exact call site in the evolution pack that invokes
     `run_forked_trial` / `preflight`, and therefore what the real end-to-end orchestration
