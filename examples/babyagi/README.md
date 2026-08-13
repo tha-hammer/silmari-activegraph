@@ -36,6 +36,16 @@ export ANTHROPIC_API_KEY='your-key-here'
 python examples/babyagi.py "Write a comprehensive guide to ..."
 ```
 
+Choose another API-key provider with the same example:
+
+```bash
+export OPENAI_API_KEY='your-key-here'
+python examples/babyagi.py --provider openai "Write a comprehensive guide to ..."
+
+export OPENROUTER_API_KEY='your-key-here'
+python examples/babyagi.py --provider openrouter "Write a comprehensive guide to ..."
+```
+
 The objective is a CLI argument. The script runs until the event budget
 is exhausted (default: 100 events, 60 seconds). The trace lands in
 `traces/babyagi-<timestamp>.sqlite` and can be inspected with

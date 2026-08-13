@@ -24,6 +24,7 @@ from activegraph.llm import (
     LLMProvider,
     LLMProviderCapabilities,
     OpenAIProvider,
+    OpenRouterProvider,
     get_llm_provider_capabilities,
 )
 
@@ -79,6 +80,18 @@ def test_claude_code_provider_declares_the_exact_limited_descriptor():
     assert caps.requires_generation_control_acknowledgement is True
 
 
+def test_openrouter_provider_declares_estimated_input_counts():
+    provider = OpenRouterProvider()
+    caps = get_llm_provider_capabilities(provider)
+    assert caps == LLMProviderCapabilities(
+        enforces_max_tokens=True,
+        supports_sampling_controls=True,
+        input_token_count="estimate",
+        max_tool_calls_per_completion=None,
+        requires_generation_control_acknowledgement=False,
+    )
+
+
 def test_capabilities_are_frozen():
     caps = LLMProviderCapabilities()
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -101,6 +114,7 @@ def test_isinstance_llm_provider_still_holds_for_every_shipped_provider():
     assert isinstance(AnthropicProvider(client=object()), LLMProvider)
     assert isinstance(OpenAIProvider(client=object()), LLMProvider)
     assert isinstance(ClaudeCodeProvider(), LLMProvider)
+    assert isinstance(OpenRouterProvider(), LLMProvider)
 
 
 # ---- locked Protocol signatures --------------------------------------------

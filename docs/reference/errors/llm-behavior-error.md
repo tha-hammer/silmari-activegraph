@@ -20,7 +20,7 @@ For the complete reason-code table, see
 ## Quick fix by category
 
 Group the reason codes by what you do about them — the framework
-distinguishes ~5 reasons but the recovery shapes cluster.
+distinguishes 7 reasons but the recovery shapes cluster.
 
 ### Failures you can't fix in code: retry
 
@@ -72,8 +72,9 @@ shape:
 - Tighten the Pydantic schema to reject ambiguous shapes earlier
   (e.g., `Literal[...]` instead of `str` for enum-shaped fields).
 
-The full provider response is in the `behavior.failed` event's
-`payload_extras`:
+Relevant bounded diagnostics are in the `behavior.failed` event's
+`payload_extras`. Parse/schema failures may include raw text; provider
+wire errors deliberately retain only safe, bounded fields:
 
 ```bash
 activegraph inspect <store> --event <behavior.failed-id>
@@ -166,6 +167,23 @@ A conflicting metered-credential env var (`ANTHROPIC_API_KEY`,
 `CLAUDE_CODE_USE_BEDROCK`, ...) maps to `llm.auth_error` instead —
 see `payload_extras["conflicting_vars"]` there too.
 
+### `OpenRouterProvider` completed-envelope accounting failures
+
+`llm.request_error` also covers an OpenRouter request that completed but
+did not return a usable `usage.cost`. Missing, null, boolean, malformed,
+negative, NaN, or infinite values are terminal. The provider may already
+have billed the completion, so Runtime does not retry it and risk paying
+twice.
+
+The bounded extras are `model`, `field="usage.cost"`, `value_type`, and
+an optional truncated `finish_reason`; neither the raw response nor the
+invalid value is copied. A valid completed response records exact cost
+provenance as `provider_meta={"cost_source": "openrouter_usage"}`.
+Exactness does not extend to failed, timed-out, cancelled, or
+transport-lost requests: OpenRouter may charge work for which no usage
+envelope reaches Active Graph, and Runtime records no invented estimate
+for that failed attempt.
+
 ### Failures from fork/replay: re-record
 
 `llm.fixture_missing`. You're running against `RecordedLLMProvider`
@@ -191,7 +209,7 @@ try:
     rt.run_goal("...")
 except LLMBehaviorError as e:
     print(e.reason)            # 'llm.parse_error', etc.
-    print(e.payload_extras)    # full provider response, raw text, etc.
+    print(e.payload_extras)    # bounded diagnostics; shape depends on reason
 ```
 
 In the trace, look for the `behavior.failed` event the runtime
@@ -232,7 +250,7 @@ The runtime treats LLM failures as graph-level events because LLM
 behavior is inherently flaky and "halt the entire goal on first
 provider hiccup" is the wrong default for long-running agentic
 work. The failure is captured in the audit trail with full context
-(reason, payload_extras, behavior name, triggering event); downstream
+(reason, bounded payload_extras, behavior name, triggering event); downstream
 code subscribes if it wants to react, ignores if it doesn't.
 
 See [`failure-model`](../../concepts/failure-model.md) for the

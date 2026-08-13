@@ -83,6 +83,9 @@ def _pricing_for(
 
 
 class OpenAIProvider(LLMProvider):
+    _provider_label = "OpenAIProvider"
+    _install_extra = "openai"
+
     # v1.0.2 #1: provider-aware default model. @llm_behavior(model=None)
     # resolves to this string at registration time. gpt-4o-mini is the
     # cheap, fast member of the GPT-4o family — matches Anthropic's
@@ -149,6 +152,15 @@ class OpenAIProvider(LLMProvider):
 
     # ---- client lazy-load ----
 
+    def _sdk_client_kwargs(self, *, api_key: str) -> dict[str, Any]:
+        """Keyword arguments for the lazily constructed OpenAI SDK client.
+
+        The base provider deliberately returns the historical empty mapping:
+        the SDK still owns its normal environment lookup and defaults.
+        Subclasses may supply a compatible endpoint and explicit policy.
+        """
+        return {}
+
     def _client(self) -> Any:
         if self._client_override is not None:
             return self._client_override
@@ -158,18 +170,66 @@ class OpenAIProvider(LLMProvider):
             from openai import OpenAI  # type: ignore
         except ImportError as e:
             raise RuntimeError(
-                "OpenAIProvider requires the `openai` SDK. "
+                f"{self._provider_label} requires the `openai` SDK. "
                 "Install with `pip install activegraph[llm]` "
-                "or `pip install activegraph[openai]`."
+                f"or `pip install activegraph[{self._install_extra}]`."
             ) from e
         import os
 
-        if os.environ.get(self._api_key_env) is None:
+        api_key = os.environ.get(self._api_key_env)
+        if api_key is None:
             raise RuntimeError(
-                f"OpenAIProvider needs {self._api_key_env} in the environment."
+                f"{self._provider_label} needs {self._api_key_env} "
+                f"in the environment."
             )
-        self._client_cached = OpenAI()
+        self._client_cached = OpenAI(**self._sdk_client_kwargs(api_key=api_key))
         return self._client_cached
+
+    def _request_policy_kwargs(
+        self,
+        *,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+    ) -> dict[str, Any]:
+        """Provider-specific generation-control kwargs for one request."""
+        if self._is_reasoning_model(model):
+            return {"max_completion_tokens": int(max_tokens)}
+        policy: dict[str, Any] = {
+            "max_tokens": int(max_tokens),
+            "temperature": float(temperature),
+        }
+        if top_p < 1.0:
+            policy["top_p"] = float(top_p)
+        return policy
+
+    def _validate_response(self, raw: Any, *, model: str) -> None:
+        """Validate provider extensions before inherited success parsing."""
+
+    def _response_cost(
+        self,
+        raw: Any,
+        *,
+        input_tokens: int,
+        output_tokens: int,
+        model: str,
+    ) -> Decimal:
+        """Return the cost attached to a successful response."""
+        return self.estimate_cost(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            model=model,
+        )
+
+    def _response_provider_meta(
+        self,
+        raw: Any,
+        *,
+        model: str,
+    ) -> dict[str, Any]:
+        """Return bounded provider-specific response provenance."""
+        return {}
 
     # ---- LLMProvider methods ----
 
@@ -201,16 +261,14 @@ class OpenAIProvider(LLMProvider):
             "messages": openai_messages,
             "timeout": timeout_seconds,
         }
-        if self._is_reasoning_model(model):
-            # CONTRACT v1.3 #3: reasoning families take
-            # max_completion_tokens and reject non-default temperature
-            # / top_p — omit both rather than send a guaranteed 400.
-            kwargs["max_completion_tokens"] = int(max_tokens)
-        else:
-            kwargs["max_tokens"] = int(max_tokens)
-            kwargs["temperature"] = float(temperature)
-            if top_p < 1.0:
-                kwargs["top_p"] = float(top_p)
+        kwargs.update(
+            self._request_policy_kwargs(
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+            )
+        )
         # CONTRACT v1.3 #3: canonical (possibly pack-dotted) tool names
         # are rewritten to the wire alphabet; returned calls map back
         # through name_map so the runtime only ever sees canonical names.
@@ -252,6 +310,7 @@ class OpenAIProvider(LLMProvider):
             raise LLMBehaviorError(reason, str(e), payload_extras=extras) from e
         latency = time.monotonic() - t0
 
+        self._validate_response(raw, model=model)
         text = _extract_text(raw)
         tool_calls = _extract_tool_calls(raw, name_map=name_map)
         parsed: Any = None
@@ -261,9 +320,13 @@ class OpenAIProvider(LLMProvider):
         usage = getattr(raw, "usage", None)
         in_tok = int(getattr(usage, "prompt_tokens", 0) or 0)
         out_tok = int(getattr(usage, "completion_tokens", 0) or 0)
-        cost = self.estimate_cost(
-            input_tokens=in_tok, output_tokens=out_tok, model=model
+        cost = self._response_cost(
+            raw,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            model=model,
         )
+        provider_meta = self._response_provider_meta(raw, model=model)
 
         # Surface OpenAI's finish_reason verbatim. The framework doesn't
         # gate on specific strings — "stop", "length", "content_filter"
@@ -284,6 +347,7 @@ class OpenAIProvider(LLMProvider):
             finish_reason=finish,
             seed=None,
             cache_hit=False,
+            provider_meta=provider_meta,
             tool_calls=tool_calls or None,
         )
 
@@ -361,10 +425,11 @@ class OpenAIProvider(LLMProvider):
     def _heuristic_count(self, system: str, messages: list[LLMMessage]) -> int:
         if not self._heuristic_warned:
             _log.debug(
-                "OpenAIProvider.count_tokens using chars/4 heuristic "
+                f"{self._provider_label}.count_tokens using chars/4 heuristic "
                 "(tiktoken not installed). Token counts feed "
                 "budget.max_cost_usd gating; install tiktoken for "
-                "accurate accounting: pip install activegraph[openai]."
+                f"accurate accounting: pip install "
+                f"activegraph[{self._install_extra}]."
             )
             self._heuristic_warned = True
         total = len(system) + sum(len(m.content) for m in messages)

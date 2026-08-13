@@ -29,17 +29,17 @@ dependencies = ["click>=8,<9", "pydantic>=2"]
 
 [project.optional-dependencies]
 # v1.0.1 #5: the [llm] extra carries every shipped provider's SDK so a
-# single install line lights up AnthropicProvider, OpenAIProvider, and
-# (v1.11 #1) ClaudeCodeProvider. The per-provider aliases ([anthropic],
-# [openai], [claude-code]) install one at a time for cost-conscious
-# deployments. tiktoken under [openai] keeps count_tokens accurate; the
+# single install line lights up AnthropicProvider, OpenAIProvider,
+# (v1.11 #1) ClaudeCodeProvider, and OpenRouterProvider. The per-provider
+# aliases ([anthropic], [openai], [claude-code], [openrouter]) install one
+# at a time for cost-conscious deployments. tiktoken under [openai] keeps
 # heuristic fallback is documented but loud. ClaudeCodeProvider still
 # refuses to run without an explicit `allow_unenforced_generation_controls=True`
 # acknowledgement (Runtime capability-binding validation) regardless of
 # whether its SDK happens to be installed via this extra.
 llm = [
     "anthropic>=0.40",
-    "openai>=1.0",
+    "openai>=1.55.3",
     "tiktoken>=0.7",
     "pydantic>=2",
     "claude-agent-sdk==0.2.135",
@@ -47,7 +47,8 @@ llm = [
     "sniffio>=1,<2",
 ]
 anthropic = ["anthropic>=0.40", "pydantic>=2"]
-openai = ["openai>=1.0", "tiktoken>=0.7", "pydantic>=2"]
+openai = ["openai>=1.55.3", "tiktoken>=0.7", "pydantic>=2"]
+openrouter = ["openai>=1.55.3", "tiktoken>=0.7", "pydantic>=2"]
 # Runtime bridge for activegraph/baml_src's generated Python client
 # (activegraph.baml_client, output_type = "python/pydantic" in
 # activegraph/baml.toml). Not yet consumed by any LLMProvider — kept
@@ -59,8 +60,8 @@ baml = ["baml_bridge"]
 # the `claude` CLI subprocess instead of ANTHROPIC_API_KEY metered
 # billing. Genuinely different operational prerequisite (a locally
 # installed, authenticated `claude` CLI / active subscription login)
-# than "pip install + env var" — stays an explicit opt-in extra,
-# matching the baml/falkordb precedent, kept out of [llm]/[all].
+# than "pip install + env var" — it retains an explicit per-provider
+# alias while its exact dependencies are also included in [llm]/[all].
 # Pinned to EXACTLY the SDK/bundled-CLI pair this provider was verified
 # against (claude-agent-sdk 0.2.135 / bundled claude CLI 2.1.227) — a
 # pre-1.0 package caution, not a style choice: this provider relies on
@@ -83,7 +84,7 @@ prometheus = ["prometheus_client>=0.20"]
 opentelemetry = ["opentelemetry-api>=1.25", "opentelemetry-sdk>=1.25"]
 all = [
     "anthropic>=0.40",
-    "openai>=1.0",
+    "openai>=1.55.3",
     "tiktoken>=0.7",
     "pydantic>=2",
     "claude-agent-sdk==0.2.135",

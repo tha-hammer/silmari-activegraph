@@ -29,7 +29,13 @@ from activegraph import (
     behavior,
     llm_behavior,
 )
-from activegraph.llm import AnthropicProvider, ClaudeCodeProvider, OpenAIProvider
+from activegraph.llm import (
+    AnthropicProvider,
+    ClaudeCodeProvider,
+    OpenAIProvider,
+    OpenRouterProvider,
+)
+from activegraph.runtime._live import _which_shipped_provider_claims
 
 from tests._llm_helpers import ClaimList, ScriptedProvider
 
@@ -299,6 +305,74 @@ def test_openai_recognizes_model_gpt_and_reasoning_families():
     assert not p.recognizes_model("my-custom-model")
     # Fine-tunes have an ft: prefix; not recognized as base family.
     assert not p.recognizes_model("ft:gpt-4o-mini:org::id")
+
+
+def test_shipped_provider_claim_candidates_have_exact_four_provider_order(
+    monkeypatch,
+):
+    """Ownership diagnostics retain every match in stable shipped order."""
+    expected = [
+        AnthropicProvider,
+        OpenAIProvider,
+        ClaudeCodeProvider,
+        OpenRouterProvider,
+    ]
+    for provider_class in expected:
+        monkeypatch.setattr(
+            provider_class,
+            "recognizes_model",
+            lambda self, name: True,
+        )
+
+    assert (
+        _which_shipped_provider_claims("all/providers", exclude=object) == expected
+    )
+
+
+def test_shipped_provider_claim_lookup_continues_after_constructor_exception(
+    monkeypatch,
+):
+    """One unavailable candidate cannot hide a later OpenRouter match."""
+
+    def unavailable(self, *args, **kwargs):
+        raise RuntimeError("candidate unavailable")
+
+    monkeypatch.setattr(AnthropicProvider, "__init__", unavailable)
+
+    assert _which_shipped_provider_claims(
+        "openai/gpt-4o-mini", exclude=object
+    ) == [OpenRouterProvider]
+
+
+def test_openrouter_recognizes_namespaced_model_and_rejects_bare_model():
+    provider = OpenRouterProvider(client=object())
+
+    assert provider.recognizes_model("openai/gpt-4o-mini")
+    assert provider.recognizes_model("anthropic/claude-sonnet-4")
+    assert not provider.recognizes_model("gpt-4o-mini")
+    assert not provider.recognizes_model("claude-sonnet-4")
+
+
+def test_claude_model_on_openrouter_runtime_keeps_plural_owner_diagnostic():
+    @llm_behavior(
+        name="extractor",
+        on=["object.created"],
+        description="extract",
+        output_schema=ClaimList,
+        model="claude-sonnet-4-5",
+    )
+    def extractor(event, graph, ctx, llm_output):
+        pass
+
+    with pytest.raises(InvalidRuntimeConfiguration) as excinfo:
+        Runtime(Graph(), llm_provider=OpenRouterProvider(client=object()))
+
+    assert excinfo.value.context["configured_provider"] == "OpenRouterProvider"
+    assert excinfo.value.context["claiming_provider_names"] == [
+        "AnthropicProvider",
+        "ClaudeCodeProvider",
+    ]
+    assert "claimed_by_provider" not in excinfo.value.context
 
 
 # ---- (e) build_prompt without Runtime --------------------------------------

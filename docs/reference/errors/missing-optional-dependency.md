@@ -26,12 +26,16 @@ How to fix:
 
 ## The optional-extras list
 
-Three subsystems require optional packages, declared as installable
-extras in `pyproject.toml`:
+Provider and infrastructure integrations use installable extras declared
+in `pyproject.toml`:
 
 | Extra | Provides | Required package |
 |---|---|---|
-| `activegraph[llm]` | LLM behaviors (pack format requires this) | `anthropic`, `pydantic` |
+| `activegraph[anthropic]` | `AnthropicProvider` | `anthropic>=0.40` |
+| `activegraph[openai]` | `OpenAIProvider` | `openai>=1.55.3`, `tiktoken>=0.7` |
+| `activegraph[openrouter]` | `OpenRouterProvider` | `openai>=1.55.3`, `tiktoken>=0.7` |
+| `activegraph[claude-code]` | `ClaudeCodeProvider` | `claude-agent-sdk==0.2.135`, `anyio`, `sniffio` |
+| `activegraph[llm]` | All four shipped LLM providers | union of the provider packages above |
 | `activegraph[postgres]` | `PostgresEventStore` | `psycopg>=3.1` |
 | `activegraph[prometheus]` | `PrometheusMetrics` | `prometheus_client` |
 | `activegraph[opentelemetry]` | `OpenTelemetryMetrics` | `opentelemetry-api`, `opentelemetry-sdk` |
@@ -41,6 +45,7 @@ A minimal install (just `pip install activegraph`) includes the
 core runtime, the SQLite store, and the in-memory observability
 backend. The optional extras keep their dependencies off the
 critical path for users who don't need them.
+Pydantic is a core dependency, not an optional pack-format extra.
 
 ## How to diagnose
 
@@ -69,8 +74,11 @@ runs lazily, on the import inside the subsystem's lazy-import path:
   import
 - `OpenTelemetryMetrics(...)` first construction →
   `opentelemetry-api` and `opentelemetry-sdk` imports
-- `import activegraph.packs` (or any pack-related import) →
-  `pydantic` import (pack format depends on Pydantic models)
+- `AnthropicProvider.complete(...)` first live call → `anthropic` import
+- `OpenAIProvider.complete(...)` or `OpenRouterProvider.complete(...)`
+  first internally owned live call → `openai` import
+- `ClaudeCodeProvider.complete(...)` first live call → pinned
+  `claude-agent-sdk` bindings and bundled CLI validation
 
 A bare `pip install activegraph` followed by an `import activegraph`
 won't fire any of these — the error only surfaces when you actually

@@ -27,6 +27,11 @@ Switch providers with --provider openai (CONTRACT v1.0.1 #5):
 
     export OPENAI_API_KEY='your-key-here'
     python examples/babyagi.py --provider openai "Plan a 3-day intro to Rust"
+
+Or use OpenRouter:
+
+    export OPENROUTER_API_KEY='your-key-here'
+    python examples/babyagi.py --provider openrouter "Plan a 3-day intro to Rust"
 """
 from __future__ import annotations
 
@@ -46,7 +51,7 @@ from activegraph import (
     llm_behavior,
     register,
 )
-from activegraph.llm import AnthropicProvider, OpenAIProvider
+from activegraph.llm import AnthropicProvider, OpenAIProvider, OpenRouterProvider
 
 
 # Edit to taste — these ride along on every LLM call as frame constraints.
@@ -55,14 +60,22 @@ DEFAULT_CONSTRAINTS = [
     "Build incrementally on previous results rather than repeating them.",
 ]
 
-# Per-provider environment variable. The model name now comes from the
-# provider's `default_model` (v1.0.2 #1): "claude-sonnet-4-5" for
-# AnthropicProvider, "gpt-4o-mini" for OpenAIProvider. To pin a
-# different model on the @llm_behaviors below, pass `model="..."` on
-# the decorator — or assign `executor.model = "..."` after registration.
-PROVIDER_DEFAULTS = {
-    "anthropic": {"env": "ANTHROPIC_API_KEY"},
-    "openai": {"env": "OPENAI_API_KEY"},
+# One source of truth for this API-key example's provider selection,
+# construction, and credential lookup. ClaudeCodeProvider is deliberately
+# absent because it uses subscription/CLI auth rather than this flow.
+PROVIDER_SPECS = {
+    "anthropic": {
+        "factory": AnthropicProvider,
+        "env": "ANTHROPIC_API_KEY",
+    },
+    "openai": {
+        "factory": OpenAIProvider,
+        "env": "OPENAI_API_KEY",
+    },
+    "openrouter": {
+        "factory": OpenRouterProvider,
+        "env": "OPENROUTER_API_KEY",
+    },
 }
 
 
@@ -136,6 +149,14 @@ def run_babyagi(
     max_events: int = 100,
     max_seconds: int = 60,
 ) -> str:
+    try:
+        provider_spec = PROVIDER_SPECS[provider]
+    except KeyError as exc:
+        choices = ", ".join(PROVIDER_SPECS)
+        raise ValueError(
+            f"unknown LLM provider {provider!r}; choose one of: {choices}"
+        ) from exc
+
     # Decorators register on import; clear+re-register makes this function
     # safe to call multiple times — see docs/cookbook/multi-run-scripts.md.
     clear_registry()
@@ -144,9 +165,9 @@ def run_babyagi(
 
     # v1.0.2 #1: the @llm_behaviors above omit model=, so the runtime
     # resolves each provider's default_model at registration time —
-    # "claude-sonnet-4-5" for Anthropic, "gpt-4o-mini" for OpenAI. No
-    # per-provider model table needed in this example.
-    llm_provider = OpenAIProvider() if provider == "openai" else AnthropicProvider()
+    # "claude-sonnet-4-5" for Anthropic, "gpt-4o-mini" for OpenAI, and
+    # "openrouter/free" for OpenRouter. No model table is needed here.
+    llm_provider = provider_spec["factory"]()
 
     os.makedirs("traces", exist_ok=True)
     trace_path = f"traces/babyagi-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.sqlite"
@@ -165,12 +186,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="BabyAGI on Active Graph.")
     parser.add_argument("objective", nargs="?",
                         default="Plan a 3-day intro to Rust programming")
-    parser.add_argument("--provider", choices=["anthropic", "openai"],
+    parser.add_argument("--provider", choices=tuple(PROVIDER_SPECS),
                         default="anthropic",
                         help="LLM provider; defaults to anthropic")
     args = parser.parse_args()
 
-    env = PROVIDER_DEFAULTS[args.provider]["env"]
+    env = PROVIDER_SPECS[args.provider]["env"]
     if not os.environ.get(env):
         print(
             f"{env} environment variable not set. Set it with:\n"

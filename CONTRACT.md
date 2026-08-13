@@ -8563,3 +8563,91 @@ Tested against `claude-agent-sdk==0.2.135` and `claude` CLI `2.1.227`
 exactly — `_load_sdk_bindings()` checks the installed SDK version at
 call time and refuses (terminal `llm.request_error`) to run against
 any other.
+
+## v1.11 #2. `OpenRouterProvider` — routed completions with returned-cost accounting
+
+`activegraph/llm/openrouter.py` adds the fourth concrete shipped
+`LLMProvider`. It is exported from `activegraph.llm` only and is directly
+injected through `Runtime(..., llm_provider=OpenRouterProvider())`; there is
+no provider registry and no change to the `LLMProvider` Protocol.
+
+**Construction and ownership.** The keyword-only constructor records
+`api_key_env`, an optional injected client, an ActiveGraph-owned per-million
+pricing table, native-structured-output prefixes, exact `base_url`, and
+optional OpenRouter attribution values. Construction performs no environment
+read, SDK import, or I/O. `pricing=None` and `{}` both mean an empty table;
+nested entries are copied and validated as finite non-negative decimals.
+Internally owned OpenAI SDK clients are lazy, cached for ordinary synchronous
+use, and constructed with the explicit key, exact base URL, optional
+`HTTP-Referer`/`X-OpenRouter-Title` headers, and `max_retries=0`. An injected
+client bypasses all of that; its retries, concurrency, closing, and lifecycle
+are caller-owned. The Protocol adds no `close()`, so internally owned cleanup
+is not deterministic framework behavior.
+
+**Identity and capabilities.** The default is `openrouter/free`. Model-owner
+diagnostics recognize exactly one optional `~`, a lowercase bounded owner,
+`/`, a lowercase bounded model slug, and one optional `:variant`, with
+single punctuation separators (`.`, `_`, `-`). This is an ownership policy,
+not a catalog allowlist; unrecognized future forms still pass through when no
+other shipped provider claims them. Capabilities declare enforceable output
+and sampling controls, estimated input counts, unlimited per-completion tool
+cardinality, and no acknowledgement requirement. Consequently every binding
+to a hard `max_cost_usd` Runtime budget is rejected at construction,
+registry initialization, or late registration — before `count_tokens`,
+`estimate_cost`, or provider access. Non-cost budgets remain supported.
+
+**Request contract.** Every call sends `model`, translated messages,
+per-HTTP-attempt `timeout`, `max_completion_tokens`, `temperature`, optional
+`top_p < 1.0`, and `provider.require_parameters=true`; it never sends the
+deprecated `max_tokens`. Tools and caller-enabled native response schemas are
+merged without removing that routing policy. Native structured output is
+enabled only for explicitly supplied model prefixes. `timeout_seconds` is not
+an end-to-end Runtime deadline or cancellation guarantee, and OpenRouter's
+server-side provider fallback happens inside one SDK request.
+
+**Cost contract.** Direct estimates strip one optional leading `~`, price the
+longest boundary-safe configured family in USD per million tokens, return zero
+for `openrouter/free` and recognized `:free` names, and return
+`Decimal("Infinity")` for every unknown paid model including zero-token input.
+A completed response has no estimate fallback: `usage.cost` must convert to a
+finite non-negative non-boolean `Decimal`. Valid responses record
+`provider_meta={"cost_source": "openrouter_usage"}`. Missing, null, boolean,
+malformed, negative, NaN, or infinite values raise terminal
+`llm.request_error` with only `model`, `field="usage.cost"`, `value_type`, and
+optional bounded `finish_reason`. Exact accounting therefore applies only to
+valid completed responses. Failed, timed-out, cancelled, or transport-lost
+work may still be billed without returning usage; Runtime records no invented
+cost and cannot enforce a hard monetary ceiling across those unobservable
+charges.
+
+**Error contract.** Response validation runs after the SDK exception catch and
+before content, tools, schema, usage, or cost extraction. Canonical
+`choices[0].error` wins over a defensive top-level `error`; a bare
+`finish_reason="error"` is a transient malformed-provider response. A fixed
+immutable table classifies known `metadata.error_type` strings first; unknown
+types fall through once to shared `classify_provider_status`. HTTP 408 is
+transient `llm.network_error`; auth, rate limit, other 4xx, 5xx, and missing
+status retain the shared taxonomy. In-band payloads are bounded scalar fields
+only (`model`, normalized `status_code`, optional `error_type`,
+`provider_code`, `finish_reason`) and never retain provider prose, raw response
+objects, mappings, headers, or exceptions.
+
+**Ownership and Runtime closure.** `_which_shipped_provider_claims` lazily
+checks every candidate in the exact order Anthropic, OpenAI, Claude Code,
+OpenRouter, retaining all matches and continuing after one constructor fails.
+The public Runtime path remains the orchestrator: one admitted LLM behavior
+can call OpenRouter, execute a tool, issue the continuation completion, emit
+the exact request/response/tool causal chain, and stamp the successful request
+and contributing tool request into graph provenance.
+
+`max_llm_calls` is defined as an LLM **behavior-invocation** budget, not a
+provider-turn or transport-request budget. Admission occurs while capacity
+remains; the invocation is charged exactly once on exit (including failure or
+strict-replay divergence), allowing its internal tool loop to finish
+atomically. A limit of one therefore permits the minimum useful multi-turn
+tool flow while preventing a second LLM behavior invocation.
+
+The supported minimum OpenAI Python SDK is `1.55.3` with HTTPX 0.28.x. Literal
+HTTP compatibility tests at that exact floor prove preservation of
+`usage.cost`, choice/top-level error extensions, and `finish_reason="error"`;
+CI installs `[dev,openrouter]` and has a separate exact-minimum lane.

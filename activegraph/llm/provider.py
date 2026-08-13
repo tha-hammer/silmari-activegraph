@@ -1,8 +1,9 @@
 """The `LLMProvider` Protocol every provider implements.
 
 CONTRACT v0.6 #3, extended in v0.7, additively widened in v1.0.2 #1.
-Narrow, explicit, keyword-only. Shipped reference implementations are
-`AnthropicProvider` and `OpenAIProvider`. Tests use
+Narrow, explicit, keyword-only. Shipped concrete implementations are
+`AnthropicProvider`, `OpenAIProvider`, `ClaudeCodeProvider`, and
+`OpenRouterProvider`. Tests use
 `RecordedLLMProvider` + `RecordingLLMProvider`. The demo ships its
 own scripted provider.
 

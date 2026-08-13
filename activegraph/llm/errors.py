@@ -141,28 +141,30 @@ def _llm_prose_auth_error(message: str) -> tuple[str, str, str]:
         "`llm.network_error` and retried with backoff — CONTRACT v1.3 #3 "
         "split them out.",
         "Check the provider API key in the environment "
-        "(`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`): is it set in THIS "
-        "process's environment, is it current (keys get rotated and "
-        "revoked), and does it have access to the requested model? The "
-        "provider dashboard's API-keys page is the canonical source.",
+        "(`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY`): "
+        "is it set in THIS process's environment, is it current (keys get "
+        "rotated and revoked), and does it have access to the requested "
+        "model? The provider dashboard's API-keys page is the canonical "
+        "source.",
     )
 
 
 def _llm_prose_request_error(message: str) -> tuple[str, str, str]:
     return (
-        f"The LLM provider rejected the request as invalid:\n  {message}",
-        "4xx request failures other than auth and rate-limit (HTTP "
-        "400/404/422 — malformed parameters, unknown model, oversize "
-        "payload) are terminal: the same bytes will fail the same way "
-        "on every retry, so the runtime fails immediately instead of "
-        "burning the retry budget. Before v1.3 these were classified as "
-        "`llm.network_error` and retried with backoff — CONTRACT v1.3 #3 "
-        "split them out.",
-        "The provider's message above names the offending parameter. "
-        "Common causes: a model name the account can't access, a "
-        "sampling parameter the model family rejects, or a request "
-        "exceeding the model's context window. Fix the "
-        "`@llm_behavior(...)` configuration and re-run.",
+        f"The LLM provider rejected the request or returned a completed "
+        f"response whose required accounting envelope was unusable:\n  {message}",
+        "Non-auth, non-rate-limit 4xx request failures (HTTP 400/404/422) "
+        "are terminal because retrying the same bytes cannot succeed. A "
+        "completed response with missing or invalid provider accounting "
+        "is also terminal: the provider may already have billed it, so an "
+        "automatic retry could duplicate both work and cost. The runtime "
+        "therefore fails immediately instead of spending its retry budget.",
+        "For a rejected outbound request, fix the model, sampling controls, "
+        "context size, or other `@llm_behavior(...)` configuration named "
+        "by the provider. For a completed-envelope failure, inspect "
+        "`payload_extras.field` / `value_type` (for example `usage.cost`) "
+        "and the provider's accounting/API status before re-running; do not "
+        "assume the failed attempt was free.",
     )
 
 

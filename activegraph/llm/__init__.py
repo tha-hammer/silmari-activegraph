@@ -13,6 +13,9 @@ Public surface:
                            subscription instead of ANTHROPIC_API_KEY
                            metered billing. Capability-limited — see
                            its module docstring (v1.11 #1)
+  OpenRouterProvider     — fourth concrete provider; OpenAI-compatible
+                           OpenRouter Chat Completions with strict
+                           routed-parameter and returned-cost policy
   EmbeddingCache         — content-keyed replay cache for Runtime.embed
   EmbeddingProvider      — Protocol for text-embedding providers
   HashEmbeddingProvider  — deterministic, dependency-free test double
@@ -46,6 +49,7 @@ from activegraph.llm.embedding_cache import EmbeddingCache
 from activegraph.llm.errors import LLMBehaviorError, MissingProviderError
 from activegraph.llm.native import native_schema_compatible
 from activegraph.llm.openai import OpenAIProvider
+from activegraph.llm.openrouter import OpenRouterProvider
 from activegraph.llm.parsing import parse_structured_response
 from activegraph.llm.prompt import (
     AssembledPrompt,
@@ -80,6 +84,7 @@ __all__ = [
     "LLMResponse",
     "MissingProviderError",
     "OpenAIProvider",
+    "OpenRouterProvider",
     "RecordedLLMProvider",
     "RecordingLLMProvider",
     "ToolCall",

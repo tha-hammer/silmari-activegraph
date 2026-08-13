@@ -44,6 +44,32 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
   `AnthropicProvider` now also sources from (additive, behavior-
   preserving — its own test suite is unmodified).
 
+- **`OpenRouterProvider`** (CONTRACT v1.11 #2). A fourth concrete,
+  directly injectable `LLMProvider` using OpenRouter's OpenAI-compatible
+  non-streaming Chat Completions endpoint (`pip install
+  "activegraph[openrouter]"`). It defaults to `openrouter/free`, recognizes
+  bounded `owner/model[:variant]` names for ownership diagnostics, sends
+  `max_completion_tokens` plus `provider.require_parameters=true` on every
+  call, disables hidden SDK retries on internally owned clients, and accepts
+  optional OpenRouter attribution headers. Completed calls take exact cost
+  only from finite non-negative `usage.cost`, with explicit provenance;
+  invalid accounting envelopes are terminal and bounded. Choice-level typed
+  in-band errors are classified before partial output, with defensive
+  top-level and shared numeric fallbacks (HTTP 408 is transient). Local input
+  token counts are declared estimates, so hard `max_cost_usd` bindings are
+  refused before tokenization or I/O. The OpenAI SDK floor is now `1.55.3`,
+  verified through literal HTTP mock transport in a dedicated exact-minimum CI
+  lane. Runtime ownership diagnostics retain all matches in exact order:
+  Anthropic, OpenAI, Claude Code, OpenRouter.
+
+- **LLM invocation-budget atomicity.** `max_llm_calls` counts admitted
+  `@llm_behavior` invocations, not provider turns. An admitted invocation may
+  complete its Runtime-owned tool loop (for example, tool request followed by
+  a final provider response) while consuming exactly one LLM-call budget unit;
+  the next behavior invocation is still blocked at the limit. Previously a
+  limit of one was consumed before the first turn and the same invocation
+  immediately failed as exhausted without calling the provider.
+
 ## [1.10.0] — 2026-07-12
 
 Runtime legibility and cooperative-host round (CONTRACT v1.10 #1–#3): the behavior-frame

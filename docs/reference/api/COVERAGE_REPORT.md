@@ -13,6 +13,7 @@ Classification: ``full`` (≥3 lines OR has Args/Returns/Raises/Examples), ``one
 - [x] `AmbiguousBehaviorError`
 - [x] `AmbiguousToolError`
 - [x] `ApprovalNotFoundError`
+- [x] `AuthorityDecision`
 - [x] `Behavior`
 - [x] `BehaviorFailure`
 - [x] `BehaviorNotFoundError`
@@ -21,6 +22,7 @@ Classification: ``full`` (≥3 lines OR has Args/Returns/Raises/Examples), ``one
 - [x] `ConfigurationError`
 - [x] `CorruptedEventPayloadError`
 - [x] `DeliveryContext`
+- [ ] `DeliveryMode` — **missing**
 - [x] `DevOverride`
 - [x] `Diff`
 - [x] `DiscoveredPack`
@@ -93,6 +95,8 @@ Classification: ``full`` (≥3 lines OR has Args/Returns/Raises/Examples), ``one
 - [x] `RelationType`
 - [x] `ReplayDivergenceError`
 - [x] `ReplayError`
+- [x] `ReservedFieldError`
+- [x] `RunQuantumResult`
 - [x] `RunRecord`
 - [x] `Runtime`
 - [x] `RuntimeContextRequiredError`
@@ -133,6 +137,10 @@ Classification: ``full`` (≥3 lines OR has Args/Returns/Raises/Examples), ``one
 ## Ring 0 — activegraph.packs.diligence (public surface, target 100%)
 
 - [x] `DiligenceSettings`
+- [x] `pack`
+
+## Ring 0 — activegraph.packs.repair (public surface, target 100%)
+
 - [x] `pack`
 
 ## Ring 1 — importable but not in `__all__` (target 80% not-missing)
@@ -178,6 +186,10 @@ Classification: ``full`` (≥3 lines OR has Args/Returns/Raises/Examples), ``one
 - [x] `CachedEntry` — **one-line**
 - [ ] `LLMCache` — **missing**
 
+### `activegraph.llm.claude_code`
+
+- [x] `ClaudeCodeProvider`
+
 ### `activegraph.llm.embedding`
 
 - [x] `EmbeddingProvider`
@@ -198,6 +210,10 @@ Classification: ``full`` (≥3 lines OR has Args/Returns/Raises/Examples), ``one
 
 - [x] `OpenAIProvider`
 
+### `activegraph.llm.openrouter`
+
+- [x] `OpenRouterProvider`
+
 ### `activegraph.llm.parsing`
 
 - [x] `parse_structured_response`
@@ -216,6 +232,8 @@ Classification: ``full`` (≥3 lines OR has Args/Returns/Raises/Examples), ``one
 ### `activegraph.llm.provider`
 
 - [x] `LLMProvider`
+- [x] `LLMProviderCapabilities`
+- [x] `get_llm_provider_capabilities`
 
 ### `activegraph.llm.recorded`
 
@@ -232,6 +250,7 @@ Classification: ``full`` (≥3 lines OR has Args/Returns/Raises/Examples), ``one
 
 - [x] `build_tool_name_map`
 - [x] `classify_provider_exception`
+- [x] `classify_provider_status`
 - [x] `restore_tool_name`
 - [x] `sanitize_tool_name`
 
@@ -310,7 +329,7 @@ Classification: ``full`` (≥3 lines OR has Args/Returns/Raises/Examples), ``one
 
 ### `activegraph.packs.manifest`
 
-- [x] `CapabilityDecl` — **one-line**
+- [x] `CapabilityDecl`
 - [x] `PackManifest`
 - [x] `PackManifestError`
 - [x] `compute_bundle_hash`
@@ -319,6 +338,26 @@ Classification: ``full`` (≥3 lines OR has Args/Returns/Raises/Examples), ``one
 - [x] `verify_bundle_hash`
 - [x] `verify_content_hash`
 - [x] `verify_surface`
+
+### `activegraph.packs.repair.behaviors`
+
+- [x] `PatchAuthorOutput`
+
+### `activegraph.packs.repair.object_types`
+
+- [x] `Finding` — **one-line**
+- [x] `PatchProposal` — **one-line**
+- [x] `RepairMemo` — **one-line**
+- [x] `Verification` — **one-line**
+
+### `activegraph.packs.repair.tools`
+
+- [x] `ApplyPatchInput`
+- [x] `ApplyPatchOutput`
+- [x] `ReadSourceInput`
+- [x] `ReadSourceOutput`
+- [x] `RunCheckInput`
+- [x] `RunCheckOutput`
 
 ### `activegraph.packs.scaffold`
 
@@ -331,10 +370,21 @@ Classification: ``full`` (≥3 lines OR has Args/Returns/Raises/Examples), ``one
 - [x] `track_runtime` — **one-line**
 - [x] `validate_behavior_against_live_runtimes`
 
+### `activegraph.runtime.authority`
+
+- [x] `evaluate_action_authority`
+- [x] `validate_ceiling`
+
 ### `activegraph.runtime.behavior_graph`
 
 - [ ] `BehaviorGraph` — **missing**
 - [ ] `Counters` — **missing**
+
+### `activegraph.runtime.context_reads`
+
+- [x] `ReadRecorder`
+- [x] `TracedView`
+- [x] `context_read_payload`
 
 ### `activegraph.runtime.dev_override`
 
@@ -500,13 +550,17 @@ Classification: ``full`` (≥3 lines OR has Args/Returns/Raises/Examples), ``one
 
 ### Ring 0 — public surface (target 100%)
 
-- **122/122 fully documented (100.0%)** — gap to 100% full: **0 symbols**
-- **122/122 not-missing (100.0%)** — gap to 100% not-missing: **0 symbols** (these need `docstring_gaps.toml` exemptions for the gate to pass)
+- **126/127 fully documented (99.2%)** — gap to 100% full: **1 symbols**
+- **126/127 not-missing (99.2%)** — gap to 100% not-missing: **1 symbols** (these need `docstring_gaps.toml` exemptions for the gate to pass)
+
+Ring 0 missing-entirely (gate exemptions):
+
+- `activegraph.DeliveryMode`
 
 ### Ring 1 — importable but not in `__all__` (target 80% not-missing)
 
-- **98/179 fully documented (54.7%)** — v1.1 burndown target is 100% full
-- **162/179 not-missing (90.5%)** — gate threshold is 80% not-missing
+- **116/200 fully documented (58.0%)** — v1.1 burndown target is 100% full
+- **183/200 not-missing (91.5%)** — gate threshold is 80% not-missing
 
 Ring 1 is **above** the 80% gate threshold. The gate enforces the threshold; individual missing-Ring-1 symbols are v1.1 burndown items, not gate exemptions.
 

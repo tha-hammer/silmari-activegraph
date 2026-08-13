@@ -114,6 +114,8 @@ def test_classify_provider_status_matches_the_exception_based_ladder():
     assert classify_provider_status(429) == "llm.rate_limited"
     assert classify_provider_status(401) == "llm.auth_error"
     assert classify_provider_status(403) == "llm.auth_error"
+    assert classify_provider_status(408) == "llm.network_error"
+    assert classify_provider_status(409) == "llm.request_error"
     assert classify_provider_status(404) == "llm.request_error"
     assert classify_provider_status(422) == "llm.request_error"
     assert classify_provider_status(500) == "llm.network_error"

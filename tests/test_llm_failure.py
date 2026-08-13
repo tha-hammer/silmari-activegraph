@@ -211,6 +211,29 @@ def test_non_transient_llm_error_does_not_retry():
     assert failed.payload["reason"] == "llm.parse_error"
 
 
+def test_request_error_prose_covers_rejected_request_and_completed_envelope():
+    outbound = LLMBehaviorError(
+        "llm.request_error", "provider rejected max_completion_tokens"
+    )
+    completed = LLMBehaviorError(
+        "llm.request_error", "completed response has invalid usage.cost"
+    )
+
+    for error in (outbound, completed):
+        assert "request" in error.what_failed.lower() or "response" in error.what_failed.lower()
+        assert "completed response" in error.why.lower()
+        assert "usage" in error.how_to_fix.lower()
+        assert "retry" in error.why.lower()
+
+
+def test_auth_error_recovery_guidance_names_every_api_key_provider():
+    error = LLMBehaviorError("llm.auth_error", "credentials rejected")
+
+    assert "ANTHROPIC_API_KEY" in error.how_to_fix
+    assert "OPENAI_API_KEY" in error.how_to_fix
+    assert "OPENROUTER_API_KEY" in error.how_to_fix
+
+
 def test_schema_violation_becomes_behavior_failed():
     _seed_doc()
 

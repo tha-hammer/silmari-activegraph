@@ -70,19 +70,32 @@ capability.
 
 ```bash
 pip install activegraph                    # core runtime + SQLite store + Diligence pack
-pip install "activegraph[llm]"             # Anthropic + OpenAI + Claude Code providers
+pip install "activegraph[llm]"             # all four shipped LLM providers
 pip install "activegraph[anthropic]"       # Anthropic provider only
 pip install "activegraph[openai]"          # OpenAI provider only (+ tiktoken)
 pip install "activegraph[claude-code]"     # ClaudeCodeProvider — Claude subscription billing
+pip install "activegraph[openrouter]"      # OpenRouterProvider only (+ tiktoken)
 pip install "activegraph[postgres]"        # Postgres-backed event store
 pip install "activegraph[prometheus]"      # Prometheus metrics
 pip install "activegraph[opentelemetry]"   # OpenTelemetry metrics
 pip install "activegraph[all]"             # everything
 ```
 
-`AnthropicProvider`/`OpenAIProvider` expose the same `LLMProvider`
-Protocol surface; swap one for the other without touching
-`@llm_behavior` definitions. `ClaudeCodeProvider` bills against a
+`AnthropicProvider`, `OpenAIProvider`, and `OpenRouterProvider` expose
+the same full-generation-control `LLMProvider` surface; swap the
+injected instance without reshaping `@llm_behavior` definitions.
+`OpenRouterProvider` uses `OPENROUTER_API_KEY`, defaults to
+`openrouter/free`, requires routed endpoints to honor supplied
+parameters, disables hidden SDK retries, and records exact returned
+`usage.cost` for valid completed responses. Its local input count is an
+estimate, so `Runtime` refuses to bind it to a hard `max_cost_usd`
+budget; failed or timed-out work may be billed without returning usage.
+`timeout_seconds` is a per-HTTP-attempt timeout, not an end-to-end
+deadline or cancellation guarantee. Internally created clients are
+lazy/cached for ordinary synchronous use; injected-client retries,
+thread safety, and cleanup remain caller-owned.
+
+`ClaudeCodeProvider` bills against a
 Claude Max/Pro/Team/Enterprise subscription instead of a metered API
 key — it's a **capability-limited** provider (no `max_tokens`/
 `temperature`/`top_p` enforcement, 0-or-1 tool calls per turn),
@@ -90,9 +103,9 @@ enforced by `Runtime` refusing to bind it to a deterministic behavior
 or a hard cost budget unless constructed with
 `allow_unenforced_generation_controls=True`. The
 [LLM providers reference](https://docs.activegraph.ai/reference/llm-providers/)
-covers the full side-by-side surface, including tool use,
-provider-specific token counting, and `ClaudeCodeProvider`'s
-capability-limited contract.
+covers all four providers, including OpenRouter model grammar,
+request/cost/error policy, tool use, provider-specific token counting,
+and `ClaudeCodeProvider`'s capability-limited contract.
 
 Python 3.11+. Two hard dependencies (`click` for the CLI, `pydantic`
 for the pack format); persistence backends and provider integrations

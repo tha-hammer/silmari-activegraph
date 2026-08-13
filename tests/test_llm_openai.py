@@ -14,6 +14,7 @@ call wire shape.
 from __future__ import annotations
 
 import sys
+import inspect
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -77,6 +78,95 @@ def _client_returning(text: str, *, in_tok: int = 10, out_tok: int = 5):
         text, in_tok=in_tok, out_tok=out_tok
     )
     return client
+
+
+# ---- protected subclass boundary ------------------------------------------
+
+
+def test_protected_hook_signatures_and_base_policy_are_characterized():
+    provider = OpenAIProvider(client=object())
+
+    assert list(inspect.signature(OpenAIProvider._sdk_client_kwargs).parameters) == [
+        "self",
+        "api_key",
+    ]
+    assert provider._sdk_client_kwargs(api_key="secret") == {}
+
+    ordinary = provider._request_policy_kwargs(
+        model="gpt-4o-mini",
+        max_tokens=64,
+        temperature=0.7,
+        top_p=0.9,
+    )
+    assert ordinary == {"max_tokens": 64, "temperature": 0.7, "top_p": 0.9}
+    assert provider._request_policy_kwargs(
+        model="gpt-4o-mini",
+        max_tokens=64,
+        temperature=0.7,
+        top_p=1.0,
+    ) == {"max_tokens": 64, "temperature": 0.7}
+    assert provider._request_policy_kwargs(
+        model="o3-mini",
+        max_tokens=64,
+        temperature=0.7,
+        top_p=0.9,
+    ) == {"max_completion_tokens": 64}
+
+    raw = _raw_response("ok", in_tok=2, out_tok=3)
+    assert provider._validate_response(raw, model="gpt-4o-mini") is None
+    assert provider._response_cost(
+        raw,
+        input_tokens=2,
+        output_tokens=3,
+        model="gpt-4o-mini",
+    ) == provider.estimate_cost(
+        input_tokens=2,
+        output_tokens=3,
+        model="gpt-4o-mini",
+    )
+    assert provider._response_provider_meta(raw, model="gpt-4o-mini") == {}
+
+
+def test_base_lazy_client_still_constructs_sdk_with_no_explicit_kwargs(
+    monkeypatch,
+):
+    built = []
+    live_client = object()
+
+    def fake_openai(**kwargs):
+        built.append(kwargs)
+        return live_client
+
+    monkeypatch.setenv("OPENAI_API_KEY", "base-key")
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=fake_openai))
+    provider = OpenAIProvider()
+
+    assert provider._client() is live_client
+    assert provider._client() is live_client
+    assert built == [{}]
+
+
+def test_validation_hook_runs_outside_sdk_exception_wrapper_and_before_parsing():
+    class _ValidationFailure(OpenAIProvider):
+        def _validate_response(self, raw, *, model):
+            raise LLMBehaviorError(
+                "llm.request_error", "invalid completed envelope"
+            )
+
+    provider = _ValidationFailure(client=_client_returning("not json"))
+    with pytest.raises(LLMBehaviorError) as exc:
+        provider.complete(
+            system="",
+            messages=[LLMMessage(role="user", content="u")],
+            model="gpt-4o-mini",
+            max_tokens=64,
+            temperature=0.0,
+            top_p=1.0,
+            output_schema=_Out,
+            timeout_seconds=30,
+        )
+    assert exc.value.reason == "llm.request_error"
+    assert exc.value.payload_extras == {}
 
 
 def test_complete_parses_structured_output():

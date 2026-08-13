@@ -294,8 +294,14 @@ def _which_shipped_provider_claims(name: str, *, exclude: type) -> list[type]:
     from activegraph.llm.anthropic import AnthropicProvider
     from activegraph.llm.claude_code import ClaudeCodeProvider
     from activegraph.llm.openai import OpenAIProvider
+    from activegraph.llm.openrouter import OpenRouterProvider
 
-    candidates = [AnthropicProvider, OpenAIProvider, ClaudeCodeProvider]
+    candidates = [
+        AnthropicProvider,
+        OpenAIProvider,
+        ClaudeCodeProvider,
+        OpenRouterProvider,
+    ]
     matches: list[type] = []
     for cls in candidates:
         if cls is exclude:

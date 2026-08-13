@@ -1510,7 +1510,6 @@ class Runtime:
         """
 
         self.budget.consume("max_behavior_calls")
-        self.budget.consume("max_llm_calls")
 
         # v1.10 #1: one recorder per execution when tracing is on.
         # `plain_view` stays unwrapped so recording the prompt's object
@@ -1556,14 +1555,23 @@ class Runtime:
         # it. A propagating exception (ReplayDivergenceError) is a
         # strict-replay abort, not a commit: it skips the emission by
         # skipping this line.
-        self._invoke_llm_body(
-            b,
-            event,
-            bgraph,
-            ctx,
-            recorder=recorder,
-            plain_view=plain_view,
-        )
+        # The outer dispatch loop admitted this behavior while the LLM-call
+        # budget still had capacity. Count that one invocation only after its
+        # body finishes so the turn loop's own budget checks do not mistake
+        # its second provider turn for a second behavior invocation. The
+        # finally preserves the existing rule that failed/divergent
+        # invocations still consume one call.
+        try:
+            self._invoke_llm_body(
+                b,
+                event,
+                bgraph,
+                ctx,
+                recorder=recorder,
+                plain_view=plain_view,
+            )
+        finally:
+            self.budget.consume("max_llm_calls")
         self._emit_context_read(b.name, event.id, started_evt.id, recorder)
 
     def _invoke_llm_body(

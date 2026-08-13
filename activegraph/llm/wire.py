@@ -124,6 +124,8 @@ def classify_provider_status(status_code: Optional[int]) -> str:
         return "llm.rate_limited"
     if status_code in (401, 403):
         return "llm.auth_error"
+    if status_code == 408:
+        return "llm.network_error"
     if status_code is not None and 400 <= status_code < 500:
         return "llm.request_error"
     return "llm.network_error"

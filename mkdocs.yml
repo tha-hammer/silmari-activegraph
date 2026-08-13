@@ -129,7 +129,7 @@ plugins:
           - cookbook/migration-from-v0-7.md: Upgrade runbook for code and saved runs across milestones from v0.7 onward.
         Reference:
           - reference/cli.md: Full `activegraph` CLI reference — `quickstart`, `run`, `inspect`, `fork`, `pack`, and every flag.
-          - reference/llm-providers.md: AnthropicProvider and OpenAIProvider side-by-side surface; recorded-fixture replay, model defaults, limitations.
+          - reference/llm-providers.md: Four shipped LLM providers — API-key, subscription, and OpenRouter routing/cost surfaces; capabilities, replay, defaults, and limitations.
           - reference/reason-codes.md: Stable reason-code taxonomy for behavior.failed, tool.responded errors, and failed LLM attempts.
           - reference/errors.md: Catalog overview of every error class — when it fires, what triggers it, where to look.
           - reference/errors/*.md

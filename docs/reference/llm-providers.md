@@ -1,20 +1,23 @@
 # LLM providers
 
-Active Graph ships three concrete `LLMProvider` implementations:
-`AnthropicProvider` and `OpenAIProvider` expose identical Protocol
-surface — `complete()`, `estimate_cost()`, `count_tokens()` — so a
-runtime swapping one for the other doesn't reshape any call site.
+Active Graph ships four concrete `LLMProvider` implementations:
+`AnthropicProvider`, `OpenAIProvider`, `ClaudeCodeProvider`, and
+`OpenRouterProvider`. All expose the same Protocol surface —
+`complete()`, `estimate_cost()`, `count_tokens()` — so a runtime
+swapping the injected provider doesn't reshape any call site.
 `ClaudeCodeProvider` is Protocol-conformant in shape too, but is a
 **capability-limited provider**, enforced by `Runtime` via the
 additive `LLMProviderCapabilities` descriptor — see its own section
-below before using it.
+below before using it. OpenRouter has estimated input counts and a
+corresponding hard-cost-budget restriction, also documented below.
 
 ```python
 from activegraph import Graph, Runtime
-from activegraph.llm import AnthropicProvider, OpenAIProvider
+from activegraph.llm import AnthropicProvider, OpenAIProvider, OpenRouterProvider
 
 rt = Runtime(Graph(), llm_provider=AnthropicProvider())  # or:
 rt = Runtime(Graph(), llm_provider=OpenAIProvider())
+rt = Runtime(Graph(), llm_provider=OpenRouterProvider())
 ```
 
 ## Installing
@@ -24,11 +27,12 @@ Pick the extra(s) you need. They install cleanly and don't conflict.
 ```bash
 pip install "activegraph[anthropic]"    # AnthropicProvider only
 pip install "activegraph[openai]"       # OpenAIProvider only
+pip install "activegraph[openrouter]"   # OpenRouterProvider only
 pip install "activegraph[claude-code]"  # ClaudeCodeProvider only
-pip install "activegraph[llm]"          # all three shipped providers
+pip install "activegraph[llm]"          # all four shipped providers
 ```
 
-The `[openai]` extra also pulls in `tiktoken` so client-side token
+The `[openai]` and `[openrouter]` extras pull in `tiktoken` so client-side token
 counting is accurate; see the count_tokens row below for what
 happens when tiktoken is missing. `claude-agent-sdk` is exact-pinned
 (`==0.2.135`) wherever it appears — `[claude-code]`, `[llm]`, and
@@ -41,12 +45,13 @@ to be installed.
 
 ## API keys
 
-`AnthropicProvider`/`OpenAIProvider` read their API key from the
+The three API-key providers read their key from the
 environment, never from code or a checked-in config:
 
 ```bash
 export ANTHROPIC_API_KEY='...'
 export OPENAI_API_KEY='...'
+export OPENROUTER_API_KEY='...'
 ```
 
 Override the env-var name via the `api_key_env=` constructor kwarg
@@ -67,7 +72,8 @@ def extractor(event, graph, ctx, llm_output):
 ```
 
 With `AnthropicProvider()` this resolves to `"claude-sonnet-4-5"`;
-with `OpenAIProvider()` it resolves to `"gpt-4o-mini"`. The
+with `OpenAIProvider()` it resolves to `"gpt-4o-mini"`; with
+`OpenRouterProvider()` it resolves to `"openrouter/free"`. The
 runtime stamps the resolved name onto the behavior at
 registration time (inside `Runtime(...)`'s first registry
 materialization), so swapping providers is a one-line change:
@@ -75,6 +81,7 @@ materialization), so swapping providers is a one-line change:
 ```python
 rt = Runtime(Graph(), llm_provider=OpenAIProvider())  # gpt-4o-mini
 rt = Runtime(Graph(), llm_provider=AnthropicProvider())  # claude-sonnet-4-5
+rt = Runtime(Graph(), llm_provider=OpenRouterProvider())  # openrouter/free
 ```
 
 Pass `model="..."` on the decorator to override:
@@ -94,6 +101,8 @@ the name against each shipped provider's `recognizes_model()`:
 | --- | --- |
 | `AnthropicProvider` | `claude-` |
 | `OpenAIProvider` | `gpt-`, `o1-`, `o3-`, `o4-` |
+| `ClaudeCodeProvider` | `claude-` |
+| `OpenRouterProvider` | bounded `owner/model[:variant]` grammar; optional leading `~` |
 
 If the configured provider doesn't recognize the name but a
 *different* shipped provider does, the runtime raises
@@ -111,19 +120,77 @@ by design: only *recognized* cross-provider mismatches fire.
 
 ## Side-by-side
 
-| Aspect | `AnthropicProvider` | `OpenAIProvider` |
-| --- | --- | --- |
-| `default_model` (used when `@llm_behavior` omits `model=`) | `"claude-sonnet-4-5"` | `"gpt-4o-mini"` |
-| Recognized model families (per `recognizes_model()`) | `claude-*` | `gpt-*`, `o1-*`, `o3-*`, `o4-*` |
-| API key env | `ANTHROPIC_API_KEY` | `OPENAI_API_KEY` |
-| SDK | `anthropic>=0.40` | `openai>=1.0` |
-| Structured output | Instruction-based by default: schema + example instance embedded in the system prompt by [`build_system_prompt`](api/index.md); provider parses JSON via the shared `parse_structured_response` helper. Opt into native constrained decoding with `Runtime(native_structured_output=True)` — sends Messages API `output_config` on supported `claude-*` families | Same default path. Native mode sends Chat Completions `response_format={"type": "json_schema", ..., "strict": true}` on supported families (`gpt-4o`, `gpt-4.1`, `gpt-5`, `o3`, `o4`) |
-| `count_tokens()` | Server-side via `messages.count_tokens` (1 roundtrip per call when `budget.max_cost_usd` is set and no cache hit) | Client-side via `tiktoken` when available; char/4 heuristic fallback with a one-time debug log if tiktoken is missing |
-| Tool use | Supported (`Tool.to_definition()` emits Anthropic shape) | Supported. The provider translates framework/Anthropic-shaped tool definitions into OpenAI Chat Completions `function` tools and extracts returned `tool_calls` into the shared `ToolCall` shape |
-| Tool-name wire rewriting (v1.3) | Pack-scoped canonical names (`pack.tool`) are outside the API's `[a-zA-Z0-9_-]` alphabet; the provider rewrites `.` → `__` on the wire and maps returned calls back, so the runtime and the event log only ever see canonical names | Same rewriting |
-| Exception mapping (v1.3) | `llm.rate_limited` on 429-shaped errors; `llm.auth_error` on 401/403-shaped errors (terminal, never retried); `llm.request_error` on other 4xx (terminal); `llm.network_error` for the rest (timeouts, connection errors, 5xx — retried) | Same mapping |
-| Reasoning-model parameters | n/a (`max_tokens` is universal) | `o1`/`o3`/`o4`/`gpt-5` families get `max_completion_tokens` and no `temperature`/`top_p` (the API rejects the GPT-4-era parameters). Override the family table with the `reasoning_model_prefixes=` kwarg |
-| Pricing | Family-prefix lookup; override with `pricing=` kwarg | Family-prefix lookup; override with `pricing=` kwarg |
+| Aspect | `AnthropicProvider` | `OpenAIProvider` | `OpenRouterProvider` |
+| --- | --- | --- | --- |
+| `default_model` | `"claude-sonnet-4-5"` | `"gpt-4o-mini"` | `"openrouter/free"` |
+| Recognized model families | `claude-*` | `gpt-*`, `o1-*`, `o3-*`, `o4-*` | bounded `owner/model[:variant]` grammar |
+| API key env | `ANTHROPIC_API_KEY` | `OPENAI_API_KEY` | `OPENROUTER_API_KEY` |
+| SDK | `anthropic>=0.40` | `openai>=1.55.3` | `openai>=1.55.3` against OpenRouter's compatible endpoint |
+| Structured output | Prompt mode by default; native Messages `output_config` for supported Claude families | Prompt mode by default; native strict Chat Completions JSON schema for configured families | Prompt mode by default; native mode only for caller-supplied prefixes and always requires routed parameter support |
+| `count_tokens()` | Provider-side official count | Local `tiktoken`, chars/4 fallback | Local `tiktoken`, chars/4 fallback; declared `"estimate"` |
+| Tool use and names | Supported; dotted names rewritten on the wire | Supported; dotted names rewritten on the wire | Same inherited Chat Completions tool wire; parameter support required |
+| Error mapping | Shared 429/auth/4xx/5xx taxonomy | Shared SDK-exception taxonomy | Choice-level typed in-band errors first, then shared numeric taxonomy; 408 is transient |
+| Pricing | Family-prefix estimate | Family-prefix estimate | Optional ActiveGraph-owned per-million table for direct estimates; valid completed calls use returned `usage.cost` exactly |
+
+## `OpenRouterProvider` — routed OpenAI-compatible completions
+
+`OpenRouterProvider` is directly injectable and reuses the OpenAI Chat
+Completions translation without copying its turn implementation:
+
+```python
+from activegraph import Graph, Runtime
+from activegraph.llm import OpenRouterProvider
+
+rt = Runtime(Graph(), llm_provider=OpenRouterProvider())
+```
+
+Construction is offline. The default endpoint is
+`https://openrouter.ai/api/v1`; the provider lazily creates and caches
+one ordinary synchronous SDK client, with `max_retries=0` so Runtime is
+the only retry owner. Optional `app_url=` / `app_name=` become
+`HTTP-Referer` / `X-OpenRouter-Title` headers. An injected `client=`
+bypasses SDK import, environment access, header/retry configuration,
+and caching; its retries, thread safety, closing, and lifecycle are the
+caller's responsibility. The Protocol has no `close()` method, so an
+internally owned client has no deterministic framework cleanup promise.
+
+Every request sends `max_completion_tokens`, sampling controls,
+per-attempt `timeout`, and
+`provider.require_parameters=true`. Unsupported routed endpoints fail
+instead of silently ignoring generation or schema parameters. The
+timeout is one SDK HTTP-attempt timeout, not an end-to-end Runtime
+deadline, cancellation token, or guarantee that server work stopped.
+OpenRouter's own provider fallback occurs inside that single request.
+
+Active Graph's ownership grammar is deliberately bounded:
+
+```text
+^~?[a-z0-9]+(?:[._-][a-z0-9]+)*/[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[a-z0-9]+(?:[._-][a-z0-9]+)*)?$
+```
+
+Examples: `openrouter/free`, `openai/gpt-4o-mini`,
+`anthropic/claude-3.5-sonnet:beta`, `~openai/gpt-latest`. This drives
+cross-provider diagnostics; it is not an allowlist, and an unclaimed
+future model form is still forwarded under Runtime's permissive rule.
+
+`pricing=` is an optional mapping from model-family key to
+`{"input": decimal_string, "output": decimal_string}` in USD per one
+million tokens. Estimation strips one leading `~`, uses the longest
+boundary-safe match, returns zero for `openrouter/free` and recognized
+`:free` models, and `Decimal("Infinity")` for unknown paid models.
+Completed responses do not fall back to estimates: `usage.cost` must be
+finite, non-negative, and non-boolean, and is recorded with
+`provider_meta={"cost_source": "openrouter_usage"}`. Invalid or missing
+cost is terminal `llm.request_error` because retrying a potentially
+billed completed call could pay twice.
+
+The provider declares estimated input counts. Consequently, Runtime
+rejects every binding to a hard `max_cost_usd` budget before tokenizing
+or making SDK calls. Other budgets, including `max_llm_calls`, remain
+supported. Exact accounting is limited to valid completed responses:
+failed, timed-out, cancelled, or transport-lost work can be billed
+without a returned usage envelope, and Runtime cannot invent or enforce
+a hard monetary ceiling across those unobservable charges.
 
 ## `ClaudeCodeProvider` — Claude subscription billing (capability-limited)
 
@@ -232,11 +299,11 @@ only through the call, and a hard-coded `permission_mode="dontAsk"`
 **What still works.** `tools=` tool-use (via an exactly-anchored
 `PreToolUse`-defer hook per tool — never a catch-all matcher),
 structured output in both prompt and native mode, the same 7
-`LLMBehaviorError` reason codes the other two providers use, and full
+`LLMBehaviorError` reason codes the other shipped providers use, and full
 `Runtime` cache/fork/replay compatibility: `complete()` is a pure
 function of exactly what the runtime's per-turn cache hashes, so a
 cache hit or an unchanged `Runtime.fork(..., replay_llm_cache=True)`
-never calls this provider at all, identical to the other two.
+never calls this provider at all, identical to the other providers.
 
 **Multi-turn tool continuation.** The SDK takes a single `prompt: str`,
 not a `messages[]` array, so each live `complete()` call flattens the
@@ -362,7 +429,7 @@ inner = OpenAIProvider()
 provider = RecordingLLMProvider(inner, fixtures_dir="tests/fixtures/llm")
 ```
 
-`RecordingLLMProvider` wraps either concrete provider the same way.
+`RecordingLLMProvider` wraps any concrete provider the same way.
 Record once against a live key, commit the fixtures, run tests
 against `RecordedLLMProvider` thereafter.
 

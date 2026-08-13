@@ -65,9 +65,22 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install package with test extras
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,openrouter]"
       - name: Install falkordb-embedded (3.12+ only)
         if: matrix.python-version != '3.11'
         run: pip install -e ".[falkordb-embedded]"
       - name: Run pytest
         run: pytest -m "not slow" -q
+
+  openrouter-minimum-sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install OpenRouter with the exact minimum OpenAI SDK
+        run: pip install -e ".[dev,openrouter]" "openai==1.55.3"
+      - name: Run real-SDK OpenRouter compatibility tests
+        run: pytest -q tests/test_llm_openrouter.py -k real_sdk
