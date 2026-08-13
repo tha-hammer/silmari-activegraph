@@ -40,6 +40,11 @@ The seven category bases match the
 - [InvalidStoreURL](errors/invalid-store-url-error.md)
 - [NonSerializableEventError](errors/non-serializable-event-error.md)
 - [SchemaVersionMismatch](errors/schema-version-mismatch.md)
+- [MigrationBackendConflictError](errors/migration-backend-conflict-error.md)
+- [UnsupportedMigrationBackendError](errors/unsupported-migration-backend-error.md)
+- [UnsupportedMigrationCapabilityError](errors/unsupported-migration-capability-error.md)
+- [MigrationBackendLoadError](errors/migration-backend-load-error.md)
+- [MigrationBackendCloseError](errors/migration-backend-close-error.md)
 
 ### ExecutionError
 

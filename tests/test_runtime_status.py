@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import os
+from pathlib import Path
 import tempfile
 import threading
 
 import pytest
 
+import activegraph.observability.status as status_module
 from activegraph import Graph, Runtime, behavior, clear_registry
 from activegraph.observability.status import (
     BudgetSnapshot,
@@ -16,6 +19,50 @@ from activegraph.observability.status import (
     RuntimeStatus,
     status_to_dict,
 )
+
+
+def _normalized(text: str) -> str:
+    return " ".join(text.replace("`", "").lower().split())
+
+
+def _guide_runtime_introspection() -> str:
+    guide = (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "guides"
+        / "operating-in-production.md"
+    ).read_text(encoding="utf-8")
+    section = guide.split("## Runtime introspection", 1)[1]
+    return section.split("\n## ", 1)[0]
+
+
+def test_status_complexity_contract_is_consistent() -> None:
+    surfaces = {
+        "Runtime.status": inspect.getdoc(Runtime.status) or "",
+        "status module": inspect.getdoc(status_module) or "",
+        "operating guide": _guide_runtime_introspection(),
+    }
+    required = (
+        "side-effect-free and in-memory",
+        "o(n + b + min(n, recent))",
+        "n materialized history events",
+        "b registered behaviors",
+        "recent bounds returned summaries, not history construction",
+        "no store i/o or object/relation traversal",
+    )
+    forbidden = (
+        "cheap to call",
+        "calling it is cheap",
+        "no event log scan",
+        "tail-slice",
+    )
+
+    for label, surface in surfaces.items():
+        normalized = _normalized(surface)
+        for phrase in required:
+            assert phrase in normalized, f"{label} is missing {phrase!r}"
+        for phrase in forbidden:
+            assert phrase not in normalized, f"{label} retains {phrase!r}"
 
 
 def _register():

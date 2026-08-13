@@ -39,6 +39,9 @@ from activegraph import (
     InvalidStoreURL,
     InvalidToolRegistration,
     LLMBehaviorError,
+    MigrationBackendCloseError,
+    MigrationBackendConflictError,
+    MigrationBackendLoadError,
     MissingOptionalDependency,
     MissingProviderError,
     MissingToolError,
@@ -55,6 +58,7 @@ from activegraph import (
     ReplayDivergenceError,
     ReplayError,
     RejectPatchNotFoundError,
+    RuntimeClosedError,
     RuntimeContextRequiredError,
     SchemaVersionMismatch,
     StorageError,
@@ -62,6 +66,8 @@ from activegraph import (
     ToolNotFoundError,
     UnknownToolError,
     UnsupportedPatternError,
+    UnsupportedMigrationBackendError,
+    UnsupportedMigrationCapabilityError,
 )
 from activegraph.errors import GITHUB_NEW_ISSUE_URL, internal_bug_fields
 from activegraph.llm.errors import PromptIdentityError
@@ -492,6 +498,11 @@ def test_storage_leaves_inherit_from_storage_error() -> None:
         SchemaVersionMismatch,
         EventNotFoundError,
         DuplicateEventError,
+        MigrationBackendCloseError,
+        MigrationBackendConflictError,
+        MigrationBackendLoadError,
+        UnsupportedMigrationBackendError,
+        UnsupportedMigrationCapabilityError,
     ):
         assert issubclass(cls, StorageError), cls
         assert issubclass(cls, ActiveGraphError), cls
@@ -1092,11 +1103,12 @@ def test_invalid_tool_registration_snapshot() -> None:
 
 
 def test_config_leaves_inherit_from_configuration_error() -> None:
-    """The three ConfigurationError leaves are in the v1.0 hierarchy."""
+    """Runtime configuration/lifecycle leaves share the hierarchy."""
     for cls in (
         InvalidRuntimeConfiguration,
         InvalidArgumentType,
         IncompatibleRuntimeState,
+        RuntimeClosedError,
     ):
         assert issubclass(cls, ConfigurationError), cls
         assert issubclass(cls, ActiveGraphError), cls
@@ -1111,6 +1123,13 @@ def test_config_leaves_preserve_legacy_base_classes() -> None:
     assert issubclass(InvalidRuntimeConfiguration, ValueError)
     assert issubclass(InvalidArgumentType, TypeError)
     assert issubclass(IncompatibleRuntimeState, RuntimeError)
+    assert issubclass(RuntimeClosedError, RuntimeError)
+
+
+def test_runtime_closed_error_is_structured_and_names_operation() -> None:
+    err = RuntimeClosedError("run_goal")
+    _assert_format_compliant(err)
+    assert err.context == {"operation": "run_goal"}
 
 
 def test_pr_f_cross_category_leaves_are_execution() -> None:

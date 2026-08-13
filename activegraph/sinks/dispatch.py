@@ -143,46 +143,47 @@ class SinkHandle:
         """Offer one accepted event without waiting for queue capacity.
 
         Returns ``True`` when the event entered the attachment queue and
-        ``False`` when policy rejected it.  Adapter code is never invoked
-        here, and all metric backend exceptions are swallowed.
+        ``False`` when an overflow policy rejects it or the handle is already
+        non-accepting. Adapter code is never invoked here, and all metric
+        backend exceptions are swallowed.
         """
 
         dropped_reason: str | None = None
         enqueued = False
         with self._condition:
             if not self._accepting:
+                self._record_drop_locked("sink.not_accepting")
                 return False
-            else:
-                if len(self._deliveries) >= self.queue_capacity:
-                    if self.overflow_policy is OverflowPolicy.DROP_NEWEST:
-                        dropped_reason = "overflow.drop_newest"
-                        self._record_drop_locked(dropped_reason)
-                    elif self.overflow_policy is OverflowPolicy.DROP_OLDEST:
-                        evicted = self._deliveries.popleft()
-                        self._unsettled_tickets.discard(evicted.ticket)
-                        dropped_reason = "overflow.drop_oldest"
-                        self._record_drop_locked(dropped_reason)
-                    else:
-                        dropped_reason = "overflow.fail_sink"
-                        self._record_drop_locked(dropped_reason)
-                        self._accepting = False
-                        self._state = SinkState.FAILED
-                        self._condition.notify_all()
+            if len(self._deliveries) >= self.queue_capacity:
+                if self.overflow_policy is OverflowPolicy.DROP_NEWEST:
+                    dropped_reason = "overflow.drop_newest"
+                    self._record_drop_locked(dropped_reason)
+                elif self.overflow_policy is OverflowPolicy.DROP_OLDEST:
+                    evicted = self._deliveries.popleft()
+                    self._unsettled_tickets.discard(evicted.ticket)
+                    dropped_reason = "overflow.drop_oldest"
+                    self._record_drop_locked(dropped_reason)
+                else:
+                    dropped_reason = "overflow.fail_sink"
+                    self._record_drop_locked(dropped_reason)
+                    self._accepting = False
+                    self._state = SinkState.FAILED
+                    self._condition.notify_all()
 
-                if self._accepting and (
-                    dropped_reason is None
-                    or self.overflow_policy is OverflowPolicy.DROP_OLDEST
-                ):
-                    ticket = self._next_ticket
-                    self._next_ticket += 1
-                    self._deliveries.append(
-                        _Delivery(ticket=ticket, event=event, context=context)
-                    )
-                    self._unsettled_tickets.add(ticket)
-                    self._enqueued += 1
-                    self._depth_dirty = True
-                    enqueued = True
-                    self._condition.notify()
+            if self._accepting and (
+                dropped_reason is None
+                or self.overflow_policy is OverflowPolicy.DROP_OLDEST
+            ):
+                ticket = self._next_ticket
+                self._next_ticket += 1
+                self._deliveries.append(
+                    _Delivery(ticket=ticket, event=event, context=context)
+                )
+                self._unsettled_tickets.add(ticket)
+                self._enqueued += 1
+                self._depth_dirty = True
+                enqueued = True
+                self._condition.notify()
             if dropped_reason is not None:
                 self._condition.notify_all()
         return enqueued

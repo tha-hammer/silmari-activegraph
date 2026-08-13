@@ -306,7 +306,7 @@ METRIC_NAMES: tuple[MetricSpec, ...] = (
         "activegraph_sink_events_dropped_total",
         "counter",
         ("sink", "reason"),
-        "Sink deliveries rejected or evicted under declared policy.",
+        "Sink deliveries refused, rejected, or evicted under declared policy.",
     ),
     MetricSpec(
         "activegraph_sink_errors_total",

@@ -464,6 +464,7 @@ class Runtime:
         # coherent but does not make concurrent drains safe.
         self._active_drain_count = 0
         self._active_drain_lock = threading.Lock()
+        self._closed = False
         self.frame = frame
         self.policy = policy
         self.budget = Budget(budget or {})
@@ -705,6 +706,57 @@ class Runtime:
 
     # ---------- public surface ----------
 
+    def _ensure_open(self, operation: str) -> None:
+        """Reject a state-changing operation after deterministic shutdown."""
+
+        if self._closed:
+            from activegraph.runtime.config_errors import RuntimeClosedError
+
+            raise RuntimeClosedError(operation)
+
+    def close(self, timeout: float | None = 5.0) -> bool:
+        """Close every sink attached to this Runtime's Graph.
+
+        The call delegates to :meth:`close_sinks`, returns ``False`` for an
+        ordinary timeout or partial adapter failure, and is safe to retry for
+        owner-side cleanup. The Runtime is closed to later mutations from the
+        first call onward; read-only inspection remains available. Stores and
+        graph listeners are not closed.
+        """
+
+        self._closed = True
+        closed = self.close_sinks(timeout=timeout)
+        if closed:
+            from activegraph.runtime._live import untrack_runtime
+
+            untrack_runtime(self)
+        return closed
+
+    def __enter__(self) -> "Runtime":
+        """Enter deterministic Runtime sink ownership."""
+
+        self._ensure_open("__enter__")
+        return self
+
+    def __exit__(self, exc_type: Any, exc: BaseException | None, tb: Any) -> None:
+        """Close sinks without suppressing an exception from the user block.
+
+        A normal ``False`` close result is exception-free. If close raises an
+        unexpected exception while a user exception is active, the user
+        exception remains primary and the close exception is attached as its
+        ``__context__``.
+        """
+
+        if exc is None:
+            self.close()
+            return None
+        try:
+            self.close()
+        except BaseException as close_error:
+            close_error.__context__ = None
+            exc.__context__ = close_error
+        return None
+
     @property
     def run_id(self) -> str:
         return self.graph.run_id
@@ -758,6 +810,7 @@ class Runtime:
         successful delivery, declared drops, and adapter errors.
         """
 
+        self._ensure_open("add_sink")
         return self.graph.add_sink(
             sink,
             name=name,
@@ -774,6 +827,7 @@ class Runtime:
     ) -> bool:
         """Detach, drain, and close one sink within ``timeout``."""
 
+        self._ensure_open("remove_sink")
         return self.graph.remove_sink(sink, timeout=timeout)
 
     def sink_statuses(self) -> tuple[SinkStatus, ...]:
@@ -782,12 +836,23 @@ class Runtime:
         return self.graph.sink_statuses()
 
     def flush_sinks(self, timeout: float | None = 5.0) -> bool:
-        """Flush all attached sinks, applying ``timeout`` to each worker."""
+        """Flush all attached sinks, applying ``timeout`` to each worker.
+
+        Flush is non-detaching: it does not finalize attachment ownership or
+        release a name. If a timed-out close later reaches CLOSED or FAILED,
+        only close/remove reaps closing ownership. A terminal failure remains
+        queryable until explicit removal or name reuse.
+        """
 
         return self.graph.flush_sinks(timeout=timeout)
 
     def close_sinks(self, timeout: float | None = 5.0) -> bool:
-        """Detach and close all sinks, applying ``timeout`` to each worker."""
+        """Detach and close all sinks, applying ``timeout`` to each worker.
+
+        Retry after a timed-out close reaches a terminal state to finalize
+        Graph ownership. A failed retry may return ``False`` while still
+        retaining its queryable failure snapshot and releasing the name.
+        """
 
         return self.graph.close_sinks(timeout=timeout)
 
@@ -807,6 +872,7 @@ class Runtime:
         rejected before emission.
         """
 
+        self._ensure_open("dev_override")
         validate_override_request(
             actor=actor,
             reason=reason,
@@ -910,6 +976,7 @@ class Runtime:
         of classes and gates never moves.
         """
 
+        self._ensure_open("set_authority_ceiling")
         validate_ceiling(ceiling)
         for name, value in (("actor", actor), ("reason", reason)):
             if not isinstance(value, str) or not value.strip():
@@ -960,6 +1027,7 @@ class Runtime:
         :class:`AuthorityDecision` carries the accepted event id.
         """
 
+        self._ensure_open("evaluate_capability_authority")
         decision = evaluate_action_authority(
             capability=capability,
             action_class=action_class,
@@ -1398,6 +1466,7 @@ class Runtime:
         return True
 
     def run_goal(self, goal: str, *, actor: str = "user") -> None:
+        self._ensure_open("run_goal")
         with self._active_drain():
             self._ensure_registry()
             # Stamp the run row's goal (best-effort; only meaningful with a store).
@@ -1423,6 +1492,7 @@ class Runtime:
             self.run_until_idle()
 
     def run_until_idle(self) -> None:
+        self._ensure_open("run_until_idle")
         with self._active_drain():
             self._ensure_registry()
             if self.budget._start is None:
@@ -1445,6 +1515,7 @@ class Runtime:
         emitted exactly when this quantum actually reaches that state.
         """
 
+        self._ensure_open("run_quantum")
         if isinstance(max_queue_events, bool) or not isinstance(max_queue_events, int):
             raise TypeError("max_queue_events must be an int")
         if max_queue_events < 1:
@@ -1484,6 +1555,7 @@ class Runtime:
             )
 
     def run_until(self, predicate: Callable[[Graph], bool]) -> None:
+        self._ensure_open("run_until")
         with self._active_drain():
             self._ensure_registry()
             if self.budget._start is None:
@@ -1507,6 +1579,7 @@ class Runtime:
         through :meth:`Context.embed`, which supplies causal metadata.
         """
 
+        self._ensure_open("embed")
         if not isinstance(texts, list) or any(
             not isinstance(text, str) for text in texts
         ):
@@ -2996,9 +3069,13 @@ class Runtime:
     def status(self, recent: int = 20) -> RuntimeStatus:
         """Frozen snapshot of the runtime. CONTRACT v0.8 #11.
 
-        Cheap to call. It performs no graph traversal and scans backward
-        only to the latest terminal runtime event when no local drain is
-        active. Returns immutable data; mutating any field raises.
+        The operation is side-effect-free and in-memory. With N materialized
+        history events and B registered behaviors, current work is
+        ``O(N + B + min(N, recent))``; ``recent`` bounds returned summaries,
+        not history construction. It performs no store I/O or object/relation
+        traversal, and scans backward only to the latest terminal runtime
+        event when no local drain is active. Returns immutable data;
+        mutating any field raises.
 
         ``recent`` controls the length of the ``recent_events`` tail.
         The CLI's ``inspect --tail N`` passes through.
@@ -3190,6 +3267,7 @@ class Runtime:
         `PackConflictError` for any contributor name collision.
         Pre-mutation: a failed load leaves the runtime exactly as it was.
         """
+        self._ensure_open("load_pack")
         from activegraph.packs.loader import load_pack_into_runtime
         loaded: bool = load_pack_into_runtime(self, pack, settings=settings)
         return loaded
@@ -3229,6 +3307,7 @@ class Runtime:
 
         Returns ``True`` when the pack was live and is now disabled.
         """
+        self._ensure_open("disable_pack")
         from activegraph.packs import PackNotFoundError
         from activegraph.packs.loader import AMBIGUOUS
 
@@ -3506,6 +3585,7 @@ class Runtime:
         Raises `LookupError` if `approval_id` is not pending. Emits an
         `approval.granted` event followed by the deferred `object.created`.
         """
+        self._ensure_open("approve")
         from activegraph.runtime.exec_errors import ApprovalNotFoundError
         if self._pack_state is None:
             raise ApprovalNotFoundError(approval_id, pending_count=0)
@@ -3572,6 +3652,7 @@ class Runtime:
           in-memory events to it (CONTRACT v0.5 #5).
         Returns the path the events were written to.
         """
+        self._ensure_open("save_state")
         attached = self.graph.store
         if attached is not None:
             attached_path = getattr(attached, "path", None)
@@ -3856,6 +3937,7 @@ class Runtime:
         an external graph database. The fork's event log remains the source
         of truth — this only changes where the projection is materialized.
         """
+        self._ensure_open("fork")
         requested_metrics: Metrics = (
             metrics if metrics is not None else NoOpMetrics()
         )
@@ -4067,6 +4149,7 @@ class Runtime:
         records (:class:`~activegraph.runtime.exec_errors.PromoteLineageError`
         otherwise; promote grandchildren one level at a time).
         """
+        self._ensure_open("promote")
         from activegraph.core.patch import Patch
         from activegraph.runtime.exec_errors import (
             PromoteConflictError,

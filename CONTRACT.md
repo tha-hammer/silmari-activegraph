@@ -2185,9 +2185,9 @@ Concretely, `activegraph.packs.diligence` provides:
 **Object types** (8): `company`, `document`, `question`, `claim`,
 `evidence`, `contradiction`, `risk`, `memo`.
 
-**Relation types** (6): `supports`, `contradicts`, `references`,
-`derived_from`, `addresses` (claim → question), `mitigates`
-(evidence → risk).
+**Relation types** (7): `supports`, `contradicts`, `has_contradiction`
+(claim → contradiction), `references`, `derived_from`, `addresses`
+(claim → question), `mitigates` (evidence → risk).
 
 **Behaviors** (7):
   - `company_planner` (deterministic — bootstraps a `company` object
@@ -2200,8 +2200,8 @@ Concretely, `activegraph.packs.diligence` provides:
   - `evidence_linker` (deterministic — safety net for evidence
     objects that lack a `supports` edge to their claim)
   - `contradiction_detector` (pattern subscription, deterministic)
-  - `risk_identifier` (LLM, `activate_after=8` so it fires once
-    claims have accumulated)
+  - `risk_identifier` (LLM, idempotent graph-state gate so only the first
+    risk batch per company materializes)
   - `memo_synthesizer` (LLM)
 
 **Tools** (3, all pack-scoped):
@@ -2246,6 +2246,12 @@ The contradiction **detector** (pattern subscription on
 `(c1:claim)-[r:contradicts]->(c2:claim)`) is in scope and creates
 `contradiction` objects. The contradiction **resolver** (an LLM
 behavior that picks a winning claim) is **deferred to v1.0**.
+
+Every created contradiction object receives exactly two
+`claim --has_contradiction--> contradiction` relations, using the object's
+stored real claim ids. `Graph.neighborhood(claim_id, depth=1)` is therefore the
+canonical traversal from either claim to its open review item. The relation is
+an index/discovery edge only; it does not resolve or rank either claim.
 
 Why: the resolver adds a second LLM loop with its own prompt, its
 own determinism story, and its own evaluation problem ("did it
@@ -2359,8 +2365,8 @@ shared reference for the pack format itself.
 The trace printer gains rendering for `pack.loaded` events:
 
 ```
-[pack.loaded]    diligence v0.1.0 (8 object_types, 6 relation_types,
-                 7 behaviors, 3 tools, 2 policies, 5 prompts)
+[pack.loaded]    diligence v0.1.0 (8 object_types, 7 relation_types,
+                 7 behaviors, 3 tools, 2 policies, 4 prompts)
 ```
 
 Trace causal chains follow `pack.loaded` provenance back to the
@@ -7799,16 +7805,26 @@ Every attachment selects one closed-set ``OverflowPolicy``:
   if the worker is able to continue.
 
 No policy waits for capacity. Every overflow increments the attachment's
-``dropped`` count with its reason. An ``on_event`` exception increments
-``errors`` and not ``delivered``; the worker continues so one bad record
-does not discard the bounded suffix silently. An ``open`` failure marks
-the attachment failed. ``SinkStatus`` exposes name, lifecycle state,
-capacity, current depth, policy, enqueued, delivered, dropped,
-error counts, and the last error. ``SinkHandle.status()``,
+``dropped`` count with its reason. Every later delivery refused because
+the handle is already non-accepting increments ``dropped`` under the
+low-cardinality ``sink.not_accepting`` reason; this is a refusal, not a
+new overflow. An ``on_event`` exception increments ``errors`` and not
+``delivered``; the worker continues so one bad record does not discard
+the bounded suffix silently. An ``open`` failure marks the attachment
+failed. ``SinkStatus`` exposes name, lifecycle state, capacity, current
+depth, policy, enqueued, delivered, dropped, error counts, and the last
+error. ``SinkHandle.status()``,
 ``Graph.sink_statuses()`` / ``Runtime.sink_statuses()``, and bounded
 ``flush_sinks`` / ``close_sinks`` calls are the in-process observability
 and lifecycle surface. A timeout reports incomplete flush/close; it does
 not wait forever on a hanging adapter.
+
+Flush is non-detaching: it does not finalize attachment ownership or release a
+name. If a timed-out close later reaches CLOSED or FAILED, only close/remove
+reaps closing ownership. A terminal failure remains queryable until explicit
+removal or name reuse. A failed close retry may return ``False`` while still
+reaping the closing attachment, releasing its name, and retaining the failed
+snapshot for inspection.
 
 Four names are added to the locked standard metric table:
 
@@ -7821,7 +7837,9 @@ The v0.8 #C4 cardinality rule remains unchanged: ``run_id`` appears only
 on the active-state queue-depth gauge, never on a sink counter. Status is
 the source of exact per-attachment counts even when ``NoOpMetrics`` is
 configured. Metric backend exceptions are best-effort and cannot turn a
-sink observation into a runtime failure.
+sink observation into a runtime failure. Sink workers publish metric batches;
+exact status remains authoritative for a refusal recorded after a terminal
+worker has stopped, because the emit thread never calls a metrics backend.
 
 ## v1.8 #4. Normal replay is silent; historical export is a separate mode
 
@@ -9128,3 +9146,43 @@ wheel-included `manifest.toml` that passes schema, live-surface, and content-has
 verification. Scaffolded Packs use an explicit absolute locator and ship a
 minimal deterministic fixture resource. Content hashes exclude
 `manifest.toml`; external bundle hashes include it.
+# Unreleased — deterministic Runtime sink ownership
+
+`Runtime.close(timeout: float | None = 5.0) -> bool` delegates to the existing
+graph-wide `close_sinks()` operation and owns exactly the same set: every sink
+attached to the Runtime's Graph. It does not close stores or remove listeners.
+The first call closes the Runtime to subsequent state-changing Runtime methods;
+those methods raise `RuntimeClosedError`, while read-only inspection and
+explicit close retries remain available. Repeated close is safe.
+
+`Runtime.__enter__()` returns the open Runtime and raises `RuntimeClosedError`
+after close. `Runtime.__exit__()` returns `None` and never suppresses a user
+exception. An ordinary timeout or partial adapter failure remains the existing
+exception-free `False` result; status stays queryable and no automatic retry is
+performed. Only if close unexpectedly raises while a user exception is active
+does the user exception remain primary with the close exception attached as
+its `__context__`.
+
+# Unreleased — Store-owned extensible migration boundary
+
+`activegraph.store.migration` is the canonical administrative data-movement
+module. `activegraph.observability.migration` remains an identity-preserving
+compatibility shim. Migration does not widen the deliberately per-run
+`EventStore` protocol or the built-in-only `open_store()` dispatcher.
+
+Migration providers declare unique normalized URL schemes, a `read`/`write`
+capability frozenset, pure `validate_url()`, and `open()`. Both endpoints and
+required capabilities are resolved before either backend opens. Built-in
+SQLite/Postgres providers are registered directly; third parties use explicit
+`register_migration_backend()` calls or one
+`activegraph.migration_backends` entry point per alias. Duplicate claims fail
+closed, requested entry-point load failures are typed, and unrelated broken
+plugins are not loaded.
+
+Each opened backend is one URL-owned session. Central orchestration preserves
+provider run order, owns strict/skip-corrupted policy, and closes destination
+then source on every exit. A sole cleanup failure raises
+`MigrationBackendCloseError`; cleanup failures during another exception are
+attached as diagnostics without replacing the primary error. Backend adapters
+own schema setup, raw corruption recovery, and transactional SQL; central
+migration contains only provider-neutral policy and reports.

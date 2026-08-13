@@ -24,6 +24,7 @@ from activegraph import (
     OverflowPolicy,
     RecordingSink,
     Runtime,
+    RuntimeClosedError,
     SinkConfig,
     behavior,
 )
@@ -289,6 +290,8 @@ class GatedFlushSink:
     def __init__(self) -> None:
         self.flush_entered = threading.Event()
         self.release_flush = threading.Event()
+        self.flush_calls = 0
+        self.close_calls = 0
 
     def open(self) -> None:
         return
@@ -297,11 +300,12 @@ class GatedFlushSink:
         return
 
     def flush(self) -> None:
+        self.flush_calls += 1
         self.flush_entered.set()
         self.release_flush.wait()
 
     def close(self) -> None:
-        return
+        self.close_calls += 1
 
 
 class CountingGateSink(OrderedGateSink):
@@ -349,6 +353,30 @@ class OpenFailingSlowCloseSink:
         self.close_entered.set()
         self.release_close.wait()
         raise OSError("cleanup close failed")
+
+
+class GatedCloseFailSink:
+    def __init__(self) -> None:
+        self.opened = threading.Event()
+        self.close_entered = threading.Event()
+        self.release_close = threading.Event()
+        self.flush_calls = 0
+        self.close_calls = 0
+
+    def open(self) -> None:
+        self.opened.set()
+
+    def on_event(self, event: Event, context: DeliveryContext) -> None:
+        return
+
+    def flush(self) -> None:
+        self.flush_calls += 1
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.close_entered.set()
+        self.release_close.wait()
+        raise OSError("close failed after gate")
 
 
 class FlushFailingFile:
@@ -688,6 +716,205 @@ def test_hanging_open_is_async_and_does_not_delay_other_sink() -> None:
     finally:
         hanging.release.set()
         runtime.close_sinks(timeout=2.0)
+
+
+def _normalize_contract_text(text: str) -> str:
+    return " ".join(text.replace("`", "").lower().split())
+
+
+def _markdown_section(path: Path, heading: str) -> str:
+    text = path.read_text(encoding="utf-8")
+    section = text.split(heading, 1)[1]
+    return section.split("\n## ", 1)[0]
+
+
+def test_sink_flush_close_ownership_contract_is_consistent() -> None:
+    root = Path(__file__).resolve().parents[1]
+    surfaces = {
+        "Graph methods": "\n".join(
+            (Graph.flush_sinks.__doc__ or "", Graph.close_sinks.__doc__ or "")
+        ),
+        "Runtime methods": "\n".join(
+            (Runtime.flush_sinks.__doc__ or "", Runtime.close_sinks.__doc__ or "")
+        ),
+        "operating guide": _markdown_section(
+            root / "docs" / "guides" / "operating-in-production.md",
+            "## Event sinks",
+        ),
+        "CONTRACT": (root / "CONTRACT.md")
+        .read_text(encoding="utf-8")
+        .split("# v1.8 — EventSink", 1)[1]
+        .split("\n# v", 1)[0],
+    }
+    required = (
+        "flush is non-detaching",
+        "does not finalize attachment ownership or release a name",
+        "timed-out close later reaches closed or failed",
+        "only close/remove reaps closing ownership",
+        "terminal failure remains queryable until explicit removal or name reuse",
+    )
+    forbidden = ("flush finalizes ownership", "flush frees names")
+
+    for label, surface in surfaces.items():
+        normalized = _normalize_contract_text(surface)
+        for phrase in required:
+            assert phrase in normalized, f"{label} is missing {phrase!r}"
+        for phrase in forbidden:
+            assert phrase not in normalized, f"{label} retains {phrase!r}"
+
+
+def test_close_timeout_then_terminal_success_needs_close_retry_to_reap() -> None:
+    graph = Graph(run_id="run_close_terminal_success")
+    runtime = Runtime(graph, behaviors=[])
+    sink = GatedFlushSink()
+    handle = runtime.add_sink(sink, name="terminal-success")
+    try:
+        assert runtime.close_sinks(timeout=0.01) is False
+        assert sink.flush_entered.wait(timeout=2.0)
+        assert handle.status().state.value == "closing"
+        with pytest.raises(ValueError):
+            runtime.add_sink(RecordingSink(), name="terminal-success")
+
+        sink.release_flush.set()
+        assert handle._stopped.wait(timeout=2.0)
+        assert handle.status().state.value == "closed"
+        before_flush = runtime.sink_statuses()
+        assert runtime.flush_sinks(timeout=2.0) is True
+        assert runtime.sink_statuses() == before_flush
+        with pytest.raises(ValueError):
+            runtime.add_sink(RecordingSink(), name="terminal-success")
+        assert sink.flush_calls == 1
+        assert sink.close_calls == 1
+
+        assert runtime.close_sinks(timeout=2.0) is True
+        assert runtime.sink_statuses() == ()
+        runtime.add_sink(RecordingSink(), name="terminal-success")
+    finally:
+        sink.release_flush.set()
+        runtime.close_sinks(timeout=2.0)
+
+
+def test_close_timeout_then_terminal_failure_needs_close_retry_to_reap() -> None:
+    graph = Graph(run_id="run_close_terminal_failure")
+    runtime = Runtime(graph, behaviors=[])
+    sink = GatedCloseFailSink()
+    handle = runtime.add_sink(sink, name="terminal-failure")
+    assert sink.opened.wait(timeout=2.0)
+    try:
+        assert runtime.close_sinks(timeout=0.01) is False
+        assert sink.close_entered.wait(timeout=2.0)
+        assert handle.status().state.value == "closing"
+        with pytest.raises(ValueError):
+            runtime.add_sink(RecordingSink(), name="terminal-failure")
+
+        sink.release_close.set()
+        assert handle._stopped.wait(timeout=2.0)
+        failed = handle.status()
+        assert failed.state.value == "failed"
+        assert failed.errors == 1
+        assert failed.last_error_operation == "close"
+        before_flush = runtime.sink_statuses()
+        assert runtime.flush_sinks(timeout=2.0) is False
+        assert runtime.sink_statuses() == before_flush
+        with pytest.raises(ValueError):
+            runtime.add_sink(RecordingSink(), name="terminal-failure")
+        assert sink.flush_calls == 1
+        assert sink.close_calls == 1
+
+        assert runtime.close_sinks(timeout=2.0) is False
+        retained = runtime.sink_statuses()
+        assert len(retained) == 1
+        assert retained[0].state.value == "failed"
+        runtime.add_sink(RecordingSink(), name="terminal-failure")
+        assert all(status.state.value != "failed" for status in runtime.sink_statuses())
+    finally:
+        sink.release_close.set()
+        runtime.close_sinks(timeout=2.0)
+
+
+def test_runtime_context_manager_closes_every_graph_sink() -> None:
+    graph = Graph(run_id="run_runtime_scope")
+    runtime = Runtime(graph, behaviors=[])
+    sink = RecordingSink()
+    handle = graph.add_sink(sink, name="graph-attached")
+
+    with runtime as entered:
+        assert entered is runtime
+        graph.emit(_event(graph, 1))
+
+    assert handle.status().state.value == "closed"
+    assert [delivery.event.id for delivery in sink.deliveries] == ["evt_001"]
+    assert runtime.close() is True
+    with pytest.raises(RuntimeClosedError):
+        runtime.__enter__()
+
+
+def test_runtime_close_timeout_is_false_and_explicit_retry_is_safe() -> None:
+    graph = Graph(run_id="run_runtime_close_timeout")
+    runtime = Runtime(graph, behaviors=[])
+    sink = GatedFlushSink()
+    runtime.add_sink(sink, name="slow-runtime-close")
+    try:
+        assert runtime.close(timeout=0.01) is False
+        assert sink.flush_entered.wait(timeout=2.0)
+        with pytest.raises(RuntimeClosedError):
+            runtime.add_sink(RecordingSink(), name="too-late")
+        assert runtime.sink_statuses()[0].state.value == "closing"
+
+        sink.release_flush.set()
+        assert runtime.close(timeout=2.0) is True
+        assert runtime.close(timeout=2.0) is True
+    finally:
+        sink.release_flush.set()
+        runtime.close_sinks(timeout=2.0)
+
+
+def test_runtime_exit_preserves_user_error_and_chains_raised_close_error() -> None:
+    runtime = Runtime(Graph(run_id="run_runtime_dual_failure"), behaviors=[])
+    close_error = OSError("unexpected close failure")
+
+    def raise_on_close(timeout: float | None = 5.0) -> bool:
+        raise close_error
+
+    runtime.close = raise_on_close  # type: ignore[method-assign]
+    with pytest.raises(ValueError, match="user failure") as excinfo:
+        with runtime:
+            raise ValueError("user failure")
+    assert excinfo.value.__context__ is close_error
+
+
+def test_runtime_exit_ignores_ordinary_false_close_result() -> None:
+    runtime = Runtime(Graph(run_id="run_runtime_false_exit"), behaviors=[])
+    runtime.close = lambda timeout=5.0: False  # type: ignore[method-assign]
+    with pytest.raises(ValueError, match="user failure") as excinfo:
+        with runtime:
+            raise ValueError("user failure")
+    assert excinfo.value.__context__ is None
+
+
+def test_runtime_close_preserves_shared_adapter_reference_counts() -> None:
+    sink = RecordingSink()
+    graph_a = Graph(run_id="run_runtime_shared_a")
+    graph_b = Graph(run_id="run_runtime_shared_b")
+    runtime_a = Runtime(graph_a, behaviors=[], sinks=[sink])
+    runtime_b = Runtime(graph_b, behaviors=[], sinks=[sink])
+    try:
+        assert runtime_a.flush_sinks(timeout=2.0)
+        assert runtime_b.flush_sinks(timeout=2.0)
+        assert sink._open_count == 2
+
+        assert runtime_a.close() is True
+        assert sink._open_count == 1
+        graph_b.emit(_event(graph_b, 1))
+        assert runtime_b.flush_sinks(timeout=2.0)
+        assert [delivery.context.run_id for delivery in sink.deliveries] == [
+            "run_runtime_shared_b"
+        ]
+        assert runtime_b.close() is True
+        assert sink._open_count == 0
+    finally:
+        runtime_a.close_sinks(timeout=2.0)
+        runtime_b.close_sinks(timeout=2.0)
 
 
 def test_close_timeout_retains_status_and_can_be_retried() -> None:
@@ -1114,6 +1341,113 @@ def test_every_overflow_policy_is_exact_counted_and_observable(
         assert queue_gauges[-1] == float(runtime.sink_statuses()[0].queue_depth)
     finally:
         sink.release.set()
+        runtime.close_sinks(timeout=2.0)
+
+
+def test_fail_sink_late_offer_is_counted_after_worker_stops() -> None:
+    graph = Graph(run_id="run_fail_sink_late_offer")
+    sink = OrderedGateSink()
+    runtime = Runtime(
+        graph,
+        behaviors=[],
+        sinks=[
+            SinkConfig(
+                sink,
+                name="bounded",
+                queue_capacity=1,
+                overflow_policy=OverflowPolicy.FAIL_SINK,
+            )
+        ],
+    )
+    handle = graph._sinks["bounded"]
+    try:
+        graph.emit(_event(graph, 1))
+        assert sink.entered.wait(timeout=2.0)
+        graph.emit(_event(graph, 2))
+        graph.emit(_event(graph, 3))
+
+        status = runtime.sink_statuses()[0]
+        assert status.state.value == "failed"
+        assert status.enqueued == 2
+        assert status.delivered == 0
+        assert status.dropped == 1
+        assert status.queue_depth == 1
+        assert status.dropped_by_reason == (("overflow.fail_sink", 1),)
+
+        sink.release.set()
+        assert handle._stopped.wait(timeout=2.0)
+        assert sink.ids == ("evt_001", "evt_002")
+
+        graph.emit(_event(graph, 4))
+        status = runtime.sink_statuses()[0]
+        assert status.state.value == "failed"
+        assert status.enqueued == 2
+        assert status.delivered == 2
+        assert status.dropped == 2
+        assert status.queue_depth == 0
+        assert status.errors == 0
+        assert status.dropped_by_reason == (
+            ("overflow.fail_sink", 1),
+            ("sink.not_accepting", 1),
+        )
+        assert sink.ids == ("evt_001", "evt_002")
+    finally:
+        sink.release.set()
+        runtime.close_sinks(timeout=2.0)
+
+
+def test_open_failure_late_offer_preserves_queued_loss_reasons() -> None:
+    graph = Graph(run_id="run_open_failure_late_offer")
+    sink = OpenFailingSlowCloseSink()
+    runtime = Runtime(
+        graph,
+        behaviors=[],
+        sinks=[SinkConfig(sink, name="opening", queue_capacity=2)],
+    )
+    handle = graph._sinks["opening"]
+    assert sink.open_entered.wait(timeout=2.0)
+    try:
+        graph.emit(_event(graph, 1))
+        graph.emit(_event(graph, 2))
+        status = runtime.sink_statuses()[0]
+        assert status.state.value == "opening"
+        assert status.enqueued == 2
+        assert status.delivered == 0
+        assert status.dropped == 0
+        assert status.errors == 0
+        assert status.queue_depth == 2
+
+        sink.release_open.set()
+        assert sink.close_entered.wait(timeout=2.0)
+        status = runtime.sink_statuses()[0]
+        assert status.state.value == "failed"
+        assert status.enqueued == 2
+        assert status.delivered == 0
+        assert status.dropped == 2
+        assert status.errors == 1
+        assert status.queue_depth == 0
+        assert status.dropped_by_reason == (("sink.open_failed", 2),)
+        assert status.last_error_operation == "open"
+
+        sink.release_close.set()
+        assert handle._stopped.wait(timeout=2.0)
+        graph.emit(_event(graph, 3))
+
+        status = runtime.sink_statuses()[0]
+        assert status.state.value == "failed"
+        assert status.enqueued == 2
+        assert status.delivered == 0
+        assert status.dropped == 3
+        assert status.errors == 2
+        assert status.queue_depth == 0
+        assert status.dropped_by_reason == (
+            ("sink.not_accepting", 1),
+            ("sink.open_failed", 2),
+        )
+        assert status.last_error_operation == "close"
+    finally:
+        sink.release_open.set()
+        sink.release_close.set()
         runtime.close_sinks(timeout=2.0)
 
 

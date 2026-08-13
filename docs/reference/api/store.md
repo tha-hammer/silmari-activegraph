@@ -33,6 +33,10 @@ the [Using the FalkorDB graph store](../../guides/using-falkordb.md) guide.
 
 ## Migration
 
+The canonical implementation is `activegraph.store.migration`; the historical
+`activegraph.observability.migration` module remains an identity-preserving
+compatibility re-export.
+
 ::: activegraph.migrate
 
 ::: activegraph.MigrationReport
@@ -40,3 +44,27 @@ the [Using the FalkorDB graph store](../../guides/using-falkordb.md) guide.
 ::: activegraph.MigrationRunReport
 
 ::: activegraph.RunRecord
+
+### Migration backend extensions
+
+Migration uses a capability separate from the per-run `EventStore` protocol.
+Both endpoint URLs and their `read`/`write` roles are validated before either
+backend opens.
+
+::: activegraph.MigrationBackend
+
+::: activegraph.MigrationBackendProvider
+
+::: activegraph.register_migration_backend
+
+::: activegraph.resolve_migration_backend
+
+Third-party packages may publish one entry point per URL-scheme alias:
+
+```toml
+[project.entry-points."activegraph.migration_backends"]
+warehouse = "acme_activegraph:warehouse_migration_provider"
+```
+
+This registry affects migration only; `open_store()` remains intentionally
+limited to the built-in runtime stores.

@@ -11,7 +11,7 @@ generator = ""
 source_url = "https://github.com/yoheinakajima/activegraph"
 
 [pack.integrity]
-content_hash = "sha256:56694b6cb7bff8f91b8c15f202b008b5a079682d145f314b7a68e84a04cb5afe"
+content_hash = "sha256:02912acda38dfde6f18706035f2427f9ca747728b708b2b6bb52830bde06f89e"
 
 [dependencies]
 activegraph = ">=1.10,<2.0"
@@ -24,7 +24,7 @@ python-deps = ["pydantic>=2"]
 
 [surface]
 object_types = ["company", "document", "question", "claim", "evidence", "contradiction", "risk", "memo"]
-relation_types = ["addresses", "supports", "contradicts", "references", "derived_from", "mitigates"]
+relation_types = ["addresses", "supports", "contradicts", "has_contradiction", "references", "derived_from", "mitigates"]
 behaviors = ["company_planner", "question_generator", "document_researcher", "evidence_linker", "contradiction_detector", "risk_identifier", "memo_synthesizer"]
 tools = ["fetch_company_docs", "search_filings", "summarize_document"]
 settings_schema = "DiligenceSettings"

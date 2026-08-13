@@ -15,6 +15,19 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
 
 ## [Unreleased]
 
+- Added the Diligence pack's seventh relation type,
+  `claim --has_contradiction--> contradiction`, with two edges per detected
+  contradiction so either claim reaches its review item at neighborhood depth
+  1. The historical v0.9 six-relation inventory below remains unchanged.
+- Moved canonical migration ownership to `activegraph.store.migration` and
+  added migration-only backend providers, explicit registration, lazy
+  `activegraph.migration_backends` discovery, capability preflight, and typed
+  resolution/cleanup errors. The observability import remains compatible.
+- Added deterministic `Runtime.close()` and context-manager sink ownership.
+  Closing delegates to the existing graph-wide sink lifecycle, preserves
+  ordinary timeout/partial-failure results as `False`, and rejects later
+  Runtime mutations with `RuntimeClosedError` while keeping inspection usable.
+
 ### Added
 
 - **Pack manifests are now shipped and scaffolded.** The bundled Diligence

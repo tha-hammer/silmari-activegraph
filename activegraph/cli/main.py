@@ -1059,27 +1059,8 @@ def cmd_export_trace(url: str, run_id: str, fmt: str, out_path: Optional[str]) -
 
     trace = Trace(rt.graph)
     if out_path:
-        with open(out_path, "w") as f:
-            trace.print(file=f) if _supports_file_arg(trace.print) else _fallback_text(trace, f)
+        trace.export(out_path)
     else:
-        trace.print()
-
-
-def _supports_file_arg(fn) -> bool:
-    import inspect
-
-    try:
-        sig = inspect.signature(fn)
-        return "file" in sig.parameters
-    except (TypeError, ValueError):
-        return False
-
-
-def _fallback_text(trace, f) -> None:
-    """Trace.print writes to stdout; redirect for backward-compat printers."""
-    import contextlib
-
-    with contextlib.redirect_stdout(f):
         trace.print()
 
 
@@ -1125,26 +1106,39 @@ def cmd_migrate(
     the whole run. The destination run is partial; the operator is
     on notice.
     """
-    from activegraph.observability.migration import migrate
-    from activegraph.store.url import InvalidStoreURL, parse_store_url
+    from activegraph.store.errors import (
+        MigrationBackendConflictError,
+        MigrationBackendLoadError,
+        UnsupportedMigrationBackendError,
+        UnsupportedMigrationCapabilityError,
+    )
+    from activegraph.store.migration import migrate
+    from activegraph.store.url import InvalidStoreURL
 
+    # migrate() itself opens the source backend before the destination
+    # backend, so an incompatible source (schema mismatch or otherwise)
+    # still cannot create or initialize a destination as a side effect —
+    # no separate CLI-level preflight is needed, and skipping one is what
+    # lets third-party-registered schemes reach the resolver instead of
+    # being rejected by the built-in-only URL parser first.
+    only = list(run_id) if run_id else None
     try:
-        parse_store_url(src)
-        parse_store_url(dst)
-    except InvalidStoreURL as e:
+        with _schema_mismatch_as_corruption():
+            report = migrate(
+                src,
+                dst,
+                only_run_ids=only,
+                skip_corrupted=skip_corrupted,
+            )
+    except (
+        InvalidStoreURL,
+        MigrationBackendConflictError,
+        MigrationBackendLoadError,
+        UnsupportedMigrationBackendError,
+        UnsupportedMigrationCapabilityError,
+    ) as e:
         click.echo(str(e), err=True)
         raise SystemExit(EXIT_USAGE_ERROR)
-
-    # Validate source first so an incompatible source cannot create or
-    # initialize a destination as a side effect.  A valid source is followed
-    # by a destination preflight; for a fresh store this intentionally creates
-    # only the current schema and metadata before migration starts.
-    _list_runs_or_die(src)
-    _list_runs_or_die(dst)
-
-    only = list(run_id) if run_id else None
-    with _schema_mismatch_as_corruption():
-        report = migrate(src, dst, only_run_ids=only, skip_corrupted=skip_corrupted)
 
     if as_json:
         out = {

@@ -174,6 +174,13 @@ Migration semantics:
 - Migration is **not bidirectional**. There is no `sync` mode and no
   rollback. To go back, migrate the other direction.
 
+The canonical library API is `activegraph.store.migration`. SQLite and
+Postgres providers ship with the framework. A third-party backend can join the
+same CLI path through `activegraph.migration_backends` entry points or
+`register_migration_backend()` without changing the central migrator. Source
+`read` and destination `write` capability/URL validation completes before
+either session opens; every opened session is closed destination-first.
+
 When migration is the right tool: you are graduating a run from a
 laptop SQLite file to a shared Postgres database, or moving a
 historical archive between Postgres instances. When it is the wrong
@@ -316,7 +323,7 @@ from activegraph import (
 )
 
 graph = Graph()
-rt = Runtime(
+with Runtime(
     graph,
     sinks=[
         SinkConfig(
@@ -326,12 +333,10 @@ rt = Runtime(
             overflow_policy=OverflowPolicy.DROP_NEWEST,
         )
     ],
-)
-
-rt.run_goal("build the report")
-assert rt.flush_sinks(timeout=5.0)
-print(rt.sink_statuses())
-rt.close_sinks(timeout=5.0)
+) as rt:
+    rt.run_goal("build the report")
+    assert rt.flush_sinks(timeout=5.0)
+    print(rt.sink_statuses())
 ```
 
 The defaults are capacity 1024 and `drop_newest`. The other declared
@@ -340,6 +345,19 @@ Every overflow is counted in `SinkStatus` and the standard sink metrics.
 `RecordingSink` is the thread-safe in-memory double for application tests.
 Status snapshots include active sinks, timed-out closes that can be retried,
 and terminal close failures retained until their name is reused or removed.
+Flush is non-detaching: it does not finalize attachment ownership or release a
+name. If a timed-out close later reaches CLOSED or FAILED, only close/remove
+reaps closing ownership. A terminal failure remains queryable until explicit
+removal or name reuse. A failed close retry can therefore return `False` while
+still releasing closing ownership and retaining the failure snapshot.
+
+`Runtime.close(timeout=5.0)` is the deterministic ownership boundary for every
+sink attached to its Graph and is called automatically by the Runtime context
+manager. It delegates to `close_sinks`: an ordinary timeout or partial adapter
+failure returns `False`, remains inspectable through `sink_statuses()`, and may
+be explicitly retried. Closing rejects later Runtime mutations with
+`RuntimeClosedError`; read-only inspection remains available. It does not close
+the event store or remove graph listeners.
 
 Normal `Runtime.load`, `fork`, and strict replay never redeliver history
 to live sinks. Passing `sinks=` to those APIs attaches them only after the
@@ -505,13 +523,16 @@ The cardinality rule above is your guide.
 
 ## Runtime introspection
 
-`runtime.status(recent: int = 20)` returns a `RuntimeStatus` — a
-frozen dataclass. Calling it is cheap: no graph traversal, and outside
-an active drain it scans backward only to the latest terminal runtime
-event. A same-process observer of the same Runtime instance sees
-`running` while any public drain is active. The small internal lock
-protects this liveness count only; it does not make concurrent Runtime
-mutation safe.
+`runtime.status(recent: int = 20)` returns a `RuntimeStatus` — a frozen
+dataclass. The operation is side-effect-free and in-memory. With N materialized
+history events and B registered behaviors, current work is
+`O(N + B + min(N, recent))`; `recent` bounds returned summaries, not history
+construction. It performs no store I/O or object/relation traversal, and
+outside an active drain it scans backward only to the latest terminal
+runtime event. It is safe to call from any thread. A same-process observer
+of the same Runtime instance sees `running` while any public drain is
+active — the small internal lock protects this liveness count only; it does
+not make concurrent Runtime mutation safe.
 
 ```python
 status = rt.status()

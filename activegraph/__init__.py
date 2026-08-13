@@ -53,6 +53,7 @@ from activegraph.runtime.config_errors import (
     IncompatibleRuntimeState,
     InvalidArgumentType,
     InvalidRuntimeConfiguration,
+    RuntimeClosedError,
 )
 from activegraph.runtime.errors import ReplayDivergenceError
 from activegraph.runtime.exec_errors import (
@@ -84,6 +85,8 @@ from activegraph.sinks import (
     SinkStatus,
 )
 from activegraph.store import (
+    BackendRegistration,
+    CorruptMigrationEvent,
     CorruptedEventPayloadError,
     DuplicateEventError,
     EventNotFoundError,
@@ -93,12 +96,27 @@ from activegraph.store import (
     InMemoryEventStore,
     InMemoryGraphStore,
     InvalidStoreURL,
+    MigrationBackend,
+    MigrationBackendCloseError,
+    MigrationBackendConflictError,
+    MigrationBackendLoadError,
+    MigrationBackendProvider,
+    MigrationCapability,
+    MigrationItem,
+    MigrationReport,
+    MigrationRunReport,
     NonSerializableEventError,
     RunRecord,
     SQLiteEventStore,
     SchemaVersionMismatch,
+    UnsupportedMigrationBackendError,
+    UnsupportedMigrationCapabilityError,
+    clear_migration_backend_cache,
+    migrate,
     open_store,
     parse_store_url,
+    register_migration_backend,
+    resolve_migration_backend,
 )
 # v0.7 public surface for tools
 from activegraph.tools import (
@@ -114,14 +132,11 @@ from activegraph.tools import (
 # v0.8 observability surface
 from activegraph.observability import (
     Metrics,
-    MigrationReport,
-    MigrationRunReport,
     NoOpMetrics,
     OpenTelemetryMetrics,
     PrometheusMetrics,
     RuntimeStatus,
     configure_logging,
-    migrate,
 )
 # v0.9 packs surface (top-level: the API for *using* packs from user code).
 # Pack-aware decorators live under `activegraph.packs` and are intentionally
@@ -158,12 +173,14 @@ __all__ = [
     "ApprovalNotFoundError",
     "AuthorityDecision",
     "Behavior",
+    "BackendRegistration",
     "BehaviorFailure",
     "BehaviorNotFoundError",
     "Budget",
     "Clock",
     "ConfigurationError",
     "CorruptedEventPayloadError",
+    "CorruptMigrationEvent",
     "Diff",
     "DeliveryContext",
     "DeliveryMode",
@@ -198,6 +215,13 @@ __all__ = [
     "LLMBehavior",
     "LLMBehaviorError",
     "Metrics",
+    "MigrationBackend",
+    "MigrationBackendCloseError",
+    "MigrationBackendConflictError",
+    "MigrationBackendLoadError",
+    "MigrationBackendProvider",
+    "MigrationCapability",
+    "MigrationItem",
     "MigrationReport",
     "MigrationRunReport",
     "MissingOptionalDependency",
@@ -244,6 +268,7 @@ __all__ = [
     "ReservedFieldError",
     "RunRecord",
     "Runtime",
+    "RuntimeClosedError",
     "RunQuantumResult",
     "RuntimeContextRequiredError",
     "RuntimeStatus",
@@ -261,9 +286,12 @@ __all__ = [
     "ToolNotFoundError",
     "UnknownToolError",
     "UnsupportedPatternError",
+    "UnsupportedMigrationBackendError",
+    "UnsupportedMigrationCapabilityError",
     "View",
     "behavior",
     "clear_discovery_cache",
+    "clear_migration_backend_cache",
     "clear_registry",
     "clear_tool_registry",
     "configure_logging",
@@ -277,7 +305,9 @@ __all__ = [
     "open_store",
     "parse_store_url",
     "register",
+    "register_migration_backend",
     "relation_behavior",
+    "resolve_migration_backend",
     "tool",
 ]
 

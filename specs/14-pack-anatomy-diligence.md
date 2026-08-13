@@ -24,14 +24,14 @@ sentences.
 | File | Lines | Registers on `Pack(...)` as | Role |
 |---|---|---|---|
 | `__init__.py` | 86 | the assembly point itself | Imports every other module's list/schema and builds the single `pack = Pack(...)` value (`__init__.py:59-83`) |
-| `object_types.py` | 163 | `object_types=`, `relation_types=` | 8 Pydantic schemas + 8 `ObjectType` wrappers, 6 `RelationType` wrappers |
+| `object_types.py` | 169 | `object_types=`, `relation_types=` | 8 Pydantic schemas + 8 `ObjectType` wrappers, 7 `RelationType` wrappers |
 | `settings.py` | 60 | `settings_schema=` | One Pydantic `BaseModel`, `DiligenceSettings`, 8 fields, every field has a default |
 | `tools.py` | 124 | `tools=` | 3 `@tool`-decorated functions, each with its own input/output Pydantic schema |
-| `behaviors.py` | 447 | `behaviors=` | 7 `@behavior` / `@llm_behavior` functions plus their LLM-output Pydantic schemas |
+| `behaviors.py` | 449 | `behaviors=` | 7 `@behavior` / `@llm_behavior` functions plus their LLM-output Pydantic schemas |
 | `prompts/*.md` (4 files) | 25–35 each | `prompts=` via `load_prompts_from_dir()` | One markdown file per LLM behavior, TOML frontmatter (`version = "1.0.0"`), matched to the behavior by filename |
 | `manifest.toml` | 39 | *checked against the Pack* | Declarative identity, dependencies, live surface, fixture resource, and normative content hash; shipped as wheel package data |
 | `fixtures/companies.py` | 511 | *not registered on the Pack at all* | Raw fixture data: 3 companies × documents, filings, summaries, questions, findings, risks, memos |
-| `fixtures/__init__.py` | 364 | *not registered on the Pack at all* | `RecordedDiligenceProvider` (a scripted `LLMProvider`) + the three tool-lookup functions `tools.py` calls |
+| `fixtures/__init__.py` | 365 | *not registered on the Pack at all* | `RecordedDiligenceProvider` (a scripted `LLMProvider`) + the three tool-lookup functions `tools.py` calls |
 
 Two things worth stating up front because they're easy to assume wrongly:
 
@@ -55,7 +55,7 @@ Two things worth stating up front because they're easy to assume wrongly:
 ```mermaid
 flowchart TD
     subgraph pkg["activegraph/packs/diligence/"]
-        objtypes["object_types.py<br/>OBJECT_TYPES (8), RELATION_TYPES (6)"]
+        objtypes["object_types.py<br/>OBJECT_TYPES (8), RELATION_TYPES (7)"]
         settings["settings.py<br/>DiligenceSettings"]
         tools["tools.py<br/>TOOLS (3 @tool fns)"]
         behaviors["behaviors.py<br/>BEHAVIORS (7 fns)"]
@@ -97,7 +97,7 @@ fixtures exist; they're a convention (`CONTRACT v0.9 #18`, cited in
 
 ---
 
-## The domain: 8 object types, 6 relation types
+## The domain: 8 object types, 7 relation types
 
 ```mermaid
 graph LR
@@ -113,6 +113,7 @@ graph LR
     claim -->|addresses| question
     evidence -->|supports| claim
     claim -.->|"contradicts<br/>(claim → claim, same type)"| claim
+    claim -->|has_contradiction| contradiction
     claim -->|references| document
     memo -->|references| document
     claim -->|derived_from| document
@@ -123,13 +124,11 @@ graph LR
     style contradiction fill:#fff0f0,stroke:#cc6666
 ```
 
-`contradiction` is the one object type with **no relation type pointing at
-or from it** (`object_types.py:111-163` — none of the six `RelationType`
-entries name `"contradiction"` as a source or target). It's created purely
-as a side effect of the `contradicts` edge existing between two claims
-(see the trigger cascade below) and is read back only by the memo
-synthesizer's prompt, not via a graph edge — worth knowing before assuming
-every object type participates in the relation graph.
+Each `contradiction` is created as a review aggregate for one `contradicts`
+edge between two claims. The detector then emits exactly two
+`claim --has_contradiction--> contradiction` relations, using the two real
+claim IDs stored on the object. `Graph.neighborhood(claim_id, depth=1)` is
+therefore the supported discovery path from either claim to the aggregate.
 
 ---
 
@@ -162,6 +161,7 @@ flowchart TD
 
     contraedge -->|"on=relation.created, where type=contradicts<br/>PLUS pattern= Cypher-subset match<br/>behaviors.py:263-271<br/>both claims' confidence > 0.7"| cd["contradiction_detector<br/>(pattern subscription)"]
     cd -->|creates| contraobj(["object.created<br/>type=contradiction"])
+    contraobj -->|"then creates exactly 2<br/>one per stored claim id"| hascontra(["relation.created × 2<br/>type=has_contradiction"])
 
     claimobj -->|"on=object.created, where type=claim<br/>behaviors.py:305-322<br/>idempotent: one risk batch per company"| ri["risk_identifier<br/>(@llm_behavior)"]
     ri -->|creates| riskobj(["object.created<br/>type=risk"])
@@ -181,14 +181,8 @@ neither obvious from the diagram alone:
   "risk")` (plus `ctx._runtime.pending_approvals()`) and returns
   immediately once a risk exists for the company (`behaviors.py:338-344`).
   `memo_synthesizer` does the same for `memo` (`behaviors.py:399-404`).
-  Both fire many times per run and no-op after the first — the module
-  docstring's claim that `risk_identifier` uses `activate_after=8`
-  (`behaviors.py:15`) **contradicts the function's own comment** two
-  hundred lines later ("Simpler than activate_after for v0.9... the killer
-  demo doesn't need delayed scheduling here," `behaviors.py:309-310`) and
-  the actual decorator, which carries no `activate_after=` argument
-  (`behaviors.py:305-322`). The docstring is stale; the idempotent-scan
-  pattern is what actually ships.
+  Both fire many times per run and no-op after the first. The decorators carry
+  no `activate_after=` argument; the idempotent graph scan is what ships.
 - **`contradiction_detector` is the only pattern-subscription behavior in
   the pack** — it declares both `on=`/`where=` *and* `pattern=`
   (`behaviors.py:263-271`), so it fires on a `relation.created` event AND
@@ -304,18 +298,10 @@ new claims:
 
 ## Open questions
 
-1. **Stale docstring, confirmed above**: `behaviors.py:15` claims
-   `risk_identifier` uses `activate_after=8`; the decorator and the
-   function's own comment (`:309-310`) say otherwise. Worth fixing in
-   the source, not just noting here.
-2. **`contradiction` has no relation type.** Confirmed by exhaustive
-   read of `object_types.py`'s six `RelationType` entries — none name
-   `contradiction` as source or target. It's discoverable only by
-   `ctx.view.objects(type="contradiction")`, never by graph traversal
-   from a claim. Intentional (contradictions are meant to be read via
-   the memo synthesis prompt, not traversed) or an oversight — not
-   resolvable from the code alone.
-3. **Manifest schema scope is narrower than Pack scope.** Diligence's manifest
+1. **Contradiction traversal is now explicit.** The former open question is
+   resolved by `has_contradiction`: exactly two claim-to-aggregate edges make
+   the review item discoverable from either claim without assigning A/B roles.
+2. **Manifest schema scope is narrower than Pack scope.** Diligence's manifest
    declares all schema-supported live surfaces and its fixture resource, but
    prompts and policies remain outside the current schema and are verified by
    their dedicated loaders/tests instead.

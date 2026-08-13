@@ -7,8 +7,8 @@ place per CONTRACT v0.9 #22).
 What it provides:
   - 8 object types (company, document, question, claim, evidence,
     contradiction, risk, memo) with Pydantic schemas.
-  - 6 relation types (addresses, supports, contradicts, references,
-    derived_from, mitigates) with source/target type rules.
+  - 7 relation types (addresses, supports, contradicts, has_contradiction,
+    references, derived_from, mitigates) with source/target type rules.
   - 7 behaviors: company_planner, question_generator,
     document_researcher (LLM + tools), evidence_linker (deterministic
     safety net), contradiction_detector (pattern subscription),

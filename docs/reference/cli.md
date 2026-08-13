@@ -285,6 +285,12 @@ store whose schema differs from this build requires a compatible
 source-side build or a version-specific migration path; that broader
 design is tracked separately.
 
+SQLite and Postgres are built in. Migration-only backends registered through
+the `activegraph.migration_backends` entry-point group use the same command;
+the CLI preflights source `read` and destination `write` capabilities before
+opening either URL. This extension does not make the backend available to
+ordinary `open_store()` runtime operations.
+
 `--skip-corrupted` is the recovery primitive for runs containing
 [`CorruptedEventPayloadError`](errors/corrupted-event-payload-error.md).
 Without the flag, a corrupted event in any run causes that run

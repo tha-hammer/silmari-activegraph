@@ -1,11 +1,15 @@
 """Runtime introspection — RuntimeStatus and friends. CONTRACT v0.8 #11.
 
-``runtime.status(recent=N)`` returns a ``RuntimeStatus``: a frozen
-snapshot. It performs no graph traversal and only a bounded reverse log
-scan to derive dormant state. A small lock makes the same instance's
-active-drain overlay coherent to observers; it does not make concurrent
-Runtime mutation safe. The CLI's ``inspect`` command loads a separate,
-dormant Runtime and is not a cross-process liveness probe.
+``runtime.status(recent=N)`` returns a ``RuntimeStatus``: a frozen snapshot.
+The operation is side-effect-free and in-memory; with N materialized history
+events and B registered behaviors, current work is
+``O(N + B + min(N, recent))``, bounded by a reverse log scan to derive
+dormant state — ``recent`` bounds returned summaries, not history
+construction. It performs no store I/O or object/relation traversal. A small
+lock makes the same instance's active-drain overlay coherent to observers;
+it does not make concurrent Runtime mutation safe. The CLI's ``inspect``
+command loads a separate, dormant Runtime and is not a cross-process
+liveness probe.
 
 There is no ``last_error`` field. Errors are events; filter
 ``recent_events`` for type ``behavior.failed``, or query the store for

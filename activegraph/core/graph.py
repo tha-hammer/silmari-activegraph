@@ -490,7 +490,13 @@ class Graph:
             return frozenset(self._sinks) | frozenset(self._closing_sinks)
 
     def flush_sinks(self, timeout: float | None = 5.0) -> bool:
-        """Flush every attached sink, with ``timeout`` applied per sink."""
+        """Flush every attached sink, with ``timeout`` applied per sink.
+
+        Flush is non-detaching: it does not finalize attachment ownership or
+        release a name. If a timed-out close later reaches CLOSED or FAILED,
+        only close/remove reaps closing ownership. A terminal failure remains
+        queryable until explicit removal or name reuse.
+        """
 
         with self._emit_lock:
             handles = tuple(self._sinks.values()) + tuple(
@@ -500,7 +506,13 @@ class Graph:
         return all(results)
 
     def close_sinks(self, timeout: float | None = 5.0) -> bool:
-        """Detach and close every sink, with ``timeout`` applied per sink."""
+        """Detach and close every sink, with ``timeout`` applied per sink.
+
+        Retry this method (or ``remove_sink``) after a timed-out close reaches
+        a terminal state so the Graph can reap closing ownership. A failed
+        retry may return ``False`` while still retaining its queryable failure
+        snapshot and releasing the attachment name.
+        """
 
         with self._emit_lock:
             for name, handle in tuple(self._sinks.items()):
