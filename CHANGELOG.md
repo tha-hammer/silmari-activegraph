@@ -17,6 +17,13 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
 
 ### Added
 
+- **Pack manifests are now shipped and scaffolded.** The bundled Diligence
+  pack and every `activegraph pack new` project include a package-data
+  `manifest.toml`, a real fixture resource, and direct surface/content-hash
+  verification. `Pack.manifest_path` provides an optional absolute, exact
+  locator for relation-only or componentless packs; legacy module discovery
+  remains available when it is omitted.
+
 - **Complete standard metric emission** (CONTRACT v1.11 #7). All 24
   existing `METRIC_NAMES` now have executable public production paths with
   unchanged names and tag keys: exact LLM/tool request, cache, response,
@@ -150,6 +157,29 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
     with its own docs slug. Its exact legacy one-line `str`/`args` is retained
     under a narrow compatibility waiver; structured rendering is deferred to
     the separately tracked next-major follow-up.
+- **Manifest checks are visible and fixture paths are strict.** Explicit
+  missing/unreadable paths and unexpected locator/checker failures now emit
+  one structured WARNING per Pack identity while the 1.x load still proceeds.
+  Manifest fixture entrypoints must resolve to an existing regular file inside
+  the pack without absolute paths, traversal, or symlinks.
+- **Sandbox trial wire schema v2 now requires artifact pins.** New
+  `PackSource` values require an exact lowercase `sha256:` bundle hash, and
+  `TrialSpecification` emits schema v2. Pinned schema-v1 JSON remains accepted
+  as migration input and reserializes as v2; missing, empty, or malformed v1
+  pins now fail before a fork or import. Callers that previously relied on an
+  empty pin must compute the candidate and every extra pack's bundle hash and
+  reserialize the specification.
+- **Pack names now have one 1–64 character identity rule.** `Pack` and
+  `manifest.toml` accept the same lowercase snake-case boundary; scaffolding
+  keeps its existing strip/lowercase behavior but caps the normalized kebab
+  distribution slug at 64 characters. This is an intentional 1.x constructor
+  narrowing: third-party names longer than 64 characters must choose a shorter
+  stable identity before upgrading.
+- **Pack versions now require PEP 440 at construction and manifest parse.**
+  Valid strings retain their exact spelling and identity; surrounding
+  whitespace, non-strings, and labels such as `nightly` now fail early. This is
+  an intentional 1.x narrowing. Migrate free-form labels to a valid version
+  such as `0+nightly`; the framework does not normalize them automatically.
 
 ## [1.10.0] — 2026-07-12
 

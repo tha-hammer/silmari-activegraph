@@ -29,7 +29,7 @@ class TrialExecutorConformance(ABC):
 
     @abstractmethod
     def make_serialized_specification(self) -> str:
-        """Return one valid version-1 specification for the adapter."""
+        """Return one valid current-version specification for the adapter."""
 
     def test_protocol_and_isolation_are_declared(self) -> None:
         executor = self.make_executor()

@@ -25,7 +25,7 @@ classifiers = [
 # Pydantic is required for the pack format (object type schemas and
 # settings models). It was optional in v0.8 (LLM-only); v0.9 pulls it
 # into the hard deps so packs Just Work.
-dependencies = ["click>=8,<9", "pydantic>=2"]
+dependencies = ["click>=8,<9", "packaging>=24", "pydantic>=2"]
 
 [project.optional-dependencies]
 # v1.0.1 #5: the [llm] extra carries every shipped provider's SDK so a
@@ -193,7 +193,7 @@ exclude = ["tests*", "examples*"]
 # the gate fails before the wheel can ship.
 
 [tool.setuptools.package-data]
-"activegraph.packs.diligence" = ["prompts/*.md"]
+"activegraph.packs.diligence" = ["manifest.toml", "prompts/*.md"]
 
 [tool.pytest.ini_options]
 markers = [
@@ -255,6 +255,7 @@ files = [
     "activegraph/errors.py",
     "activegraph/frame.py",
     "activegraph/packs/__init__.py",
+    "activegraph/packs/validation.py",
     "activegraph/packs/diligence/settings.py",
     "activegraph/llm/embedding_cache.py",
     "activegraph/llm/errors.py",
@@ -319,6 +320,7 @@ module = [
     "activegraph.errors",
     "activegraph.frame",
     "activegraph.packs",
+    "activegraph.packs.validation",
     "activegraph.packs.diligence.settings",
     "activegraph.llm.embedding_cache",
     "activegraph.llm.errors",

@@ -80,6 +80,12 @@ def main(rt):
 '''
 
 
+def _write_fixture_resource(root):
+    fixtures = root / "fixtures"
+    fixtures.mkdir()
+    (fixtures / "run_fixtures.py").write_text("# deterministic\n")
+
+
 def _candidate_dir(
     tmp_path,
     scenario=HAPPY_SCENARIO,
@@ -90,6 +96,7 @@ def _candidate_dir(
     root.mkdir()
     (root / "__init__.py").write_text(init)
     (root / "scenario.py").write_text(scenario)
+    _write_fixture_resource(root)
     content = compute_content_hash(root)
     (root / "manifest.toml").write_text(
         manifest_template.format(content_hash=content)
@@ -145,7 +152,13 @@ def test_happy_path_trial_completes_in_isolation(tmp_path):
 
 def test_bundle_hash_mismatch_refuses_before_import(tmp_path):
     path, parent_run, tip, n_parent = _parent_store(tmp_path)
-    root, _ = _candidate_dir(tmp_path)
+    sentinel = tmp_path / "candidate-imported"
+    init = (
+        "from pathlib import Path\n"
+        f"Path({str(sentinel)!r}).write_text('imported')\n"
+        + PACK_INIT
+    )
+    root, _ = _candidate_dir(tmp_path, init=init)
 
     report = run_forked_trial(
         path,
@@ -160,6 +173,7 @@ def test_bundle_hash_mismatch_refuses_before_import(tmp_path):
     assert "bundle hash mismatch" in report.detail
     # Nothing loaded, nothing ran: the fork carries zero trial events.
     assert report.events_appended == 0
+    assert not sentinel.exists()
     fork = Runtime.load(path, run_id=report.fork_run_id, behaviors=[])
     assert not [e for e in fork.graph.events if e.type == "pack.loaded"]
     _parent_untouched(path, parent_run, n_parent)
@@ -450,6 +464,7 @@ def test_recorded_segment_replay_inside_the_trial(tmp_path):
     root.mkdir()
     (root / "__init__.py").write_text(REPLAY_PACK_INIT)
     (root / "scenario.py").write_text(REPLAY_SCENARIO)
+    _write_fixture_resource(root)
     content = compute_content_hash(root)
     (root / "manifest.toml").write_text(
         REPLAY_MANIFEST.format(content_hash=content)
@@ -511,10 +526,11 @@ pack = Pack(name="trial_candidate", version="0.1.0", behaviors=(annotator,))
 '''
 
 
-def _trusted_dir(tmp_path):
+def _trusted_dir(tmp_path, init=TRUSTED_PACK_INIT):
     root = tmp_path / "trusted_helper"
     root.mkdir()
-    (root / "__init__.py").write_text(TRUSTED_PACK_INIT)
+    (root / "__init__.py").write_text(init)
+    _write_fixture_resource(root)
     content = compute_content_hash(root)
     (root / "manifest.toml").write_text(
         TRUSTED_MANIFEST.format(content_hash=content)
@@ -534,6 +550,7 @@ def test_extra_packs_enable_cross_pack_interaction_trials(tmp_path):
     (root / "scenario.py").write_text(
         'def main(rt):\n    rt.run_goal("cross-pack trial")\n'
     )
+    _write_fixture_resource(root)
     annotator_manifest = MANIFEST_TEMPLATE.replace(
         'behaviors = ["greeter"]', 'behaviors = ["annotator"]'
     )
@@ -577,8 +594,20 @@ def test_extra_pack_bundle_mismatch_fails_materialization(tmp_path):
     # An extra pack is pinned exactly like the candidate: a wrong
     # bundle hash refuses the WHOLE trial before anything imports.
     path, parent_run, tip, n_parent = _parent_store(tmp_path)
-    trusted_root, _ = _trusted_dir(tmp_path)
-    root, bundle = _candidate_dir(tmp_path)
+    trusted_sentinel = tmp_path / "trusted-imported"
+    candidate_sentinel = tmp_path / "candidate-imported"
+    trusted_init = (
+        "from pathlib import Path\n"
+        f"Path({str(trusted_sentinel)!r}).write_text('imported')\n"
+        + TRUSTED_PACK_INIT
+    )
+    candidate_init = (
+        "from pathlib import Path\n"
+        f"Path({str(candidate_sentinel)!r}).write_text('imported')\n"
+        + PACK_INIT
+    )
+    trusted_root, _ = _trusted_dir(tmp_path, init=trusted_init)
+    root, bundle = _candidate_dir(tmp_path, init=candidate_init)
 
     report = run_forked_trial(
         path,
@@ -596,9 +625,18 @@ def test_extra_pack_bundle_mismatch_fails_materialization(tmp_path):
     assert report.outcome == "materialization_failed"
     assert "bundle hash mismatch" in report.detail
     assert report.events_appended == 0
+    assert not trusted_sentinel.exists()
+    assert not candidate_sentinel.exists()
     fork = Runtime.load(path, run_id=report.fork_run_id, behaviors=[])
     assert not [e for e in fork.graph.events if e.type == "pack.loaded"]
     _parent_untouched(path, parent_run, n_parent)
+
+
+def test_invalid_direct_bundle_pin_fails_before_execution(tmp_path):
+    sentinel = tmp_path / "candidate-imported"
+    with pytest.raises(ValueError, match="expected_bundle_hash"):
+        PackSource(root_dir="/candidate", expected_bundle_hash="")
+    assert not sentinel.exists()
 
 
 # ------------------- diagnosability + startup channel (v1.7 soak fix)

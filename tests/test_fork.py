@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from activegraph import (
@@ -59,6 +61,63 @@ def test_fork_creates_new_run_with_copied_events(tmp_path):
     assert runs[fork.run_id].parent_run_id == parent.run_id
     assert runs[fork.run_id].forked_at_event_id == target
     assert runs[fork.run_id].label == "branch-A"
+
+
+def test_sqlite_fork_rolls_back_metadata_and_prefix_on_mid_copy_failure(tmp_path):
+    db = _tmp_db(tmp_path)
+    parent = SQLiteEventStore(db, run_id="run_parent")
+    parent.upsert_run(created_at="2026-01-01T00:00:00Z", goal="parent")
+    from activegraph import Event
+
+    for i in range(4):
+        parent.append(
+            Event(
+                id=f"evt_{i}",
+                type="test.event",
+                payload={"position": i},
+                timestamp="2026-01-01T00:00:00Z",
+            )
+        )
+    parent_events_before = list(parent.iter_events())
+    parent_run_before = parent.get_run()
+    recent_before = SQLiteEventStore.most_recent_run_id(db)
+
+    raw = sqlite3.connect(db)
+    try:
+        raw.execute(
+            """
+            CREATE TRIGGER abort_child_third
+            BEFORE INSERT ON events
+            WHEN NEW.run_id = 'run_child' AND NEW.id = 'evt_2'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected copy failure');
+            END
+            """
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected copy failure"):
+        SQLiteEventStore.fork_run(
+            db,
+            parent_run_id="run_parent",
+            new_run_id="run_child",
+            at_event_id="evt_3",
+            label="failed-child",
+            created_at="2026-01-02T00:00:00Z",
+        )
+
+    child = SQLiteEventStore(db, run_id="run_child")
+    try:
+        assert child.get_run() is None
+        assert list(child.iter_events()) == []
+        assert list(parent.iter_events()) == parent_events_before
+        assert parent.get_run() == parent_run_before
+        assert SQLiteEventStore.most_recent_run_id(db) == recent_before
+    finally:
+        child.close()
+        parent.close()
 
 
 def test_fork_threads_graph_store_into_projection(tmp_path):

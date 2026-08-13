@@ -4,7 +4,7 @@ What failed:
   runtime.fork() was called on a runtime with PostgresEventStore. The fork primitive currently only supports SQLite-backed runtimes.
 
 Why:
-  Fork copies events up to the fork point using the store's native primitives (SQLite uses a direct SQL copy under a single transaction). Postgres has a different transactional shape and an in-memory store has no copy primitive at all. v0.8 deliberately scoped the fork command to SQLite first — the limitation is documented in CONTRACT v0.8 #5.
+  Fork copies events up to the fork point using the store's native primitives (SQLite uses a direct SQL copy under a single transaction). Postgres has a different transactional shape and an in-memory store has no copy primitive at all. Runtime.fork() remains scoped to SQLite under CONTRACT v0.5 #9; its durable atomicity is clarified by the 2026-08-12 Set 4 amendment #2.
 
 How to fix:
   Migrate the run to a SQLite store first, then fork:

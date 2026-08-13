@@ -332,9 +332,81 @@ def load_pack_into_runtime(
 
 _manifest_log = logging.getLogger("activegraph.packs.manifest")
 
-# (pack name, pack version, manifest path) triples already validated
-# this process — clean or not, the tier runs once per pack.
-_manifest_checked: set[tuple[str, str, str]] = set()
+# Pack identities already validated this process — clean or not, the tier
+# runs once per logical Pack even if a caller later changes its locator.
+_manifest_checked: set[tuple[str, str]] = set()
+
+_MANIFEST_INVALID = "pack.manifest_invalid"
+_MANIFEST_CHECK_FAILED = "pack.manifest_check_failed"
+
+
+def _classify_manifest_failure(
+    stage: str, declared_path: Optional[Path], error: Exception
+) -> tuple[str, str, list[str]]:
+    """Classify a manifest failure without mutating warning state.
+
+    The seam carries stage and locator context so an OSError raised by a
+    locator/checker bug is not mistaken for a manifest-open failure.
+    """
+    del declared_path
+    from activegraph.packs.manifest import PackManifestError
+
+    violations = (
+        list(error.violations) if isinstance(error, PackManifestError) else []
+    )
+    if isinstance(error, PackManifestError):
+        cause = error.__cause__
+        if isinstance(cause, FileNotFoundError):
+            return _MANIFEST_CHECK_FAILED, "missing", violations
+        if isinstance(cause, OSError):
+            return _MANIFEST_CHECK_FAILED, "unreadable", violations
+        return _MANIFEST_INVALID, "validation", violations
+    if stage == "load":
+        if isinstance(error, FileNotFoundError):
+            return _MANIFEST_CHECK_FAILED, "missing", violations
+        if isinstance(error, OSError):
+            return _MANIFEST_CHECK_FAILED, "unreadable", violations
+    return _MANIFEST_CHECK_FAILED, "unexpected", violations
+
+
+def _warn_manifest_failure(
+    pack: Pack,
+    *,
+    stage: str,
+    manifest_path: Optional[Path],
+    error: Exception,
+) -> None:
+    """Emit the one structured warning for a classified failure."""
+    reason, failure_kind, violations = _classify_manifest_failure(
+        stage, manifest_path, error
+    )
+    key = (pack.name, pack.version)
+    if key in _manifest_checked:
+        return
+    _manifest_checked.add(key)
+    rendered_path = (
+        str(manifest_path) if manifest_path is not None else "<unresolved>"
+    )
+    _manifest_log.warning(
+        "pack %s@%s: manifest check failed at %s (%s). The pack still "
+        "loads — this stays a warning until activegraph 2.0.",
+        pack.name,
+        pack.version,
+        stage,
+        failure_kind,
+        extra={
+            "pack": pack.name,
+            "pack_version": pack.version,
+            "manifest_path": rendered_path,
+            "reason": reason,
+            "failure_kind": failure_kind,
+            "error_type": type(error).__name__,
+            "error": str(error),
+            "violations": violations,
+            "stage": stage,
+        },
+        exc_info=True,
+    )
 
 
 def _locate_pack_manifest(pack: Pack) -> Optional[Path]:
@@ -343,6 +415,9 @@ def _locate_pack_manifest(pack: Pack) -> Optional[Path]:
     looking for a sibling ``manifest.toml``. Returns None when the
     pack has no discoverable manifest — which is not a violation.
     """
+    if pack.manifest_path is not None:
+        return pack.manifest_path
+
     components: list[Any] = [getattr(b, "fn", None) for b in pack.behaviors]
     components += [getattr(t, "fn", None) for t in pack.tools]
     if pack.settings_schema is not EmptySettings:
@@ -379,49 +454,35 @@ def _warn_on_manifest_violations(pack: Pack) -> None:
     """
     try:
         manifest_path = _locate_pack_manifest(pack)
-        if manifest_path is None:
-            return  # no manifest: silent, per the Q2 schedule
-        key = (pack.name, pack.version, str(manifest_path))
-        if key in _manifest_checked:
-            return
-        _manifest_checked.add(key)
-        from activegraph.packs.manifest import (
-            PackManifestError,
-            load_manifest,
-            verify_surface,
+    except Exception as error:
+        _warn_manifest_failure(
+            pack, stage="locate", manifest_path=None, error=error
         )
+        return
+    if manifest_path is None:
+        return  # no legacy manifest: intentionally silent
 
-        try:
-            manifest = load_manifest(manifest_path)
-            verify_surface(manifest, pack)
-        except PackManifestError as err:
-            _manifest_log.warning(
-                "pack %s@%s: manifest.toml found at %s but validation "
-                "failed with %d violation(s). The pack still loads — "
-                "this stays a warning until activegraph 2.0. First "
-                "violation: %s",
-                pack.name,
-                pack.version,
-                manifest_path,
-                len(err.violations),
-                err.violations[0] if err.violations else "",
-                extra={
-                    "pack": pack.name,
-                    "pack_version": pack.version,
-                    "manifest_path": str(manifest_path),
-                    "violations": list(err.violations),
-                    "reason": "pack.manifest_invalid",
-                },
+    key = (pack.name, pack.version)
+    if key in _manifest_checked:
+        return
+
+    from activegraph.packs.manifest import load_manifest, verify_surface
+
+    stage = "load"
+    try:
+        if pack.manifest_path is not None and manifest_path.is_dir():
+            raise IsADirectoryError(
+                f"declared manifest_path is a directory: {manifest_path}"
             )
-    except Exception:
-        # The tier is advisory; discovery/IO surprises are debug noise,
-        # not load failures.
-        _manifest_log.debug(
-            "manifest warning tier errored for pack %s@%s",
-            pack.name,
-            pack.version,
-            exc_info=True,
+        manifest = load_manifest(manifest_path)
+        stage = "verify"
+        verify_surface(manifest, pack)
+    except Exception as error:
+        _warn_manifest_failure(
+            pack, stage=stage, manifest_path=manifest_path, error=error
         )
+        return
+    _manifest_checked.add(key)
 
 
 # ---------------------------------------------------------------- state

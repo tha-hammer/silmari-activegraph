@@ -71,7 +71,7 @@ graph TD
 
 - `TRIAL_OUTCOMES` — the closed outcome set: `completed | scenario_failed | limits_exceeded | materialization_failed | crashed` — `activegraph/sandbox/__init__.py:82-88`
 - `_EXIT_TO_OUTCOME` — child exit-code → outcome map (`0/30/40/50`) — `activegraph/sandbox/__init__.py:91-96`
-- `PackSource(root_dir, expected_bundle_hash="", manifest_required=True)` — `activegraph/sandbox/__init__.py:99-115`
+- `PackSource(root_dir, expected_bundle_hash, manifest_required=True)` — the hash is required and must be exact lowercase `sha256:` plus 64 hex characters (`activegraph/sandbox/__init__.py`)
 - `TrialLimits(wall_clock_seconds=120.0, max_rss_bytes=None, max_events=2000, max_llm_calls=0, env_passthrough=())` — `activegraph/sandbox/__init__.py:118-142`
 - `TrialReport(outcome, fork_run_id, events_appended, behavior_failures, detail, exit_code, warnings=())` — `activegraph/sandbox/__init__.py:145-169`
 - `SandboxStartupError(ConfigurationError, RuntimeError)` — preflight-only setup leaf, exported from `activegraph.sandbox` but not the package root — `activegraph/sandbox/__init__.py:174-184`
@@ -138,7 +138,7 @@ trial-request        ::= run_forked_trial( store_path ,
                                            [ label ] , [ extra_packs ] )
 store_path           ::= sqlite-path | store-url        (* fork requires SQLite *)
 pack_source          ::= PackSource( root_dir , expected_bundle_hash , manifest_required )
-expected_bundle_hash ::= "" | "sha256:" 64*HEXDIG       (* "" DISABLES the pin *)
+expected_bundle_hash ::= "sha256:" 64*LOWER-HEXDIG       (* mandatory *)
 manifest_required    ::= true | false                   (* default true *)
 extra_packs          ::= "(" { pack_source } ")"        (* loaded BEFORE the candidate *)
 scenario             ::= "" | rel-path [ "::" func-name ]   (* default func "main" *)
@@ -195,7 +195,7 @@ executor-call      ::= executor "." execute( serialized-specification )
                      | executor "." isolation_guarantees
 
 serialized-specification ::= canonical-json      (* sort_keys=True, separators=(",",":") *)
-canonical-json     ::= "{" "schema_version" ":" 1 ","
+canonical-json     ::= "{" "schema_version" ":" 2 ","
                            "store_path"     ":" nonempty-string ","
                            "parent_run_id"  ":" nonempty-string ","
                            "at_event"       ":" nonempty-string ","
@@ -205,7 +205,7 @@ canonical-json     ::= "{" "schema_version" ":" 1 ","
                            "label"          ":" nonempty-string ","
                            "extra_packs"    ":" "[" { pack-source-obj } "]" "}"
 pack-source-obj    ::= "{" "root_dir" ":" nonempty-string ","
-                           "expected_bundle_hash" ":" string ","
+                           "expected_bundle_hash" ":" expected_bundle_hash ","
                            "manifest_required" ":" boolean "}"
 limits-obj         ::= "{" "wall_clock_seconds" ":" number ","
                            "max_rss_bytes"  ":" ( integer | null ) ","
@@ -231,7 +231,11 @@ isolation          ::= TrialIsolationGuarantees( process , filesystem , network 
 `activegraph/sandbox/executor.py:12-22, 39-112, 115-215, 218-231`.
 
 **Contract notes.**
-- **Validation precedes any work.** `schema_version` must be exactly `1`;
+- **Validation precedes any work.** Newly constructed specifications and emitted JSON use the
+  exact integer `schema_version = 2`. The reader accepts exact integer `1` only as a migration
+  input when the candidate and every extra already carry a valid mandatory pin; it returns an
+  in-memory v2 specification. Missing, empty, or malformed pins in v1 or v2 fail at their full
+  nested path before a fork/import. Booleans, floats, and strings are not integer versions;
   `store_path`/`parent_run_id`/`at_event`/`label` must be non-empty strings; limits numerics are
   type-checked with `bool` explicitly rejected as an int — `activegraph/sandbox/executor.py:75-112`,
   `:305-378`. Malformed input raises `ValueError` before the executor does anything.
@@ -280,13 +284,13 @@ trial-job          ::= "{" "store_path"           ":" string ","
                            "fork_run_id"          ":" string ","
                            "initial_events"       ":" integer ","
                            "pack_root"            ":" abs-path ","
-                           "expected_bundle_hash" ":" string ","
+                           "expected_bundle_hash" ":" expected_bundle_hash ","
                            "manifest_required"    ":" boolean ","
                            "extra_packs"          ":" "[" { extra-pack } "]" ","
                            "scenario"             ":" string ","
                            "limits"               ":" limits-block "}"
 extra-pack         ::= "{" "pack_root" ":" abs-path ","
-                           "expected_bundle_hash" ":" string ","
+                           "expected_bundle_hash" ":" expected_bundle_hash ","
                            "manifest_required" ":" boolean "}"
 limits-block       ::= "{" "max_rss_bytes"  ":" ( integer | null ) ","
                            "max_events"     ":" ( integer | null ) ","
@@ -407,9 +411,9 @@ disk *before any import*, then the manifest is loaded, then the module is import
 identical chain, in order, **before** the candidate.
 
 ```ebnf
-materialize        ::= [ pin-check ] [ manifest-check ] import surface-check
+materialize        ::= pin-check [ manifest-check ] import surface-check
 pin-check          ::= verify_bundle_hash( expected_bundle_hash , pack_root )
-                       (* SKIPPED entirely when expected_bundle_hash == "" *)
+                       (* unconditional, including when manifest checks are disabled *)
 manifest-check     ::= load_manifest( pack_root ) -> PackManifest
                        (* SKIPPED when manifest_required is false *)
 import             ::= spec_from_file_location( module-name ,
@@ -600,12 +604,11 @@ Sources: `activegraph/sandbox/__init__.py:378-530` (parent flow), `:261-292` (sp
    `store/graph_conformance.py`, and `sinks/conformance.py` reportedly follow the same pattern; if
    confirmed, this is a package-wide convention worth naming as such rather than a sandbox quirk.
 
-4. **The bundle pin is OFF by default.** `PackSource.expected_bundle_hash` defaults to `""`
-   (`activegraph/sandbox/__init__.py:114`) and `activegraph/sandbox/_child.py:140-141` skips
-   `verify_bundle_hash` entirely when it is empty. The contract calls this "the existing empty-pin
-   compatibility posture rather than silently inventing one" (`CONTRACT.md:8022-8024`), so it is
-   intentional — but the headline promise "the bytes trialed are the bytes the proposal recorded"
-   (`activegraph/sandbox/__init__.py:6-8`) **only holds when the caller supplies a pin.**
+4. **Schema v2 closes the historical empty-pin posture.** Schema v1 intentionally allowed an
+   empty `expected_bundle_hash`; that history remains recorded in CONTRACT v1.8 #9. The
+   2026-08-12 Set 4 amendment #4 makes v2 the only emitted form and requires the candidate plus
+   every extra to carry an exact lowercase SHA-256 pin. Pinned v1 input migrates to v2; unpinned v1
+   is rejected before executor work. The child verifies every accepted pin unconditionally.
 
 5. **`max_llm_calls > 0` is accepted and reaches the child's `Budget`, but is inert.**
    `activegraph/sandbox/_child.py:251-252` sets the budget dimension, yet the child configures no

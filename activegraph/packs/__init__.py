@@ -67,6 +67,7 @@ from activegraph.behaviors.base import (
 from activegraph.behaviors import _factory as behavior_factory
 from activegraph.tools.base import Tool
 from activegraph.tools import _factory as tool_factory
+from activegraph.packs.validation import validate_pack_name, validate_pack_version
 
 
 # ---------------------------------------------------------------- exceptions
@@ -559,9 +560,6 @@ def _load_one_prompt(path: Path) -> PackPrompt:
 # ----------------------------------------------------- the Pack itself
 
 
-_PACK_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
-
-
 @dataclass(frozen=True, eq=False)
 class Pack:
     """A frozen bundle of pack contents.
@@ -602,6 +600,9 @@ class Pack:
     # credential_ref strings; it validates entry type, closed classes,
     # and (provider, capability) uniqueness only.
     capabilities: tuple[Any, ...] = ()
+    # Optional exact manifest locator.  It remains metadata only: Pack
+    # identity and hashing stay exactly (name, version).
+    manifest_path: Path | None = None
 
     def __post_init__(self) -> None:
         # list → tuple conversion (frozen requires object.__setattr__)
@@ -611,12 +612,24 @@ class Pack:
                 object.__setattr__(self, f, tuple(v))
 
         # name shape
-        if not isinstance(self.name, str) or not _PACK_NAME_RE.match(self.name):
-            raise PackValidationError(
-                f"Pack.name must match [a-z][a-z0-9_]*, got {self.name!r}"
-            )
-        if not isinstance(self.version, str) or not self.version:
-            raise PackValidationError(f"Pack.version must be non-empty str, got {self.version!r}")
+        try:
+            validate_pack_name(self.name, field="Pack.name")
+        except ValueError as exc:
+            raise PackValidationError(str(exc)) from exc
+        try:
+            validate_pack_version(self.version, field="Pack.version")
+        except ValueError as exc:
+            raise PackValidationError(str(exc)) from exc
+
+        if self.manifest_path is not None:
+            if not isinstance(self.manifest_path, Path):
+                raise PackValidationError(
+                    f"Pack {self.name!r}: manifest_path must be a pathlib.Path or None"
+                )
+            if not self.manifest_path.is_absolute():
+                raise PackValidationError(
+                    f"Pack {self.name!r}: manifest_path must be absolute"
+                )
 
         # settings_schema shape
         if not (isinstance(self.settings_schema, type) and issubclass(self.settings_schema, BaseModel)):

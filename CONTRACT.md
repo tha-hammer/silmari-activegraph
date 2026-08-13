@@ -8988,3 +8988,143 @@ rendering `"0"` and Decimal exponent/tuple representation. This authority
 comes from the canonical Tool field and original global decorator plus v0.9
 parity—not from a later historical contract change—and supersedes the pack
 copy's stale `"0.0"` default.
+---
+
+## 2026-08-12 Set 4 amendment #1 — backend-neutral duplicate appends
+
+The v0.5 #2/#3 EventStore contract, v0.8 #17/#18 conformance contract,
+and v1.0 PR-C `DuplicateEventError` contract are clarified as follows.
+Every shipped EventStore translates only a duplicate `(event.id, run_id)`
+append to the existing public `DuplicateEventError`. Its structured context
+is exactly `event_id`, the store's actual `run_id`, and the stable backend
+name (`memory`, `sqlite`, or `postgres`). The rejected append leaves the
+existing backend-native event and event count unchanged. Reusing the same
+event id in a distinct run remains legal. Encoding failures and all other
+driver/database failures retain their existing exception types.
+
+## 2026-08-12 Set 4 amendment #2 — durable fork atomicity
+
+This amendment extends v0.5 #9/#11/#12 and the v1.5 compaction-horizon
+rules. Absent concurrent mutation of the parent, a successful durable
+`fork_run` makes destination run metadata and the complete ordered event
+prefix through `at_event_id` visible together. On any failure, destination
+metadata and events are restored to their backend-native pre-call observable
+snapshot, and the parent is observably unchanged from its backend-native
+pre-call snapshot.
+
+SQLite enforces the stable-parent premise with `BEGIN IMMEDIATE`. The existing
+Postgres implementation uses separate cut and copy statements under READ
+COMMITTED without locking the parent; therefore this amendment does not promise
+a stable Postgres prefix during concurrent parent mutation. Shared conformance
+tests intentionally exclude concurrent parent mutation. This fork guarantee is
+distinct from v0.8 #5, which governs migration transactionality only.
+
+## 2026-08-12 Set 4 amendment #3 — FalkorDB index provisioning
+
+Opening `FalkorDBGraphStore` provisions every required index and fails loud on
+syntax, permission, authentication, connection, and other server/client
+errors. The only ignored response is an instance of
+`redis.exceptions.ResponseError` whose text exactly equals
+`Attribute '<property>' is already indexed` for the property in the current
+index statement. Both the exception type and statement-specific property must
+match; classification/import failures preserve the original provisioning
+exception.
+
+Once an owned database client has been constructed, any graph-selection or
+index-provisioning failure closes it best-effort without allowing cleanup to
+replace the primary exception. An injected graph remains caller-owned. This
+type/text rule is the verified compatibility basis for FalkorDB Python 1.0.0
+through 1.6.2, redis-py 5.0.1 through 8.1.0, and FalkorDB 4.10.0 through
+4.18.3; it is not a timeless upstream guarantee. The live reopen canary must
+fail if a future supported version changes that response contract.
+
+## 2026-08-12 Set 4 amendment #4 — TrialSpecification schema v2 pins
+
+This amendment versions, rather than rewrites, v1.8 #9. Wire schema v1
+historically preserved an intentional empty-pin posture. Wire schema v2 is now
+the only form emitted by `TrialSpecification.to_json` and the only version
+accepted by direct `TrialSpecification` construction. The version value must
+be the exact integer `2`; booleans, floats, and strings do not qualify.
+
+`PackSource.expected_bundle_hash` is required and must match exactly
+`sha256:[0-9a-f]{64}`. This applies independently to the candidate and every
+ordered extra pack, including when `manifest_required` is false. The child
+always verifies each accepted pin before manifest loading or module import.
+
+`TrialSpecification.from_json` remains a migration reader for exact integer
+schema versions 1 and 2. A v1 payload is accepted only when its candidate and
+every extra already carry well-formed, nonempty pins; it is returned and
+reserialized as schema v2. Missing, empty, or malformed pins in either wire
+version fail with `pack_source.expected_bundle_hash` or the indexed
+`extra_packs[i].expected_bundle_hash` path before executor work, parent fork,
+or child import. This intentionally breaks the insecure subset of v1 rather
+than retain an unpinned escape hatch.
+
+## 2026-08-12 Set 4 amendment #5 — canonical Pack-name boundary
+
+This amendment intentionally narrows the public v0.9 #2/#6 Pack identity
+contract. Logical `Pack.name` values and manifest `pack.name` values must be
+strings matching `^[a-z][a-z0-9_]{0,63}$`: one through 64 ASCII snake-case
+characters beginning with a lowercase letter. Caller spelling is preserved,
+and equality/hash remain exactly `(name, version)`.
+
+The scaffold continues to strip surrounding whitespace and lowercase input,
+then requires a one-through-64-character ASCII kebab distribution slug. Its
+derived snake name is revalidated through the logical-name rule; a raw
+underscore is not accepted as a distribution slug. Third-party Pack names
+longer than 64 characters must choose a shorter stable identity before
+upgrading. Hard constructor rejection in the current 1.x line is an explicit
+compatibility break, justified by aligning all identity boundaries before a
+Pack can register or emit audit events.
+
+## 2026-08-12 Set 4 amendment #6 — PEP 440 Pack versions
+
+This amendment intentionally narrows v0.9 #2/#6 and resolves the v0.9 #26
+version-string deferral. Both `Pack.version` and manifest `pack.version` must
+be strings accepted by `packaging.version.Version`; surrounding whitespace is
+rejected before parsing. The original valid string is retained without
+normalization, and `(name, version)` identity remains exact-string identity.
+Consequently, distinct valid spellings such as `1.0` and `1.0.0` do not pass
+surface agreement.
+
+Hard rejection in the current 1.x line is an explicit compatibility break,
+justified by refusing invalid identity before registration or audit events.
+Third-party labels such as `nightly` must migrate to a valid exact spelling
+such as `0+nightly`. No automatic rewrite is performed on callers' behalf.
+
+## 2026-08-12 Set 4 amendment #7 — manifest location and shipped artifacts
+
+This amendment extends the v0.9 #2 Pack shape by appending the defaulted field
+`manifest_path: Path | None = None` after `capabilities`. A non-None value must
+be an absolute `pathlib.Path`; strings and relative paths fail Pack
+construction. It is metadata only and remains excluded from equality and
+hashing, which stay exactly `(name, version)`. A declared path is authoritative:
+the loader checks exactly that path, including when it is missing, and never
+falls back. Without a declaration, legacy discovery continues to anchor on
+behavior/tool functions, a nonempty settings class, and object schemas.
+Relation-only and componentless packs must use an explicit path.
+
+This deliberately amends the v1.6 #1 warning policy. Before 2.0, manifest
+validation remains warn-and-load and truly absent legacy manifests remain
+silent. Schema/TOML/surface violations use `pack.manifest_invalid`; missing,
+unreadable, and unexpected locator/checker failures use
+`pack.manifest_check_failed`. Every failure is a structured WARNING, carries
+the pack identity, resolved path or `<unresolved>`, failure kind, error type,
+error detail, and applicable violations, and is emitted at most once per
+`(name, version)` per process. This intentionally promotes unexpected tier
+failures from DEBUG: an explicit locator is an owner assertion whose failed
+check must be visible, while identity deduplication prevents log flooding.
+
+`fixtures.entrypoint` is a pack-relative resource path from the manifest's
+directory. It must be a nonempty string with no absolute form, `..` component,
+or symlink component; its resolved target must remain inside the pack and be an
+existing regular file. It declares a fixture resource, not an executable
+sandbox scenario. The manifest schema's two-way live-surface check covers
+object types, relation types, behaviors, tools, settings, and capabilities;
+policies and prompts remain intentionally outside the current manifest schema.
+
+The bundled Diligence pack and every `activegraph pack new` scaffold now ship a
+wheel-included `manifest.toml` that passes schema, live-surface, and content-hash
+verification. Scaffolded Packs use an explicit absolute locator and ship a
+minimal deterministic fixture resource. Content hashes exclude
+`manifest.toml`; external bundle hashes include it.

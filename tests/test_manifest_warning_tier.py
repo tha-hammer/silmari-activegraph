@@ -11,10 +11,12 @@ from __future__ import annotations
 import importlib.util
 import logging
 import sys
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
-from activegraph import Graph, Runtime
+from activegraph import Graph, Pack, PackValidationError, RelationType, Runtime
 from activegraph.packs import loader as pack_loader
 from activegraph.packs.manifest import compute_content_hash
 
@@ -86,6 +88,8 @@ def _make_pack(tmp_path, name, *, declared_behaviors='"greeter"',
     (root / "__init__.py").write_text(
         PACK_INIT_TEMPLATE.format(name=name, capabilities=capabilities)
     )
+    (root / "fixtures").mkdir()
+    (root / "fixtures" / "run_fixtures.py").write_text("# deterministic\n")
     if manifest:
         if manifest_text is None:
             manifest_text = MANIFEST_TEMPLATE.format(
@@ -241,3 +245,153 @@ def test_malformed_manifest_warns_never_raises(tmp_path, caplog):
     records = _tier_records(caplog)
     assert len(records) == 1
     assert records[0].violations  # the parse failure, verbatim
+
+
+def test_pack_manifest_path_rejects_string_and_relative_path():
+    with pytest.raises(PackValidationError, match="manifest_path"):
+        Pack(name="bad_string_locator", version="0.1.0", manifest_path="x")
+    with pytest.raises(PackValidationError, match="absolute"):
+        Pack(
+            name="bad_relative_locator",
+            version="0.1.0",
+            manifest_path=Path("manifest.toml"),
+        )
+
+
+def test_explicit_manifest_path_wins_without_fallback(tmp_path, caplog):
+    name = "warn_explicit_wins"
+    pack = _make_pack(tmp_path, name)
+    root = tmp_path / name
+    explicit = root / "declared.toml"
+    explicit.write_text(
+        MANIFEST_TEMPLATE.format(
+            name=name,
+            content_hash=compute_content_hash(root),
+            behaviors='"greeter"',
+        )
+    )
+    (root / "manifest.toml").write_text("not valid [[[ TOML")
+    pack = replace(pack, manifest_path=explicit.resolve())
+
+    with caplog.at_level(logging.WARNING, logger="activegraph.packs.manifest"):
+        assert Runtime(Graph(), behaviors=[]).load_pack(pack) is True
+
+    assert _tier_records(caplog) == []
+
+
+def test_explicit_missing_manifest_warns_once_by_pack_identity(tmp_path, caplog):
+    pack = _make_pack(tmp_path, "warn_explicit_missing", manifest=False)
+    first = replace(pack, manifest_path=(tmp_path / "missing-one.toml").resolve())
+    second = replace(pack, manifest_path=(tmp_path / "missing-two.toml").resolve())
+
+    with caplog.at_level(logging.WARNING, logger="activegraph.packs.manifest"):
+        assert Runtime(Graph(), behaviors=[]).load_pack(first) is True
+        assert Runtime(Graph(), behaviors=[]).load_pack(second) is True
+
+    records = _tier_records(caplog)
+    assert len(records) == 1
+    record = records[0]
+    assert record.pack == pack.name
+    assert record.pack_version == pack.version
+    assert record.manifest_path.endswith("missing-one.toml")
+    assert record.reason == "pack.manifest_check_failed"
+    assert record.failure_kind == "missing"
+    assert record.error_type == "PackManifestError"
+    assert "cannot read manifest" in record.error
+    assert record.exc_info is not None
+
+
+def test_explicit_directory_manifest_is_unreadable_warning(tmp_path, caplog):
+    pack = _make_pack(tmp_path, "warn_explicit_directory")
+    pack = replace(pack, manifest_path=(tmp_path / pack.name).resolve())
+
+    with caplog.at_level(logging.WARNING, logger="activegraph.packs.manifest"):
+        assert Runtime(Graph(), behaviors=[]).load_pack(pack) is True
+
+    (record,) = _tier_records(caplog)
+    assert record.reason == "pack.manifest_check_failed"
+    assert record.failure_kind == "unreadable"
+    assert record.error_type == "IsADirectoryError"
+
+
+def test_unexpected_checker_failure_warns_and_pack_dispatches(
+    tmp_path, caplog, monkeypatch
+):
+    pack = _make_pack(tmp_path, "warn_checker_bug")
+
+    def fail_check(*args, **kwargs):
+        raise RuntimeError("checker exploded")
+
+    monkeypatch.setattr(
+        "activegraph.packs.manifest.verify_surface", fail_check
+    )
+    with caplog.at_level(logging.WARNING, logger="activegraph.packs.manifest"):
+        runtime = Runtime(Graph(), behaviors=[])
+        assert runtime.load_pack(pack) is True
+        runtime.run_goal("still dispatches")
+
+    assert [o for o in runtime.graph.all_objects() if o.type == "greeting"]
+    (record,) = _tier_records(caplog)
+    assert record.reason == "pack.manifest_check_failed"
+    assert record.failure_kind == "unexpected"
+    assert record.error_type == "RuntimeError"
+    assert record.error == "checker exploded"
+    assert record.exc_info is not None
+
+
+def test_locator_failure_warns_with_unresolved_path(tmp_path, caplog, monkeypatch):
+    pack = _make_pack(tmp_path, "warn_locator_bug")
+
+    def fail_locator(pack):
+        raise RuntimeError("locator exploded")
+
+    monkeypatch.setattr(pack_loader, "_locate_pack_manifest", fail_locator)
+    with caplog.at_level(logging.WARNING, logger="activegraph.packs.manifest"):
+        assert Runtime(Graph(), behaviors=[]).load_pack(pack) is True
+        assert Runtime(Graph(), behaviors=[]).load_pack(pack) is True
+
+    (record,) = _tier_records(caplog)
+    assert record.manifest_path == "<unresolved>"
+    assert record.failure_kind == "unexpected"
+    assert record.error == "locator exploded"
+
+
+def test_locator_oserror_is_an_unexpected_bug(tmp_path, caplog, monkeypatch):
+    pack = _make_pack(tmp_path, "warn_locator_oserror")
+
+    def fail_locator(pack):
+        raise FileNotFoundError("locator implementation bug")
+
+    monkeypatch.setattr(pack_loader, "_locate_pack_manifest", fail_locator)
+    with caplog.at_level(logging.WARNING, logger="activegraph.packs.manifest"):
+        assert Runtime(Graph(), behaviors=[]).load_pack(pack) is True
+
+    (record,) = _tier_records(caplog)
+    assert record.manifest_path == "<unresolved>"
+    assert record.failure_kind == "unexpected"
+
+
+def test_relation_only_pack_uses_explicit_manifest_path(tmp_path, caplog):
+    root = tmp_path / "relation_only"
+    root.mkdir()
+    (root / "fixtures").mkdir()
+    (root / "fixtures" / "run_fixtures.py").write_text("# deterministic\n")
+    manifest = root / "manifest.toml"
+    manifest.write_text(
+        MANIFEST_TEMPLATE.format(
+            name="relation_only",
+            content_hash="sha256:" + "0" * 64,
+            behaviors="",
+        ).replace("relation_types = []", 'relation_types = ["links"]')
+    )
+    pack = Pack(
+        name="relation_only",
+        version="0.1.0",
+        relation_types=(RelationType(name="links"),),
+        manifest_path=manifest.resolve(),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="activegraph.packs.manifest"):
+        assert Runtime(Graph(), behaviors=[]).load_pack(pack) is True
+
+    assert _tier_records(caplog) == []

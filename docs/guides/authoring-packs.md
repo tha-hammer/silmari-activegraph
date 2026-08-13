@@ -53,6 +53,7 @@ pack = Pack(
     behaviors=[insight_extractor],
     prompts=load_prompts_from_dir(Path(__file__).parent / "prompts"),
     settings_schema=MyPackSettings,
+    manifest_path=Path(__file__).resolve().with_name("manifest.toml"),
 )
 ```
 
@@ -78,16 +79,18 @@ authors are expected to follow.
 
 ---
 
-## 1. A pack is a Python package, not a manifest
+## 1. A pack is Python code with a declarative manifest
 
-There is no `pack.yaml`. There is no `manifest.json`. There is a
-Python module that exports a single `pack` symbol of type `Pack`.
+The executable surface is a Python module that exports one `pack`
+symbol of type `Pack`. A colocated `manifest.toml` is its static,
+content-hashed declaration for review, CI, sandboxing, and loader checks; it
+does not replace or execute the Python logic.
 
 Why: packs need to express real logic (behaviors, prompts, policies)
-and Python is the right language for that. A declarative manifest
-would shove logic into prose comments or jinja templates, which is
-how every "configuration as data" framework eventually grows a
-half-broken DSL. Python is the DSL.
+and Python is the right language for that. The manifest declares the
+schema-supported surface and artifact integrity, while Python remains the DSL.
+The current manifest surface covers object/relation types, behaviors, tools,
+settings, and capabilities. Policies and prompts are intentionally omitted.
 
 Convention: a pack package has the layout
 
@@ -96,6 +99,7 @@ my_pack/
   pyproject.toml
   my_pack/
     __init__.py         # exports `pack`
+    manifest.toml       # declarative surface + content hash
     object_types.py     # Pydantic schemas + ObjectType list
     relation_types.py   # RelationType list (optional)
     behaviors.py        # @behavior / @llm_behavior / @relation_behavior
@@ -117,7 +121,13 @@ my_pack/
 ```
 
 The scaffolding command (`activegraph pack new <name>`) generates
-this layout.
+this layout, including package-data rules for the manifest and prompts.
+
+Use an explicit absolute `manifest_path` for generated, relation-only, or
+componentless packs. If it is omitted, the loader retains compatibility
+discovery through behavior/tool functions, the settings class, and object
+schemas. A declared path is exact: a missing or unreadable file does not fall
+back to a nearby manifest.
 
 ---
 
@@ -166,6 +176,8 @@ class Pack:
     policies: tuple[PackPolicy, ...] = ()
     prompts: tuple[PackPrompt, ...] = ()
     settings_schema: type = EmptySettings
+    capabilities: tuple[CapabilityDecl, ...] = ()
+    manifest_path: Path | None = None
 ```
 
 **Frozen**: mutation after construction raises. This forces packs to
@@ -181,15 +193,17 @@ List arguments are converted to tuples in `__post_init__` for
 convenience.
 
 `Pack.__post_init__` validates:
-  - `name` is a non-empty lowercase ASCII identifier (matches
-    `^[a-z][a-z0-9_]*$`)
-  - `version` is non-empty
+  - `name` is a 1–64 character lowercase ASCII identifier (matches
+    `^[a-z][a-z0-9_]{0,63}$`)
+  - `version` is a non-whitespace-padded PEP 440 string; its exact spelling is
+    preserved as part of Pack identity
   - object types have unique names within the pack
   - relation types have unique names within the pack
   - behavior names are unique within the pack
   - tool names are unique within the pack
   - prompts have unique names within the pack
   - `settings_schema` is a Pydantic `BaseModel` subclass
+  - `manifest_path`, when present, is an absolute `pathlib.Path`
 
 Validation failures normally raise `PackValidationError` at
 construction. Because an `LLMBehavior.tools` list remains mutable for
@@ -686,6 +700,19 @@ types, behavior names, tool names, or policy names raises
 identifier. **Conflict detection runs before any state mutation** —
 a failed `load_pack` leaves the runtime unchanged.
 
+After a successful load, the advisory manifest tier parses and cross-checks a
+discoverable manifest. It never blocks a 1.x load: validation failures use the
+structured reason `pack.manifest_invalid`; explicit missing/unreadable paths
+and unexpected locator/checker failures use `pack.manifest_check_failed`.
+They log once per `(name, version)` at WARNING. A legacy pack with no locator
+and no discoverable manifest remains silent. Runtime checks do not recompute
+artifact hashes; CI and sandbox materialization do. `content_hash` excludes the
+manifest itself, while an externally pinned bundle hash includes it.
+
+`[fixtures].entrypoint` is a resource path relative to the manifest. It must
+stay inside the pack, contain no `..` or symlink component, and name an
+existing regular file. It is not automatically executed as a sandbox scenario.
+
 ### Disabling a pack (v1.4)
 
 `runtime.disable_pack(name)` deregisters a loaded pack **now**: its
@@ -750,10 +777,13 @@ python -c "import my_pack; print(my_pack.pack)"
 The scaffolding command produces a package that:
   - declares `activegraph` as a dependency
   - registers itself under the `activegraph.packs` entry point
-  - has empty stubs for object types, behaviors, tools, settings
+  - has example stubs for object types, behaviors, tools, and settings
+  - ships a verified `manifest.toml` and deterministic fixture resource
+  - records the manifest and prompts as wheel package data
   - has a `tests/test_pack_loads.py` smoke test that imports the
     pack, asserts no global registry side effects, loads it into a
-    fresh runtime, and asserts the `pack.loaded` event appears
+    fresh runtime without manifest warnings, verifies the manifest surface and
+    content hash, and asserts the `pack.loaded` event appears
 
 The package name (directory and Python package) is the
 kebab-to-snake transformation of the pack name: `pack new

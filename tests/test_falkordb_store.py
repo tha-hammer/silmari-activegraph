@@ -97,6 +97,24 @@ def test_graph_runs_on_falkordb_backend():
         store.close()
 
 
+def test_reopening_existing_graph_accepts_only_duplicate_index_errors():
+    from activegraph.store.falkordb import FalkorDBGraphStore
+
+    owner = FalkorDBGraphStore(graph_name="ag_index_reopen")
+    owner.clear()
+    borrowed = None
+    try:
+        borrowed = FalkorDBGraphStore(graph=owner._g)
+        assert borrowed.all_objects() == []
+        borrowed.close()
+        assert owner.all_objects() == []
+    finally:
+        if borrowed is not None:
+            borrowed.close()
+        owner.clear()
+        owner.close()
+
+
 # --- native-edge layout checks -------------------------------------------
 #
 # The conformance suite pins observable behaviour; these pin the *physical*

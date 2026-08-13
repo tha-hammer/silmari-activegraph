@@ -24,6 +24,7 @@ from typing import Any, Iterator, Optional
 
 from activegraph.core.event import Event
 from activegraph.store.base import RunRecord
+from activegraph.store.errors import _duplicate_event_error
 
 
 SCHEMA_VERSION = "1"
@@ -324,12 +325,12 @@ class PostgresEventStore:
     # ---------- EventStore protocol ----------
 
     def append(self, event: Event) -> None:
-        psycopg = self._source._psycopg
         with self._source.cursor() as cur:
             cur.execute(
                 f"""
                 INSERT INTO events ({_EVENT_COLUMNS}, run_id)
                 VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s)
+                ON CONFLICT(id, run_id) DO NOTHING
                 """,
                 (
                     event.id,
@@ -342,6 +343,10 @@ class PostgresEventStore:
                     self.run_id,
                 ),
             )
+            if cur.rowcount == 0:
+                raise _duplicate_event_error(
+                    event_id=event.id, run_id=self.run_id, backend="postgres"
+                )
 
     def iter_events(
         self,

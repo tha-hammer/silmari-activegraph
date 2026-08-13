@@ -3880,9 +3880,10 @@ class Runtime:
                     "store's native primitives (SQLite uses a direct SQL "
                     "copy under a single transaction). Postgres has a "
                     "different transactional shape and an in-memory store "
-                    "has no copy primitive at all. v0.8 deliberately "
-                    "scoped the fork command to SQLite first — the "
-                    "limitation is documented in CONTRACT v0.8 #5."
+                    "has no copy primitive at all. Runtime.fork() remains "
+                    "scoped to SQLite under CONTRACT v0.5 #9; its durable "
+                    "atomicity is clarified by the 2026-08-12 Set 4 "
+                    "amendment #2."
                 ),
                 how_to_fix=(
                     "Migrate the run to a SQLite store first, then fork:\n"
@@ -4093,8 +4094,9 @@ class Runtime:
                 ),
                 why=(
                     "Lineage (parent_run_id, forked_at_event_id) is "
-                    "recorded durably by fork(), which itself requires a "
-                    "SQLite store (CONTRACT v0.8 #5). Promote trusts the "
+                    "recorded durably by fork(), whose Runtime API remains "
+                    "SQLite-scoped (CONTRACT v0.5 #9 and the 2026-08-12 "
+                    "Set 4 amendment #2). Promote trusts the "
                     "store's records, not the caller's claim, so it has "
                     "the same store requirement (CONTRACT v1.3 #4)."
                 ),

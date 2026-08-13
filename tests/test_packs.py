@@ -277,13 +277,46 @@ def test_pack_equality_by_name_and_version():
     assert hash(p1) != hash(p3)
 
 
-def test_pack_name_validation():
-    with pytest.raises(PackValidationError):
-        Pack(name="UPPER", version="0.1.0", settings_schema=EmptySettings)
-    with pytest.raises(PackValidationError):
-        Pack(name="9_starts_with_digit", version="0.1.0", settings_schema=EmptySettings)
-    with pytest.raises(PackValidationError):
-        Pack(name="", version="0.1.0", settings_schema=EmptySettings)
+@pytest.mark.parametrize("name", ["a", "a" * 64])
+def test_pack_name_accepts_canonical_boundaries(name):
+    assert Pack(name=name, version="0.1.0").name == name
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["", "a" * 65, "UPPER", "9_starts_with_digit", "my-pack", 1, True],
+)
+def test_pack_name_rejects_noncanonical_identity(name):
+    with pytest.raises(PackValidationError, match="Pack.name"):
+        Pack(name=name, version="0.1.0", settings_schema=EmptySettings)
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["0.1", "1.0.0rc1", "1!2.0", "1.0.post1", "1.0.dev2", "1.0+local.1"],
+)
+def test_pack_version_accepts_pep440_without_rewriting(version):
+    assert Pack(name="demo", version=version).version == version
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "",
+        " 1.0",
+        "1.0 ",
+        "nightly",
+        "1..0",
+        "release-1",
+        "1.0+local..1",
+        None,
+        1,
+        True,
+    ],
+)
+def test_pack_version_rejects_non_pep440_values(version):
+    with pytest.raises(PackValidationError, match="Pack.version"):
+        Pack(name="demo", version=version)
 
 
 def test_pack_duplicate_behavior_name_rejected():
