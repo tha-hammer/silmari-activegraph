@@ -345,8 +345,9 @@ Contract notes:
   bookkeeping prefixes and `context.read` (`runtime/registry.py:52-66`,
   `runtime/event_policy.py:13-54`).
 - **`activate_after` re-checks `where=` AND the pattern at fire time**, and skips silently if either
-  no longer holds. It also recomputes relation candidates from current graph state and dispatches
-  relation behaviors normally — `runtime/runtime.py:1765-1800`, `runtime/registry.py:52-89`.
+  no longer holds. `where=` is evaluated against the original event payload, re-fetched by id. It
+  also recomputes relation candidates from current graph state and dispatches relation behaviors
+  normally — `runtime/runtime.py:1765-1800`, `runtime/registry.py:52-89`.
 - **Cross-provider model validation fires when a behavior binds to a registry.** Global
   `register()` / `@llm_behavior` validate immediately against already-live runtimes. Pack wrappers
   do not; after `load_pack` invalidates `rt.registry`, pack behavior validation occurs on the next
@@ -500,10 +501,11 @@ Contract notes:
   `behaviors/base.py:117-125`, `runtime/runtime.py:2530`. Tool provenance is stamped into everything
   the handler creates: the list of `tool.requested` ids is pushed onto the `BehaviorGraph` before the
   handler runs — `runtime/runtime.py:2525-2530`, `runtime/behavior_graph.py:55-62`.
-- **Tool metrics observe the event pair, not a nonexistent `tool.failed` event.** Every
-  `tool.requested` increments calls (and literal cache hits); mapping-shaped response errors
-  increment bounded failures; duration uses valid latency, with cache hits and explicit early
-  errors at zero — `runtime/runtime.py:1094-1181`, catalog at
+- **Tool metrics observe the event pair. There is no `tool.failed` event.** Every
+  `tool.requested` increments calls (and literal cache hits); a `tool.responded.payload.error`
+  Mapping counts one bounded-reason failure; duration uses valid latency, with cache hits and
+  explicit early errors at zero. Invalid input occurs after `tool.requested`, so it produces
+  call + failure + duration zero — `runtime/runtime.py:1094-1181,2592-2628`, catalog at
   `observability/metrics.py:263-285`.
 
 Error taxonomy:

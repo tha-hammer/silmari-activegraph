@@ -114,7 +114,7 @@ Drain entry points differ in their `stop` predicate and terminal-marker behavior
 
 ### Data types owned here
 
-- `Context` and helpers — invocation state and sanctioned embedding/proposal access — `activegraph/runtime/runtime.py:188-272`. Only an LLM invocation receives the configured provider; plain/relation contexts retain `None`.
+- `Context` and helpers — invocation state and sanctioned embedding/proposal access — `activegraph/runtime/runtime.py:188-272`. Only an LLM invocation receives the configured provider; plain/relation contexts retain `None`. Direct provider calls from a handler are unsupported because they bypass Runtime governance; use `@llm_behavior` and `Context.embed`.
 - `BehaviorFailure` — NamedTuple of `behavior, event_id, reason, exception_type, message, failed_event_id` — `activegraph/runtime/runtime.py:275-299`
 - `RunQuantumResult` — frozen dataclass; `elapsed_seconds` is deliberately never written to the log — `activegraph/runtime/runtime.py:301-316`
 
@@ -909,7 +909,8 @@ the queue, which is what makes the loop converge. Current anchors are
    `embedding.*` neither enqueues nor advances `_tick`, even for explicit `on=` subscriptions.
 
 5. **Resolved — delayed relation behaviors dispatch against current candidates and pattern state.**
-   Exact behavior identity prevents rebuilt registries from inheriting old work; pack disable
+   The immutable-by-contract original event payload remains the input to `where=`. Exact
+   behavior identity prevents rebuilt registries from inheriting old work; pack disable
    cancels owned entries; pre-entry exhaustion restores the FIFO suffix; started relation fan-out
    is non-resumable (`activegraph/runtime/runtime.py:1765-1800,3380-3386`;
    `activegraph/runtime/scheduler.py:55-99`).
