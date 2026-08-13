@@ -26,12 +26,14 @@ available `caused_by` lineage (normally back to the goal that started the run)
 The rendered format *is* the contract — it is snapshot-tested and consumed by the quickstart
 transcript.
 
-**`cli/`** is a *thin argument-parsing and formatting shell* over library APIs — "The CLI does
-no business logic — it parses arguments, calls into Python, and formats output. Programmatic
-users get the same behavior by importing the called functions directly" (`cli/main.py:6-8`,
-`cli/__init__.py:3-5`). Runtime, store, migration, and trace imports are lazy inside command or
-helper bodies; the module-scope quickstart registration imports only `cli.quickstart`, whose own
-module-scope dependency is `cli.renderers` (`cli/main.py:155-163`, `cli/quickstart.py:23-34`).
+**`cli/`** is primarily an *argument-parsing, orchestration, and formatting shell* over library
+APIs. Most subsystem work is delegated, but the shell itself owns the `fork --set` parsing/event
+recording path, selects a built-in fork driver, serializes JSONL trace export, and implements the
+quickstart flow (`cli/main.py:629-839`, `:1046-1055`; `cli/quickstart.py:61-159`, `:247-437`).
+Runtime, store, migration, and trace imports are lazy inside command or helper bodies; the
+module-scope quickstart registration imports `cli.quickstart`, whose only module-scope
+**ActiveGraph** dependency is `cli.renderers` (`cli/main.py:155-163`,
+`cli/quickstart.py:23-34`).
 
 **Package root** holds the public API re-export surface (`__init__.py`, 143 names), the root
 error taxonomy every other error module subclasses (`errors.py`), and three small
@@ -102,13 +104,12 @@ graph TD
     MIGCOMPAT --> SMIG
     SMIG --> STORE
     SMIG -. lazy .-> DRIVERS
-    PRINT --> CAUS
+    PRINT -. lazy .-> CAUS
     PRINT --> CORE
     CAUS --> CORE
 
     INIT --> obs
     INIT --> ERR
-    SIG -.-> ERR
 ```
 
 Dotted edges are lazy / `TYPE_CHECKING`-only imports — that is what keeps `core ↔ observability`
@@ -159,8 +160,8 @@ function-local (`store/migration.py:139-149`).
 - `main(argv=None) -> int` — programmatic entry; **returns** an exit code rather than raising `SystemExit` — `cli/main.py:1187-1204`
 - `cli` — the `click.group` — `cli/main.py:149-152`
 - `EXIT_CODES` dict / `EXIT_OK..EXIT_DIVERGENCE` constants (0–5) — `cli/main.py:39-53`
-- `cmd_inspect` — `cli/main.py:224-350`; `cmd_replay` — `:528-558`; `cmd_fork` — `:564-710`; `cmd_diff` — `:845-893`; `cmd_promote` — `:897-1011`; `cmd_export_trace` — `:1016-1064`; `cmd_migrate` — `:1070-1180`
-- `cmd_pack` group — `cli/main.py:169-171`, with `pack new` (`:174-196`) and `pack list` (`:201-215`)
+- `cmd_inspect` — `cli/main.py:224-350`; `cmd_replay` — `:528-558`; `cmd_fork` — `:564-710`; `cmd_diff` — `:845-893`; `cmd_promote` — `:897-1011`; `cmd_export_trace` — `:1016-1064`; `cmd_migrate` — `:1070-1181`
+- `cmd_pack` group — `cli/main.py:169-171`, with `pack new` (`:174-203`) and `pack list` (`:206-218`)
 - `cmd_quickstart` — registered onto the group at `cli/main.py:161-163`; implemented in `cli/quickstart.py:449-477`
 - `run_fixture_mode(stream=None) -> int` — `cli/quickstart.py:61-159`
 - `run_interactive_mode(stream=None, *, prompt_fn=None) -> int` — `cli/quickstart.py:290-354`
@@ -290,7 +291,7 @@ Contract notes (CONTRACT v0.8 #6–#7, #16):
 ### A3. Runtime -> observability.status -> `cli inspect`
 
 `Runtime.status(recent=20)` builds a `RuntimeStatus` (`runtime/runtime.py:177-184`, `:3069-3187`);
-`cmd_inspect` lazily imports `status_to_dict` (`cli/main.py:287`) to render `--json`. Nothing in
+`cmd_inspect` lazily imports `status_to_dict` (`cli/main.py:285`) to render `--json`. Nothing in
 the chain mutates runtime state.
 
 ```ebnf
@@ -301,6 +302,7 @@ RuntimeStatus   ::= run_id , state , queue_depth , events_processed ,
 state           ::= "idle" | "running" | "stopped" | "exhausted"
 BudgetSnapshot  ::= used:{str→float} , limits:{str→float?} ,
                     cost_used_usd:str , cost_limit_usd:str? , exhausted_by:str?
+FrameSnapshot   ::= id:str? , name:str?
 BehaviorInfo    ::= name , kind , subscribed_to:tuple , pattern? , activate_after?
 kind            ::= "function" | "relation" | "llm"
 EventSummary    ::= id , type , actor? , timestamp
@@ -395,12 +397,17 @@ llm-requested-body  ::= event-id behavior "model=" m [ "cache_hit=true" ]
                         [ "retry=" i "/" n ] [ "turn=" k ]
                         [ "tokens_in~" est ] [ "budget_remaining=$" usd ]
                         [ "prompt_normalized=true" ]
-llm-responded-body  ::= event-id behavior ( "error=" reason [ "latency=" s "s" ]
-                                          | [ "cache_hit=true" ] [ "tokens_in=" n ]
-                                            [ "tokens_out=" n ] [ "cost=$" usd ]
-                                            [ "latency=" s "s" ] )
+llm-responded-body  ::= event-id behavior [ "retry=" i "/" n ]
+                        ( "error=" reason [ "latency=" s "s" ]
+                        | [ "cache_hit=true" ] [ "tokens_in=" n ]
+                          [ "tokens_out=" n ] [ "cost=$" usd ]
+                          [ "latency=" s "s" ] )
 tool-requested-body ::= event-id behavior "tool=" name "args_hash=" hash8
                         [ "cache_hit=true" ] [ "deterministic=true" ]
+tool-responded-body ::= event-id behavior "tool=" name
+                        ( "error=" reason
+                        | [ "cache_hit=true" ] [ "latency=" s "s" ]
+                          [ "cost=$" usd ] )
 (* invariant: cache_hit=true suppresses cost and latency segments *)
 ```
 
@@ -414,7 +421,10 @@ Contract notes (CONTRACT #18, v0.5 #22, v0.9.1):
 6. Successful cache-hit response lines render `cache_hit=true` and suppress cost/latency segments — `trace/printer.py:190-215`, `:255-268`.
 7. `behavior.completed` prints the count summary **only** when the behavior produced ≥ 2 combined mutations — `trace/printer.py:126-133`.
 8. `Trace.events()` returns a **copy** — mutating it changes nothing — `trace/printer.py:534-535`, `:548`.
-9. Every event id from `Trace.events()` is a valid `Runtime.fork(at_event=...)` argument — `trace/printer.py:537-542`.
+9. `Trace.events()` exposes every event's id as a candidate `Runtime.fork(at_event=...)` value;
+   normal fork requirements still apply, including SQLite backing and the prohibition on a cut at
+   the promote marker or before that block's final delta event — `trace/printer.py:537-542`,
+   `runtime/runtime.py:3925-3989`.
 10. `behavior.failed` payloads carry `behavior, event_id, exception_type, message`, and since v1.0.3 the full `traceback` string — `trace/printer.py:552-556`.
 
 ### B2. trace.causal <-> core.graph (the provenance protocol)
@@ -462,10 +472,11 @@ Contract notes (CONTRACT v0.6 #15, v0.7 #19):
 
 ### C1. shell -> cli
 
-Three inbound routes: the console script `activegraph = "activegraph.cli.main:main"`
-(`pyproject.toml:157-158`), `python -m activegraph` (`__main__.py:3-5`), and tests via
-`click.testing.CliRunner` — `main(argv)` returns an int specifically for that
-(`cli/main.py:1187-1204`).
+The installed console script routes to `activegraph.cli.main:main`
+(`pyproject.toml:157-158`), while `python -m activegraph` wraps `main()` in `SystemExit`
+(`__main__.py:3-5`). Programmatic callers can pass `argv` to `main()` and receive an integer exit
+status (`cli/main.py:1187-1204`); tests generally invoke the underlying `cli` Click group through
+`click.testing.CliRunner`.
 
 ```ebnf
 invocation      ::= "activegraph" [ "-h" | "--help" | "--version" ] | "activegraph" command
@@ -494,7 +505,7 @@ export-trace    ::= "export-trace" URL "--run-id" RID
 migrate         ::= "migrate" "--from" URL "--to" URL
                     { "--run-id" RID } [ "--skip-corrupted" ] [ "--json" ]
 
-URL             ::= "sqlite:///" PATH | "postgres://" ...
+URL             ::= "sqlite:///" PATH | ( "postgres://" | "postgresql://" ) ...
                     | registered-migration-scheme "://" ...  (* migrate only *)
 exit-code       ::= 0 (* ok *)        | 1 (* generic *)   | 2 (* usage *)
                   | 3 (* not found *) | 4 (* corruption *) | 5 (* divergence *)
@@ -506,14 +517,18 @@ schema-mismatch ::= SchemaVersionMismatch -> stderr-once , exit-code 4
 Contract notes (CONTRACT v0.8 #12–#13):
 
 1. **Exit codes are contract**: 0 ok, 1 generic, 2 usage (click's default), 3 not found, 4 corruption, 5 divergence — `cli/main.py:10-16`, `:38-52`.
-2. **No business logic in the CLI** — every subcommand calls into the library — `cli/main.py:6-8`.
+2. **Library-backed with CLI-owned orchestration.** Commands delegate runtime, store, migration,
+   and trace operations to library APIs, while the CLI retains the `fork --set`, built-in fork
+   selection, JSONL serialization, and quickstart orchestration described above.
 3. `main(argv)` **returns** an exit code rather than raising `SystemExit`, converting click's `UsageError` → 2 and `ClickException` → 1 — `cli/main.py:1187-1204`.
 4. click is a **hard dependency** (`pyproject.toml:28`) but is imported in a `try/except
    ImportError` that prints install guidance and exits 2 (`cli/main.py:26-36`). One suggested form,
    `activegraph[cli]`, does not correspond to an extra declared in `pyproject.toml`; ordinary
    `pip install activegraph` already installs click.
 5. `inspect` selector flags (`--event`, `--behaviors`, `--pack-version`, `--memo`, `--search`) are **mutually exclusive** — "they're selectors, not filters" — `cli/main.py:229-283`, `:290-299`.
-6. `promote` is **fail-closed and atomic**: any conflict aborts with nothing applied (exit 5), and a **conflicted `--dry-run` also exits 5** so scripts can gate on it — `cli/main.py:907-919`, `:955-962`, `:985-1010`.
+6. A planned promote conflict is **fail-closed before application**: it aborts with nothing
+   applied (exit 5), and a **conflicted `--dry-run` also exits 5** so scripts can gate on it —
+   `cli/main.py:907-919`, `:955-962`, `:985-1010`.
 7. `promote` validates both run ids against the runs table **before** `Runtime.load`, because load would otherwise upsert a phantom run row — `cli/main.py:931-947`.
 8. Cross-store `fork` is explicitly unsupported; the guidance is fork-then-migrate — `cli/main.py:621-627`.
 9. `--set` overrides are validated against `pack.loaded` events at or before the fork point; an unmatched pack is a usage error — `cli/main.py:635-645`, `:787-807`.
@@ -592,7 +607,8 @@ store-api       ::= "EventStore" | "GraphStore" | "RunRecord"
                   | "register_migration_backend" | "resolve_migration_backend"
 sink-api        ::= "EventSink" | "JSONLEventSink" | "RecordingSink"
                   | "SinkConfig" | "SinkHandle" | "SinkState" | "SinkStatus"
-                  | "DeliveryContext" | "RecordedDelivery" | "OverflowPolicy"
+                  | "DeliveryContext" | "DeliveryMode" | "RecordedDelivery"
+                  | "OverflowPolicy"
 observability-api ::= "Metrics" | "NoOpMetrics" | "PrometheusMetrics"
                   | "OpenTelemetryMetrics" | "RuntimeStatus"
                   | "configure_logging"
@@ -646,11 +662,11 @@ category-base   ::= ConfigurationError | RegistrationError | ExecutionError
 builtin-exception ::= ValueError | TypeError | LookupError | KeyError
                   | RuntimeError | ImportError | SyntaxError | Exception
 
-rendered-error  ::= ClassName ": " summary CRLF CRLF
-                    "What failed:" CRLF "  " indented-block CRLF CRLF
-                    "Why:"         CRLF "  " indented-block CRLF CRLF
-                    "How to fix:"  CRLF "  " indented-block CRLF CRLF
-                    "More:"        CRLF "  " doc-url
+rendered-error  ::= ClassName ": " summary NEWLINE NEWLINE
+                    "What failed:" NEWLINE "  " indented-block NEWLINE NEWLINE
+                    "Why:"         NEWLINE "  " indented-block NEWLINE NEWLINE
+                    "How to fix:"  NEWLINE "  " indented-block NEWLINE NEWLINE
+                    "More:"        NEWLINE "  " doc-url
 doc-url         ::= DOCS_BASE_URL "/errors/" _doc_slug
 
 routing-rule    ::= configuration-failure ⟹ raise at entry point (never behavior.failed)
@@ -835,9 +851,11 @@ sequenceDiagram
    `run_goal -> run_until_idle` cannot clear the outer state, and exceptional unwind restores the
    exact dormant log-derived state. The count is not persisted; CLI inspection remains dormant.
 
-3. **Resolved: the false `activegraph inspect --runs` hint was removed.** `promote` now reports
-   only the missing option value and store URL (`cli/main.py:931-942`); `inspect` still has no
-   `--runs` option (`cli/main.py:224-283`).
+3. **Partially resolved: the pre-load false `activegraph inspect --runs` hint was removed.** The
+   direct missing-run branch now reports only the missing option value and store URL
+   (`cli/main.py:931-942`). A reachable `PromoteLineageError` recovery message still recommends
+   `activegraph inspect <store> --runs` (`runtime/exec_errors.py:443-450`), while `inspect` has no
+   such option (`cli/main.py:224-283`).
 
 4. **Resolved: `export-trace --output` delegates to `Trace.export`.** Text stdout uses
    `Trace.print`; a path uses `Trace.export(out_path)` with no signature-probing branch —
@@ -882,13 +900,12 @@ sequenceDiagram
     explicit deprecated compatibility waiver tracked by AF-wse, not a claim that the leaf already
     obeys the five-block format; the class stays out of top-level exports.
 
-12. **Partially resolved externally: the docs domain and quickstart links are live, but generated
-    `More:` paths still 404.** As verified on 2026-08-13, the base site, `/quickstart`, graph,
-    behaviors, and cookbook paths resolve. Error pages are deployed under
-    `/reference/errors/<slug>/`, while `ActiveGraphError.doc_url` still builds
-    `/errors/<slug>` (`errors.py:120-122`); for example the generated replay-divergence URL returns
-    404. The source comment at `errors.py:43-48` is therefore stale about the base domain but the
-    error-link contract remains broken.
+12. **The base domain is current, but generated `More:` paths disagree with the documentation
+    tree.** `DOCS_BASE_URL` correctly names `https://docs.activegraph.ai`, while
+    `ActiveGraphError.doc_url` builds `/errors/<slug>` (`errors.py:49`, `:120-122`) and the local
+    documentation catalog is routed under `/reference/errors/<slug>/`
+    (`mkdocs.yml:262-309`). The comment at `errors.py:43-48` is stale specifically about pending
+    Pages/DNS enablement and the base site still returning the earlier 404.
 
 13. **`format_event`'s dispatch has one hard-coded special case.** All 23 event-type formatters are
     correctly registered in `_FORMATTERS` (`trace/printer.py:398-422`) — no gap there. But
