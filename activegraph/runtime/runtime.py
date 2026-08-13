@@ -63,6 +63,9 @@ import time as _time
 import traceback
 from collections.abc import Mapping
 
+from activegraph.llm import prompt_identity
+from activegraph.runtime.event_policy import classify_event_type
+
 
 def _monotonic() -> float:
     return _time.monotonic()
@@ -82,7 +85,11 @@ from activegraph.frame import Frame
 from activegraph.llm.cache import LLMCache
 from activegraph.llm.embedding import EmbeddingProvider
 from activegraph.llm.embedding_cache import EmbeddingCache, hash_embedding_request
-from activegraph.llm.errors import LLMBehaviorError, MissingProviderError
+from activegraph.llm.errors import (
+    LLMBehaviorError,
+    MissingProviderError,
+    PromptIdentityError,
+)
 from activegraph.llm.provider import LLMProvider
 from activegraph.llm.types import LLMMessage, ToolCall
 from activegraph.policy import Policy
@@ -974,36 +981,9 @@ class Runtime:
         # BEFORE this flag is raised, so it alone is queue-visible.
         if self._promote_quiescent:
             return
-        # Don't enqueue our own lifecycle events for re-matching.
-        # v0.7 adds `llm.*`, `tool.*`, `pattern.*`, `behavior.scheduled`
-        # to the suppression list — they're internal to the runtime's
-        # bookkeeping. They still persist, project, reach sinks, and feed
-        # the standard metrics mapper above; they do not schedule behaviors.
-        if (
-            event.type.startswith("behavior.")
-            or event.type.startswith("relation_behavior.")
-            or event.type.startswith("runtime.")
-            or event.type.startswith("llm.")
-            or event.type.startswith("tool.")
-            or event.type.startswith("pattern.")
-            # v0.9: approval bookkeeping is internal; CONTRACT v0.9 #13
-            # deliberately keeps `pack.loaded` queue-visible so pack-aware
-            # behaviors can subscribe, but `approval.*` is suppressed.
-            or event.type.startswith("approval.")
-            # v1.8 R3: an override is a trace marker/receipt, not behavior
-            # scheduling input or an ambient developer-mode switch.
-            or event.type.startswith("dev.")
-            # v1.9: authority ceiling changes and decisions are runtime
-            # bookkeeping — they persist, project, export, and replay,
-            # but never schedule behaviors (CONTRACT v1.9 #3).
-            or event.type.startswith("authority.")
-            # v1.10 #1: the batched read-trace marker is runtime
-            # bookkeeping like behavior.* — it persists, projects (as a
-            # no-op), exports through sinks, and replays, but never
-            # schedules behaviors or advances the tick. Exact match, not
-            # a `context.` prefix claim: only this one type is reserved.
-            or event.type == "context.read"
-        ):
+        # Runtime bookkeeping persists, projects, exports, and may remain
+        # replay/diff history, but it never enters behavior scheduling.
+        if not classify_event_type(event.type).schedules_behaviors:
             return
         self._queue.push(event)
         self._record_queue_depth()
@@ -2034,6 +2014,14 @@ class Runtime:
                         if so_mode == "native"
                         else {}
                     )
+                    identity_kwargs: dict[str, Any] = {}
+                    if getattr(
+                        self.llm_provider, "accepts_prompt_identity", False
+                    ):
+                        identity_kwargs = {
+                            "prompt_hash": turn_hash,
+                            "deterministic": prompt.deterministic,
+                        }
                     turn_response = cast(LLMProvider, self.llm_provider).complete(
                         system=prompt.system,
                         messages=running_messages,
@@ -2045,7 +2033,13 @@ class Runtime:
                         timeout_seconds=b.timeout_seconds,
                         tools=tool_defs,
                         **native_kwargs,
+                        **identity_kwargs,
                     )
+                except PromptIdentityError:
+                    # This is an internal runtime/fixture identity invariant,
+                    # not a provider outage. Never translate, retry, or emit
+                    # provider-error bookkeeping for it.
+                    raise
                 except LLMBehaviorError as e:
                     latency = _monotonic() - call_t0
                     retryable = _is_transient_llm_reason(e.reason)
@@ -4300,28 +4294,22 @@ def _hash_turn_prompt(
     tool loop produces a distinct hash; same shape as v0.6's
     prompt.hash() otherwise.
     """
-    import hashlib
-    import json as _json
-
-    payload = {
-        "model": prompt.model,
-        "system": prompt.system,
-        "messages": [m.to_dict() for m in messages],
-        "output_schema_name": prompt.output_schema_name,
-        "output_schema_json": prompt.output_schema_json,
-        "max_tokens": int(prompt.max_tokens),
-        "temperature": float(prompt.temperature),
-        "top_p": float(prompt.top_p),
-        "deterministic": bool(prompt.deterministic),
-        "tools": list(tool_defs) if tool_defs else None,
-    }
-    # CONTRACT v1.3 #1 #7: mode is part of prompt identity; the field is
-    # emitted only when native so every pre-v1.3 hash stays
-    # byte-identical.
-    if getattr(prompt, "structured_output_mode", "prompt") == "native":
-        payload["structured_output_mode"] = "native"
-    canonical = _json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    payload = prompt_identity.build_prompt_identity_payload(
+        model=prompt.model,
+        system=prompt.system,
+        messages=messages,
+        output_schema_name=prompt.output_schema_name,
+        output_schema_json=prompt.output_schema_json,
+        max_tokens=prompt.max_tokens,
+        temperature=prompt.temperature,
+        top_p=prompt.top_p,
+        deterministic=prompt.deterministic,
+        tools=tool_defs,
+        structured_output_mode=getattr(
+            prompt, "structured_output_mode", "prompt"
+        ),
+    )
+    return prompt_identity.hash_prompt_payload(payload)
 
 
 def _maybe_object_id(event: Event) -> Optional[str]:
@@ -4417,7 +4405,9 @@ def _open_sqlite_store(path_or_url: str, run_id: str) -> Any:
 def _requeue_unfired(rt: "Runtime", events: list[Event]) -> None:
     """Push events that haven't yet triggered any behavior back into the queue.
 
-    See CONTRACT v0.5 diff #8 in CONTRACT.md for the rationale.
+    See CONTRACT v0.5 diff #8 and its event-policy amendment in CONTRACT.md
+    for the rationale. Resume considers only event types that could have been
+    scheduled live; it never manufactures queued runtime bookkeeping.
 
     INVARIANT: under the single-threaded, run-to-completion loop
     (CONTRACT #10), an event has either been popped — in which case ALL
@@ -4475,7 +4465,7 @@ def _requeue_unfired(rt: "Runtime", events: list[Event]) -> None:
             if eid:
                 fired_on.add(eid)
     for e in suffix:
-        if _is_lifecycle(e):
+        if not classify_event_type(e.type).schedules_behaviors:
             continue
         if e.id in fired_on:
             continue
@@ -4537,7 +4527,7 @@ def _verify_replay(
         e
         for e in recorded_events
         if e.caused_by is None
-        and not _is_lifecycle(e)
+        and classify_event_type(e.type).included_in_strict_replay
         and not e.type.startswith("embedding.")
         and not _is_promote_block(e)
     ]
@@ -4653,7 +4643,10 @@ def _verify_replay(
             )
             fresh.emit(replay_ev)
             continue
-        if not _is_lifecycle(e) and e.caused_by is not None:
+        if (
+            classify_event_type(e.type).included_in_strict_replay
+            and e.caused_by is not None
+        ):
             derivation_pending = True
     fresh_rt.run_until_idle()
 
@@ -4662,7 +4655,7 @@ def _verify_replay(
     rec_stream = [
         (e.id, e.type)
         for e in recorded_events
-        if not _is_lifecycle(e)
+        if classify_event_type(e.type).included_in_strict_replay
         and e.id not in non_replayable_llm_ids
         and e.id not in direct_embedding_ids
         and not _is_promote_block(e)
@@ -4670,7 +4663,7 @@ def _verify_replay(
     new_stream = [
         (e.id, e.type)
         for e in fresh.events
-        if not _is_lifecycle(e)
+        if classify_event_type(e.type).included_in_strict_replay
         and not _is_promote_block(e)
     ]
     for i, (rec, new) in enumerate(zip(rec_stream, new_stream)):
@@ -4790,18 +4783,6 @@ def _validate_embedding_vectors(
             normalized_vector.append(number)
         normalized.append(normalized_vector)
     return normalized
-
-
-def _is_lifecycle(e: Event) -> bool:
-    return (
-        e.type.startswith("behavior.")
-        or e.type.startswith("relation_behavior.")
-        or e.type.startswith("runtime.")
-        # v1.10 #1: context.read is per-execution bookkeeping. Strict
-        # replay excludes it from the compared streams so a verify pass
-        # (which runs with tracing off) never diverges on trace markers.
-        or e.type == "context.read"
-    )
 
 
 def _materialize_snapshot(graph: Graph, store: Any, snapshot_event: Event) -> None:

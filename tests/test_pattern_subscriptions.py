@@ -54,6 +54,46 @@ class _PatternRecordingMetrics:
         ]
 
 
+@pytest.mark.parametrize(
+    ("event_type", "eligible"),
+    [
+        ("behavior.started", False),
+        ("relation_behavior.completed", False),
+        ("runtime.idle", False),
+        ("llm.requested", False),
+        ("tool.responded", False),
+        ("pattern.matched", False),
+        ("approval.proposed", False),
+        ("embedding.requested", False),
+        ("dev.override", False),
+        ("authority.decision", False),
+        ("context.read", False),
+        ("context.foo", True),
+        ("pack.loaded", True),
+        ("goal.created", True),
+        ("object.created", True),
+        ("custom.event", True),
+        ("runtimeish.event", True),
+    ],
+)
+def test_pattern_only_registry_policy_is_complete(
+    event_type: str, eligible: bool
+) -> None:
+    """Registry enforces pattern-only eligibility without Runtime masking it."""
+
+    clear_registry()
+
+    @behavior(name="auditor", pattern="(c:claim)")
+    def auditor(event, graph, ctx):
+        pass
+
+    graph = Graph()
+    graph.add_object("claim", {"text": "present"})
+    event = Event(id="evt_policy", type=event_type)
+
+    assert bool(Registry([auditor]).match(event, graph)) is eligible
+
+
 def test_pattern_and_event_type_both_required():
     """on= AND pattern= must both hold."""
     fired: list = []

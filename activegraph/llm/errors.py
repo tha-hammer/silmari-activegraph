@@ -25,9 +25,9 @@ per-reason prose table — same pattern as PR-B's
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
-from activegraph.errors import ExecutionError, RegistrationError
+from activegraph.errors import ExecutionError, RegistrationError, internal_bug_fields
 
 
 # Per-reason prose for LLMBehaviorError. The voice principle from
@@ -294,4 +294,63 @@ class LLMBehaviorError(ExecutionError, Exception):
                 "message": message,
                 "payload_extras": self.payload_extras,
             },
+        )
+
+
+class PromptIdentityError(ExecutionError, ValueError):
+    """Internal prompt-metadata invariant failure at a fixture boundary."""
+
+    _doc_slug = "llm-behavior-error"
+
+    def __init__(
+        self,
+        kind: Literal["incomplete_metadata_pair", "hash_mismatch"],
+        *,
+        prompt_hash: str | None = None,
+        computed_hash: str | None = None,
+        deterministic: bool | None = None,
+    ) -> None:
+        self.kind = kind
+        context: dict[str, Any] = {"kind": kind}
+        if prompt_hash is not None:
+            context["prompt_hash"] = prompt_hash
+        if computed_hash is not None:
+            context["computed_hash"] = computed_hash
+        if deterministic is not None:
+            context["deterministic"] = deterministic
+
+        if kind == "incomplete_metadata_pair":
+            summary = "incomplete prompt identity metadata"
+            what_happened = (
+                "A fixture provider received exactly one of `prompt_hash` and "
+                "`deterministic`; these values are one atomic identity pair."
+            )
+        elif kind == "hash_mismatch":
+            summary = "prompt identity hash mismatch"
+            what_happened = (
+                "A fixture provider recomputed the declared prompt identity, "
+                "but it did not match the runtime-supplied `prompt_hash`."
+            )
+        else:  # pragma: no cover - the kind union is closed at all call sites
+            raise ValueError(f"unknown prompt identity error kind: {kind}")
+
+        fields = internal_bug_fields(
+            summary=summary,
+            what_happened=what_happened,
+            why_invariant=(
+                "The runtime and fixture providers must name identical prompt "
+                "bytes before any provider call or fixture I/O; otherwise "
+                "recording and offline replay would silently address different "
+                "files."
+            ),
+            location="activegraph.llm.recorded:_resolve_prompt_identity",
+            extra_context=context,
+        )
+        ExecutionError.__init__(
+            self,
+            fields["summary"],
+            what_failed=fields["what_failed"],
+            why=fields["why"],
+            how_to_fix=fields["how_to_fix"],
+            context=fields["context"],
         )

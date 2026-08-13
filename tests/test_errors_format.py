@@ -60,6 +60,7 @@ from activegraph import (
     UnsupportedPatternError,
 )
 from activegraph.errors import GITHUB_NEW_ISSUE_URL, internal_bug_fields
+from activegraph.llm.errors import PromptIdentityError
 
 
 SNAPSHOTS_DIR = Path(__file__).parent / "snapshots" / "errors"
@@ -646,6 +647,33 @@ def test_llm_behavior_error_preserves_reason_signature() -> None:
     assert err.payload_extras == {"raw_text": "<...>"}
     assert err.context["reason"] == "llm.parse_error"
     assert err.context["payload_extras"] == {"raw_text": "<...>"}
+
+
+def test_prompt_identity_incomplete_pair_error_snapshot() -> None:
+    err = PromptIdentityError(
+        "incomplete_metadata_pair",
+        prompt_hash="supplied-hash",
+    )
+    assert isinstance(err, ExecutionError)
+    assert isinstance(err, ValueError)
+    assert err.kind == "incomplete_metadata_pair"
+    assert err.context["prompt_hash"] == "supplied-hash"
+    _assert_format_compliant(err)
+    _check_snapshot("prompt_identity_error__incomplete_pair", err)
+
+
+def test_prompt_identity_hash_mismatch_error_snapshot() -> None:
+    err = PromptIdentityError(
+        "hash_mismatch",
+        prompt_hash="supplied-hash",
+        computed_hash="computed-hash",
+        deterministic=False,
+    )
+    assert err.kind == "hash_mismatch"
+    assert err.context["computed_hash"] == "computed-hash"
+    assert err.context["deterministic"] is False
+    _assert_format_compliant(err)
+    _check_snapshot("prompt_identity_error__hash_mismatch", err)
 
 
 def test_tool_error_preserves_reason_signature() -> None:

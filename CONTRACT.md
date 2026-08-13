@@ -8826,3 +8826,139 @@ every catalog row is actually observed with its declared kind and exact tags.
 8. Standard observations always use exactly the catalog kind and tag-key set.
    Instrumentation is non-throwing and does not change graph event payloads or
    ordering. Attached sink metrics retain the v1.8 worker-owned semantics.
+## v1.11 #8. Event types have purpose-specific runtime policy
+
+Event classification has four independent decisions owned by
+`activegraph.runtime.event_policy`: whether a type may schedule behaviors,
+whether it may trigger a pattern-only behavior, whether it is included in a
+structural diff, and whether it is included in strict replay comparison.
+These decisions MUST NOT be collapsed into a single "lifecycle" predicate.
+
+`behavior.*`, `relation_behavior.*`, `runtime.*`, `llm.*`, `tool.*`,
+`pattern.*`, `approval.*`, `embedding.*`, `dev.*`, and `authority.*` never
+schedule behaviors and never trigger pattern-only behaviors. Exact
+`context.read` has the same scheduling rule; this is not a `context.*`
+reservation. Diff continues to exclude only the three structural families
+(`behavior.*`, `relation_behavior.*`, and `runtime.*`). Strict replay excludes
+those three families plus exact `context.read`; it retains LLM, tool, pattern,
+approval, behavior-derived embedding, developer-override, and authority
+history. Direct operator embedding pairs retain their separate replay carveout.
+
+This amendment narrows and supersedes v0.5 #8 and its v0.6 #18 fork extension:
+load/fork recovery may requeue only post-drain suffix events whose types are
+eligible for live behavior scheduling. The last `runtime.idle` remains the
+drain high-water mark; the `behavior.started` fired-on check,
+`runtime.budget_exhausted` recovery, and `actor="promote:*"` exclusion remain
+unchanged.
+
+Treating `embedding.*` as non-scheduling bookkeeping is a new compatibility
+decision. v1.8 #6 established runtime ownership, caching, and the distinction
+between direct and behavior-derived embedding replay, but did not previously
+guarantee that embedding events could not schedule a subscriber or advance the
+queue tick. This amendment adds that guarantee. It also supersedes v0.6 #1's
+historical statement that `llm.*` events flow through the behavior queue:
+current v0.7-and-later LLM and tool bookkeeping suppression remains the
+authoritative live-dispatch behavior.
+
+## v1.11 #9. Prompt identity has one canonical byte owner
+
+`activegraph.llm.prompt_identity` owns the base prompt fields, canonical JSON
+(`sort_keys=True`, compact separators, UTF-8), and SHA-256 operation used by
+public prompt inspection, runtime turn/cache identity, and recorded fixtures.
+The public `AssembledPrompt.hash()` domain continues to omit the `tools` key.
+Runtime-turn and fixture identities explicitly include it; both `tools=None`
+and `tools=[]` normalize to JSON `null`, while non-empty tool definitions
+participate in the hash. `structured_output_mode` remains omit-when-prompt and
+is included only as `"native"`. Message serialization continues to omit
+`tool_calls` when absent and preserve it when present. These domain distinctions
+are intentional; the shared owner does not make the public and per-turn hashes
+interchangeable.
+
+## v1.11 #10. Fixture identity uses declared determinism with bounded legacy reads
+
+`AssembledPrompt.deterministic` is the authority for runtime-driven fixture
+identity. `RecordedLLMProvider` and `RecordingLLMProvider` alone advertise the
+duck-typed `accepts_prompt_identity = True` capability. Runtime supplies the
+atomic `prompt_hash`/`deterministic` pair only when that marker is truthy;
+absent or false markers receive neither value. The runtime-checkable
+`LLMProvider` Protocol is deliberately unchanged, so existing structural and
+strict-signature providers remain compatible.
+
+The pair invariant is exact:
+
+- both values absent means a direct legacy call, whose only available behavior
+  is sampling-based inference;
+- both values present means declared canonical identity, and the fixture
+  provider MUST recompute and verify the supplied hash;
+- exactly one value present raises structured `PromptIdentityError(kind=
+  "incomplete_metadata_pair")`;
+- a supplied/local mismatch raises `PromptIdentityError(kind="hash_mismatch")`.
+
+Both internal errors occur before fixture probing/writing or a wrapped live
+provider call. Runtime re-raises them before generic provider translation, so
+they do not become retryable `llm.network_error` events. Recording writes only
+the canonical declared filename and never forwards fixture-only metadata to
+the inner provider. Replay probes the canonical filename first; only after a
+miss may it probe the legacy inferred filename, at most once and only when its
+hash differs. A total miss reports the canonical requested hash. This fallback
+is read compatibility for old fixtures, never a new-write policy.
+
+## v1.11 #11. Provider wire owns shared exception and retry-header policy
+
+Anthropic and OpenAI adapters consume the same module-level
+`activegraph.llm.wire.classify_provider_exception` and
+`retry_after_seconds` symbols. Providers retain ownership of their
+`LLMBehaviorError` envelopes. Retry-header parsing deliberately preserves the
+existing narrow semantics: read lowercase `retry-after` through `.get`, apply
+`float()`, and return `None` for absent/unreadable values or `TypeError`/
+`ValueError`. It does not normalize header case, parse HTTP dates, clamp
+negative values, or otherwise reinterpret provider input.
+
+## v1.11 #12. Global and pack behavior decorators share pure construction
+
+`activegraph.behaviors._factory` is the sole owner of plain, LLM, and relation
+behavior construction. Each builder is two-stage: the decorator expression
+parses/compiles `pattern`, parses `activate_after`, then (for LLM behaviors)
+validates `output_schema`; the returned binder validates the handler, makes
+defensive copies, and constructs the dataclass. This locks error precedence as
+pattern before activation before schema before handler. Construction has no
+registry, Pack, or live-runtime side effect.
+
+This amendment precisely supersedes v0.9 #3's statement that global and pack
+decorators have identical signatures and differ only by skipped registration.
+Their common construction parameters/defaults/validation are identical,
+including `LLMBehavior.model: Optional[str] = None`. Policy intentionally
+splits after successful construction: global plain/relation behaviors append
+once; global LLM behaviors validate against live runtimes and only then append;
+public `register()` likewise validates before append. Pack decorators never
+append or live-validate, and instead set `_pack_local` plus exact
+`__pack_meta__`. Pack tools additionally have the pack-only `export_globally`
+surface and `_export_globally` metadata, specified separately below.
+
+Consequently an omitted pack LLM model survives loader cloning as `None` until
+the Runtime resolves its configured provider's default, and invalid pack LLM
+schemas fail at decoration with the same error and precedence as global ones.
+
+## v1.11 #13. Global and pack tools share pure canonical construction
+
+`activegraph.tools._factory` is the sole owner of Tool construction. Its first
+stage normalizes `cost_per_call` to `Decimal`, so an invalid cost fails before
+handler validation. Its returned binder validates the `(args, ctx)` signature,
+infers an omitted input schema, converts `timeout_seconds` to exact `float` and
+`deterministic` to exact `bool`, and constructs the Tool before any effect.
+Global `@tool` then appends exactly once. Pack `@tool` never appends; it sets
+`_pack_local`, boolean `_export_globally`, and exact `__pack_meta__` instead.
+
+The pack-only `export_globally` parameter remains an intentional exception to
+the common signature. It controls whether the loader-renamed canonical Tool is
+also entered under its short key in a Runtime's effective `tool_registry`; it
+does not append to the module-global registry. Regardless of export, an
+unambiguous `Runtime.get_tool(short)` continues to resolve through Pack short-
+name metadata. Canonical and exported-short registry keys point to the same
+loader clone, not the original decorated pack Tool.
+
+The omitted cost is newly locked to exact `Decimal("0")`, including string
+rendering `"0"` and Decimal exponent/tuple representation. This authority
+comes from the canonical Tool field and original global decorator plus v0.9
+parity—not from a later historical contract change—and supersedes the pack
+copy's stale `"0.0"` default.

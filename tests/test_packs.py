@@ -19,6 +19,10 @@ Covers:
 from __future__ import annotations
 
 import textwrap
+from dataclasses import fields
+from decimal import Decimal, InvalidOperation
+import importlib
+import inspect
 from pathlib import Path
 
 import pytest
@@ -41,6 +45,9 @@ from activegraph import (
     RelationType,
     Runtime,
     behavior as user_behavior,
+    llm_behavior as user_llm_behavior,
+    relation_behavior as user_relation_behavior,
+    tool as user_tool,
     clear_registry,
     clear_tool_registry,
     discover,
@@ -58,6 +65,7 @@ from activegraph.packs import (
     tool,
 )
 from activegraph.packs.loader import AMBIGUOUS
+from activegraph.core.event import Event
 
 
 # ---------------------------------------------------- Pack dataclass
@@ -305,6 +313,20 @@ def test_pack_rejects_globally_registered_behavior():
     clear_registry()
 
 
+def test_pack_rejects_globally_registered_tool():
+    @user_tool(name="global-tool")
+    def global_tool(args, ctx):
+        return None
+
+    with pytest.raises(PackValidationError, match="activegraph.packs.tool"):
+        Pack(
+            name="demo",
+            version="0.1.0",
+            tools=[global_tool],
+            settings_schema=EmptySettings,
+        )
+
+
 def test_pack_settings_schema_must_be_basemodel():
     class NotAModel:
         pass
@@ -353,6 +375,406 @@ def test_pack_decorators_attach_pack_meta_to_function():
     assert hasattr(x.fn, "__pack_meta__")
     assert x.fn.__pack_meta__["kind"] == "behavior"
     assert x.fn.__pack_meta__["name"] == "x"
+
+
+def _assert_behavior_domain_parity(global_obj, pack_obj) -> None:
+    skipped = {"fn", "handler", "pattern_matcher"}
+    for field in fields(global_obj):
+        if field.name in skipped:
+            continue
+        value = getattr(global_obj, field.name)
+        peer = getattr(pack_obj, field.name)
+        assert value == peer, field.name
+        assert type(value) is type(peer), field.name
+
+    assert global_obj.pattern_matcher.pattern.source == (
+        pack_obj.pattern_matcher.pattern.source
+    )
+    assert global_obj.pattern_matcher.pattern.match == (
+        pack_obj.pattern_matcher.pattern.match
+    )
+    assert global_obj.pattern_matcher.pattern.where == (
+        pack_obj.pattern_matcher.pattern.where
+    )
+    positive = Graph()
+    positive.add_object("claim", {})
+    event = Event(id="evt_match", type="custom.event")
+    assert bool(global_obj.pattern_matcher.matches(event, positive)) is True
+    assert bool(pack_obj.pattern_matcher.matches(event, positive)) is True
+    assert global_obj.pattern_matcher.matches(event, Graph()) == []
+    assert pack_obj.pattern_matcher.matches(event, Graph()) == []
+
+
+def test_global_and_pack_behavior_construction_has_exact_domain_parity():
+    common = dict(
+        name="parity",
+        on=["custom.event"],
+        where={"kind": "x"},
+        view={"objects": ["claim"]},
+        creates=["result"],
+        budget={"max_events": 2},
+        priority=3,
+        pattern="(c:claim)",
+        activate_after=2,
+    )
+
+    def global_plain_fn(event, graph, ctx):
+        pass
+
+    def pack_plain_fn(event, graph, ctx):
+        pass
+
+    global_plain = user_behavior(**common)(global_plain_fn)
+    pack_plain = behavior(**common)(pack_plain_fn)
+    _assert_behavior_domain_parity(global_plain, pack_plain)
+    assert global_plain.fn is global_plain_fn
+    assert pack_plain.fn is pack_plain_fn
+
+    llm_common = common | {
+        "description": "describe",
+        "model": "m",
+        "output_schema": _Widget,
+        "deterministic": True,
+        "max_tokens": 12,
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "timeout_seconds": 2,
+        "prompt_template": "{system}",
+        "tools": ["lookup"],
+        "max_tool_turns": 2,
+    }
+
+    def global_llm_fn(event, graph, ctx, out):
+        pass
+
+    def pack_llm_fn(event, graph, ctx, out):
+        pass
+
+    global_llm = user_llm_behavior(**llm_common)(global_llm_fn)
+    pack_llm = llm_behavior(**llm_common)(pack_llm_fn)
+    _assert_behavior_domain_parity(global_llm, pack_llm)
+    assert global_llm.fn is pack_llm.fn
+    assert global_llm.handler is global_llm_fn
+    assert pack_llm.handler is pack_llm_fn
+
+    relation_common = common | {"relation_type": "supports"}
+
+    def global_relation_fn(relation, event, graph, ctx):
+        pass
+
+    def pack_relation_fn(relation, event, graph, ctx):
+        pass
+
+    global_relation = user_relation_behavior(**relation_common)(global_relation_fn)
+    pack_relation = relation_behavior(**relation_common)(pack_relation_fn)
+    _assert_behavior_domain_parity(global_relation, pack_relation)
+    assert global_relation.fn is global_relation_fn
+    assert pack_relation.fn is pack_relation_fn
+
+
+def test_pack_behavior_metadata_and_loader_clones_preserve_all_fields():
+    @behavior(
+        name="plain",
+        on=["custom.event"],
+        where={"kind": "x"},
+        pattern="(c:claim)",
+        activate_after=2,
+    )
+    def plain(event, graph, ctx):
+        pass
+
+    @llm_behavior(
+        name="llm",
+        on=["custom.event"],
+        where={"kind": "x"},
+        output_schema=_Widget,
+        pattern="(c:claim)",
+        activate_after=2,
+    )
+    def llm(event, graph, ctx, out):
+        pass
+
+    @relation_behavior(
+        "supports",
+        name="relation",
+        on=["custom.event"],
+        pattern="(c:claim)",
+        activate_after=2,
+    )
+    def relation(rel, event, graph, ctx):
+        pass
+
+    assert plain.fn.__pack_meta__ == {
+        "kind": "behavior",
+        "name": "plain",
+        "on": ["custom.event"],
+        "where": {"kind": "x"},
+    }
+    assert llm.handler.__pack_meta__ == {
+        "kind": "llm_behavior",
+        "name": "llm",
+        "on": ["custom.event"],
+        "where": {"kind": "x"},
+        "output_schema": "_Widget",
+    }
+    assert relation.fn.__pack_meta__ == {
+        "kind": "relation_behavior",
+        "name": "relation",
+        "relation_type": "supports",
+    }
+
+    pack = Pack(
+        name="clonepack",
+        version="1.0.0",
+        behaviors=[plain, llm, relation],
+        settings_schema=EmptySettings,
+    )
+    runtime = _fresh_runtime()
+    runtime.load_pack(pack)
+    clones = {clone._short_name: clone for clone in runtime._pack_behaviors}
+
+    for original in (plain, llm, relation):
+        clone = clones[original.name]
+        assert clone.name == f"clonepack.{original.name}"
+        assert clone._pack_owner == "clonepack"
+        assert clone._short_name == original.name
+        assert clone._pack_local is True
+        for field in fields(original):
+            if field.name in {"name", "fn", "handler"}:
+                continue
+            value = getattr(original, field.name)
+            peer = getattr(clone, field.name)
+            assert value == peer, field.name
+            assert type(value) is type(peer), field.name
+
+
+def test_global_and_pack_tool_signatures_match_except_pack_export_policy():
+    global_params = inspect.signature(user_tool).parameters
+    pack_params = inspect.signature(tool).parameters
+    assert tuple(global_params) == tuple(
+        name for name in pack_params if name != "export_globally"
+    )
+    for name, parameter in global_params.items():
+        peer = pack_params[name]
+        assert parameter.kind == peer.kind
+        assert parameter.default == peer.default
+        assert parameter.annotation == peer.annotation
+
+
+@pytest.mark.parametrize("cost", [2, "2.50", Decimal("3.00")])
+def test_global_and_pack_tool_construction_has_exact_type_parity(cost):
+    def global_fn(args: _Widget, ctx):
+        return args
+
+    def pack_fn(args: _Widget, ctx):
+        return args
+
+    kwargs = {
+        "name": "parity-tool",
+        "description": "parity",
+        "cost_per_call": cost,
+        "timeout_seconds": 2,
+        "deterministic": 1,
+    }
+    global_tool = user_tool(**kwargs)(global_fn)
+    pack_tool = tool(**kwargs)(pack_fn)
+
+    for field in fields(global_tool):
+        if field.name == "fn":
+            continue
+        value = getattr(global_tool, field.name)
+        peer = getattr(pack_tool, field.name)
+        assert value == peer, field.name
+        assert type(value) is type(peer), field.name
+    assert global_tool.fn is global_fn
+    assert pack_tool.fn is pack_fn
+    assert global_tool.input_schema is _Widget
+    assert pack_tool.input_schema is _Widget
+    assert type(pack_tool.timeout_seconds) is float
+    assert type(pack_tool.deterministic) is bool
+
+
+def test_omitted_pack_tool_cost_is_exact_canonical_decimal_zero():
+    @user_tool(name="global-zero")
+    def global_zero(args, ctx):
+        return None
+
+    @tool(name="pack-zero")
+    def pack_zero(args, ctx):
+        return None
+
+    for decorated in (global_zero, pack_zero):
+        assert type(decorated.cost_per_call) is Decimal
+        assert str(decorated.cost_per_call) == "0"
+        assert decorated.cost_per_call.as_tuple() == Decimal("0").as_tuple()
+
+
+def test_invalid_tool_cost_precedes_bad_handler_in_both_namespaces():
+    for decorator in (user_tool, tool):
+        with pytest.raises(InvalidOperation):
+            binder = decorator(cost_per_call="not-a-decimal")
+
+            @binder
+            def bad_handler(ctx):
+                pass
+
+
+def test_both_tool_decorators_delegate_and_keep_effect_policy(
+    monkeypatch,
+) -> None:
+    factory = importlib.import_module("activegraph.tools._factory")
+    global_module = importlib.import_module("activegraph.tools.decorators")
+    pack_module = importlib.import_module("activegraph.packs")
+    outer: list[dict] = []
+    bound: list[object] = []
+    appended: list[object] = []
+
+    class SpyRegistry(list):
+        def append(self, value):
+            appended.append(value)
+            super().append(value)
+
+    monkeypatch.setattr(global_module, "_TOOL_REGISTRY", SpyRegistry())
+
+    def builder(**kwargs):
+        outer.append(kwargs)
+
+        def bind(fn):
+            from activegraph.tools.base import Tool
+
+            bound.append(fn)
+            return Tool(name=kwargs.get("name") or fn.__name__, fn=fn)
+
+        return bind
+
+    monkeypatch.setattr(factory, "build_tool", builder)
+
+    def global_fn(args, ctx):
+        return None
+
+    def pack_fn(args, ctx):
+        return None
+
+    global_result = global_module.tool(name="global")(global_fn)
+    pack_result = pack_module.tool(name="pack", export_globally=1)(pack_fn)
+
+    assert global_module.tool_factory is factory
+    assert pack_module.tool_factory is factory
+    assert [call["name"] for call in outer] == ["global", "pack"]
+    assert bound == [global_fn, pack_fn]
+    assert appended == [global_result]
+    assert getattr(pack_result, "_pack_local") is True
+    assert getattr(pack_result, "_export_globally") is True
+    assert pack_fn.__pack_meta__ == {
+        "kind": "tool",
+        "name": "pack",
+        "deterministic": False,
+        "export_globally": True,
+    }
+
+
+def test_pack_tool_export_aliases_share_loader_clone_without_global_append():
+    @tool(name="hidden", export_globally=False)
+    def hidden(args, ctx):
+        return None
+
+    @tool(name="shown", export_globally=True)
+    def shown(args, ctx):
+        return None
+
+    pack = Pack(
+        name="toolpack",
+        version="1.0.0",
+        tools=[hidden, shown],
+        settings_schema=EmptySettings,
+    )
+    assert get_tool_registry() == []
+    runtime = Runtime(Graph(), behaviors=[], tools=[])
+    runtime.load_pack(pack)
+    runtime._ensure_registry()
+
+    hidden_clone = runtime.tool_registry["toolpack.hidden"]
+    shown_clone = runtime.tool_registry["toolpack.shown"]
+    assert "hidden" not in runtime.tool_registry
+    assert runtime.get_tool("hidden") is hidden_clone
+    assert runtime.tool_registry["shown"] is shown_clone
+    assert shown_clone is not shown
+    assert hidden_clone is not hidden
+    assert shown_clone._pack_owner == "toolpack"
+    assert shown_clone._short_name == "shown"
+    assert shown_clone._pack_local is True
+    assert shown_clone._export_globally is True
+    for original, clone in ((hidden, hidden_clone), (shown, shown_clone)):
+        for field in fields(original):
+            if field.name in {"name", "fn"}:
+                continue
+            value = getattr(original, field.name)
+            peer = getattr(clone, field.name)
+            assert value == peer, field.name
+            assert type(value) is type(peer), field.name
+    assert get_tool_registry() == []
+
+
+def test_pack_accepts_all_decorator_products_and_tool_metadata_is_exact():
+    @behavior(name="plain")
+    def plain(event, graph, ctx):
+        pass
+
+    @llm_behavior(name="llm", output_schema=_Widget)
+    def llm(event, graph, ctx, out):
+        pass
+
+    @relation_behavior("edge", name="relation")
+    def relation(rel, event, graph, ctx):
+        pass
+
+    @tool(name="pack-tool", deterministic=1, export_globally=1)
+    def pack_tool(args: _Widget, ctx):
+        return args
+
+    pack = Pack(
+        name="completepack",
+        version="1.0.0",
+        behaviors=[plain, llm, relation],
+        tools=[pack_tool],
+        settings_schema=EmptySettings,
+    )
+
+    assert tuple(pack.behaviors) == (plain, llm, relation)
+    assert tuple(pack.tools) == (pack_tool,)
+    assert pack_tool.fn.__pack_meta__ == {
+        "kind": "tool",
+        "name": "pack-tool",
+        "deterministic": True,
+        "export_globally": True,
+    }
+
+
+def test_exported_pack_tool_collision_is_premutation():
+    @user_tool(name="collision")
+    def global_collision(args, ctx):
+        return None
+
+    @tool(name="collision", export_globally=True)
+    def pack_collision(args, ctx):
+        return None
+
+    pack = Pack(
+        name="toolpack",
+        version="1.0.0",
+        tools=[pack_collision],
+        settings_schema=EmptySettings,
+    )
+    runtime = Runtime(Graph())
+    before_events = runtime.graph.events
+
+    with pytest.raises(PackConflictError):
+        runtime.load_pack(pack)
+
+    assert runtime.loaded_packs() == []
+    assert runtime._pack_tools == []
+    assert runtime.graph.events == before_events
+    assert get_tool_registry() == [global_collision]
 
 
 # ---------------------------------------------------- prompt loading

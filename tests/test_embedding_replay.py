@@ -34,6 +34,32 @@ class _NoContactProvider:
         raise AssertionError("strict replay contacted the embedding provider")
 
 
+def test_embedding_events_do_not_schedule_subscribers_or_advance_tick() -> None:
+    clear_registry()
+    calls: list[str] = []
+
+    @behavior(name="embedding-auditor", on=["embedding.responded"])
+    def embedding_auditor(event, graph, ctx):
+        calls.append(event.type)
+
+    runtime = Runtime(
+        Graph(), behaviors=[embedding_auditor], embedding_provider=_Provider()
+    )
+    tick_before = runtime._tick
+
+    runtime.embed(["alpha"])
+    runtime.run_until_idle()
+
+    assert calls == []
+    assert not any(
+        event.type.startswith("behavior.")
+        and event.payload.get("behavior") == "embedding-auditor"
+        for event in runtime.graph.events
+    )
+    assert len(runtime._queue) == 0
+    assert runtime._tick == tick_before
+
+
 def test_embedding_cache_harvests_recorded_vectors_defensively() -> None:
     provider = _Provider()
     runtime = Runtime(Graph(), embedding_provider=provider)

@@ -90,6 +90,35 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
   limit of one was consumed before the first turn and the same invocation
   immediately failed as exhausted without calling the provider.
 
+### Changed
+
+- Runtime event scheduling now uses one purpose-specific event policy across
+  live dispatch, pattern-only matching, resume, diff, and strict replay.
+  `embedding.*` request/response records are newly treated like LLM/tool
+  bookkeeping: they persist and remain meaningful replay/diff history, but no
+  longer schedule subscribers or advance the behavior queue tick. Resume also
+  no longer requeues bookkeeping events that live dispatch would suppress.
+- Runtime-backed LLM fixture recording now keys contradictory sampling cases
+  from the behavior's declared `deterministic` flag, so the fixture filename
+  matches `llm.requested.prompt_hash`. Existing fixtures written under the old
+  sampling-inferred name remain readable through canonical-first fallback.
+  Fixture identity metadata is an atomic, opt-in pair; internal mismatches fail
+  before provider or file effects and are never retried as network failures.
+- Anthropic and OpenAI now delegate exception classification and
+  `retry-after` parsing to the same wire-policy owner. Error reasons, payload
+  extras, and the deliberately narrow lowercase numeric-header semantics are
+  unchanged.
+- Global and pack behavior decorators now share side-effect-free two-stage
+  construction. Pack LLM behaviors use provider-aware `model=None` and the
+  same strict schema validation as global decorators. Global LLM decoration
+  and public `register()` validate before appending, so failed live-runtime
+  validation leaves no transient registry residue.
+- Global and pack tools now share canonical construction and validation.
+  Omitted pack tool cost is exactly `Decimal("0")` (rather than the stale
+  `Decimal("0.0")` representation), and pack timeout/determinism values now
+  normalize to the same exact types as global tools. Pack export aliases still
+  point to the loader clone without touching the module-global registry.
+
 ## [1.10.0] — 2026-07-12
 
 Runtime legibility and cooperative-host round (CONTRACT v1.10 #1–#3): the behavior-frame

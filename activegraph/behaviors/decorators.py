@@ -16,63 +16,15 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional, Union
 
+from activegraph.behaviors import _factory as behavior_factory
 from activegraph.behaviors.base import (
     Behavior,
     LLMBehavior,
     RelationBehavior,
-    _llm_behavior_fn_placeholder,
 )
 
 
 _REGISTRY: list[Union[Behavior, RelationBehavior]] = []
-
-
-def _validate_output_schema(output_schema: Any) -> None:
-    """Strict-validate ``output_schema=`` at @llm_behavior time.
-
-    CONTRACT v1.0.3 #2. Accepts ``None`` (output_schema is optional)
-    or a Pydantic ``BaseModel`` subclass. Anything else — a dict, a
-    string, an instance instead of a class — raises ``TypeError``
-    with a structured message naming what was passed and showing the
-    correct form as a code example.
-
-    Dict-form output_schema support (JSON-schema dict) is a v1.1
-    candidate per the CONTRACT amendment; the rationale and the
-    fix the user wants live there.
-    """
-    if output_schema is None:
-        return
-    # Import lazily so the framework can still be imported in
-    # environments without Pydantic (e.g., pack metadata tooling).
-    # All real @llm_behavior callsites already require Pydantic
-    # transitively via LLMBehavior.output_schema.
-    try:
-        from pydantic import BaseModel
-    except ImportError:  # pragma: no cover — Pydantic is a hard dep at runtime
-        return
-    if isinstance(output_schema, type) and issubclass(output_schema, BaseModel):
-        return
-    passed = (
-        type(output_schema).__name__
-        if not isinstance(output_schema, type)
-        else f"{output_schema.__name__} (a class, but not a BaseModel subclass)"
-    )
-    raise TypeError(
-        f"output_schema must be a Pydantic BaseModel subclass, not "
-        f"{passed}.\n"
-        f"\n"
-        f"Example:\n"
-        f"    from pydantic import BaseModel\n"
-        f"\n"
-        f"    class MyOutput(BaseModel):\n"
-        f"        result: str\n"
-        f"\n"
-        f"    @llm_behavior(output_schema=MyOutput)\n"
-        f"    def my_behavior(event, graph, ctx, out): ...\n"
-        f"\n"
-        f"Dict-form output_schema (e.g., JSON Schema as a dict) is\n"
-        f"filed as a v1.1 candidate. See CONTRACT v1.0.3 #2."
-    )
 
 
 def clear_registry() -> list[Union[Behavior, RelationBehavior]]:
@@ -140,13 +92,13 @@ def register(behavior_obj: Union[Behavior, RelationBehavior]) -> None:
             f"Use the @behavior / @relation_behavior / @llm_behavior "
             f"decorators to construct one."
         )
-    _REGISTRY.append(behavior_obj)
     # v1.0.2.post1 #1 (b): if any Runtime is already alive, validate the
     # new behavior against each one's configured provider so cross-
     # provider model mismatches fire at the @llm_behavior / register()
     # line rather than at first run_goal.
     from activegraph.runtime._live import validate_behavior_against_live_runtimes
     validate_behavior_against_live_runtimes(behavior_obj)
+    _REGISTRY.append(behavior_obj)
 
 
 def behavior(
@@ -176,39 +128,20 @@ def behavior(
         (CONTRACT v0.7 #13).
     """
 
-    from activegraph.runtime.patterns import parse as _parse_pattern
-    from activegraph.runtime.scheduler import parse_activate_after as _parse_aa
-
-    compiled_matcher = None
-    if pattern is not None:
-        compiled_matcher = _parse_pattern(pattern).compile()
-    delay_n: Optional[int] = None
-    if activate_after is not None:
-        delay_n = _parse_aa(activate_after)
+    bind = behavior_factory.build_behavior(
+        name=name,
+        on=on,
+        where=where,
+        view=view,
+        creates=creates,
+        budget=budget,
+        priority=priority,
+        pattern=pattern,
+        activate_after=activate_after,
+    )
 
     def wrap(fn: Callable[..., None]) -> Behavior:
-        # v1.3: arity check at decoration time (see activegraph/_signature.py).
-        from activegraph._signature import validate_handler_signature
-
-        validate_handler_signature(
-            fn,
-            expected_params=("event", "graph", "ctx"),
-            decorator="@behavior",
-            allow_annotated_extras=True,
-        )
-        b = Behavior(
-            name=name or fn.__name__,
-            fn=fn,
-            on=list(on or []),
-            where=dict(where) if where else None,
-            view_spec=dict(view) if view else None,
-            creates=list(creates or []),
-            budget=dict(budget) if budget else None,
-            priority=priority,
-            pattern=pattern,
-            pattern_matcher=compiled_matcher,
-            activate_after=delay_n,
-        )
+        b = bind(fn)
         _REGISTRY.append(b)
         return b
 
@@ -288,64 +221,38 @@ def llm_behavior(
     runtime's canonical layout.
     """
 
-    from activegraph.runtime.patterns import parse as _parse_pattern
-    from activegraph.runtime.scheduler import parse_activate_after as _parse_aa
-
-    compiled_matcher = None
-    if pattern is not None:
-        compiled_matcher = _parse_pattern(pattern).compile()
-    delay_n: Optional[int] = None
-    if activate_after is not None:
-        delay_n = _parse_aa(activate_after)
-
-    # v1.0.3 #2: strict-validate output_schema= at decoration time.
-    # Users who passed a JSON-schema dict previously hit a silent
-    # behavior.failed with reason=llm.schema_violation at first LLM
-    # call; failing here names the cause at the @llm_behavior line.
-    _validate_output_schema(output_schema)
+    bind = behavior_factory.build_llm_behavior(
+        name=name,
+        on=on,
+        where=where,
+        description=description,
+        model=model,
+        output_schema=output_schema,
+        view=view,
+        creates=creates,
+        budget=budget,
+        deterministic=deterministic,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        timeout_seconds=timeout_seconds,
+        prompt_template=prompt_template,
+        priority=priority,
+        pattern=pattern,
+        activate_after=activate_after,
+        tools=tools,
+        max_tool_turns=max_tool_turns,
+    )
 
     def wrap(fn: Callable[..., None]) -> LLMBehavior:
-        # v1.3: arity check at decoration time (see activegraph/_signature.py).
-        from activegraph._signature import validate_handler_signature
-
-        validate_handler_signature(
-            fn,
-            expected_params=("event", "graph", "ctx", "llm_output"),
-            decorator="@llm_behavior",
-            allow_annotated_extras=True,
-        )
-        b = LLMBehavior(
-            name=name or fn.__name__,
-            fn=_llm_behavior_fn_placeholder,
-            on=list(on or []),
-            where=dict(where) if where else None,
-            view_spec=dict(view) if view else None,
-            creates=list(creates or []),
-            budget=dict(budget) if budget else None,
-            priority=priority,
-            handler=fn,
-            description=description,
-            model=model,
-            output_schema=output_schema,
-            deterministic=deterministic,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            timeout_seconds=timeout_seconds,
-            prompt_template=prompt_template,
-            pattern=pattern,
-            pattern_matcher=compiled_matcher,
-            activate_after=delay_n,
-            tools=list(tools) if tools else [],
-            max_tool_turns=max_tool_turns,
-        )
-        _REGISTRY.append(b)
+        b = bind(fn)
         # v1.0.2.post1 #1 (b): validate against any live Runtime's
         # provider. Mirrors the eager check in register() so decorated
         # behaviors with cross-provider model names fire at the
         # @llm_behavior line instead of at first run_goal.
         from activegraph.runtime._live import validate_behavior_against_live_runtimes
         validate_behavior_against_live_runtimes(b)
+        _REGISTRY.append(b)
         return b
 
     return wrap
@@ -373,40 +280,21 @@ def relation_behavior(
     v0.7 #8 / #11 / #13.
     """
 
-    from activegraph.runtime.patterns import parse as _parse_pattern
-    from activegraph.runtime.scheduler import parse_activate_after as _parse_aa
-
-    compiled_matcher = None
-    if pattern is not None:
-        compiled_matcher = _parse_pattern(pattern).compile()
-    delay_n: Optional[int] = None
-    if activate_after is not None:
-        delay_n = _parse_aa(activate_after)
+    bind = behavior_factory.build_relation_behavior(
+        relation_type,
+        on=on,
+        name=name,
+        where=where,
+        view=view,
+        creates=creates,
+        budget=budget,
+        priority=priority,
+        pattern=pattern,
+        activate_after=activate_after,
+    )
 
     def wrap(fn: Callable[..., None]) -> RelationBehavior:
-        # v1.3: arity check at decoration time (see activegraph/_signature.py).
-        from activegraph._signature import validate_handler_signature
-
-        validate_handler_signature(
-            fn,
-            expected_params=("relation", "event", "graph", "ctx"),
-            decorator="@relation_behavior",
-            allow_annotated_extras=True,
-        )
-        rb = RelationBehavior(
-            name=name or fn.__name__,
-            fn=fn,
-            relation_type=relation_type,
-            on=list(on or []),
-            where=dict(where) if where else None,
-            view_spec=dict(view) if view else None,
-            creates=list(creates or []),
-            budget=dict(budget) if budget else None,
-            priority=priority,
-            pattern=pattern,
-            pattern_matcher=compiled_matcher,
-            activate_after=delay_n,
-        )
+        rb = bind(fn)
         _REGISTRY.append(rb)
         return rb
 

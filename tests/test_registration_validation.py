@@ -11,6 +11,9 @@ permissive escape hatches: `*args`, extras with defaults, and the
 pack settings-injection pattern (annotated extras).
 """
 
+import importlib
+import inspect
+
 import pytest
 from pydantic import BaseModel
 
@@ -233,6 +236,247 @@ def test_non_callable_is_rejected():
             decorator="@behavior",
             allow_annotated_extras=True,
         )
+
+
+# ----------------------------------------- shared behavior construction
+
+
+@pytest.mark.parametrize(
+    ("global_decorator", "pack_decorator"),
+    [
+        (behavior, pack_api.behavior),
+        (llm_behavior, pack_api.llm_behavior),
+        (relation_behavior, pack_api.relation_behavior),
+    ],
+)
+def test_behavior_decorator_common_signatures_match(
+    global_decorator, pack_decorator
+) -> None:
+    global_params = inspect.signature(global_decorator).parameters
+    pack_params = inspect.signature(pack_decorator).parameters
+
+    assert tuple(global_params) == tuple(pack_params)
+    for name, parameter in global_params.items():
+        peer = pack_params[name]
+        assert parameter.kind == peer.kind
+        assert parameter.default == peer.default
+        assert parameter.annotation == peer.annotation
+
+
+def test_pack_llm_omitted_model_and_schema_validation_match_global() -> None:
+    @pack_api.llm_behavior(name="pack-llm", on=["goal.created"])
+    def pack_llm(event, graph, ctx, out):
+        pass
+
+    assert pack_llm.model is None
+
+    errors: list[str] = []
+    for decorator in (llm_behavior, pack_api.llm_behavior):
+        with pytest.raises(TypeError) as exc_info:
+            decorator(output_schema={"type": "object"})
+        errors.append(str(exc_info.value))
+    assert errors[0] == errors[1]
+
+
+def test_llm_schema_validation_precedes_bad_handler_on_both_paths() -> None:
+    for decorator in (llm_behavior, pack_api.llm_behavior):
+        with pytest.raises(TypeError, match="output_schema must be"):
+            binder = decorator(output_schema="not-a-schema")
+
+            @binder
+            def bad_handler(event):
+                pass
+
+
+def test_all_six_behavior_decorators_delegate_to_shared_builders(
+    monkeypatch,
+) -> None:
+    factory = importlib.import_module("activegraph.behaviors._factory")
+    global_module = importlib.import_module("activegraph.behaviors.decorators")
+    pack_module = importlib.import_module("activegraph.packs")
+    outer_calls: list[tuple[str, tuple, dict]] = []
+    bind_calls: list[tuple[str, object]] = []
+
+    def plain_builder(*args, **kwargs):
+        outer_calls.append(("plain", args, kwargs))
+
+        def bind(fn):
+            from activegraph.behaviors.base import Behavior
+
+            bind_calls.append(("plain", fn))
+            return Behavior(name=kwargs.get("name") or fn.__name__, fn=fn)
+
+        return bind
+
+    def llm_builder(*args, **kwargs):
+        outer_calls.append(("llm", args, kwargs))
+
+        def bind(fn):
+            from activegraph.behaviors.base import LLMBehavior
+
+            bind_calls.append(("llm", fn))
+            return LLMBehavior(
+                name=kwargs.get("name") or fn.__name__, fn=lambda *a: None, handler=fn
+            )
+
+        return bind
+
+    def relation_builder(*args, **kwargs):
+        outer_calls.append(("relation", args, kwargs))
+
+        def bind(fn):
+            from activegraph.behaviors.base import RelationBehavior
+
+            bind_calls.append(("relation", fn))
+            return RelationBehavior(
+                name=kwargs.get("name") or fn.__name__,
+                fn=fn,
+                relation_type=args[0],
+            )
+
+        return bind
+
+    monkeypatch.setattr(factory, "build_behavior", plain_builder)
+    monkeypatch.setattr(factory, "build_llm_behavior", llm_builder)
+    monkeypatch.setattr(factory, "build_relation_behavior", relation_builder)
+
+    def plain(event, graph, ctx):
+        pass
+
+    def llm(event, graph, ctx, out):
+        pass
+
+    def relation(rel, event, graph, ctx):
+        pass
+
+    global_module.behavior(name="global-plain")(plain)
+    pack_module.behavior(name="pack-plain")(plain)
+    global_module.llm_behavior(name="global-llm")(llm)
+    pack_module.llm_behavior(name="pack-llm")(llm)
+    global_module.relation_behavior("edge", name="global-relation")(relation)
+    pack_module.relation_behavior("edge", name="pack-relation")(relation)
+
+    assert global_module.behavior_factory is factory
+    assert pack_module.behavior_factory is factory
+    assert [kind for kind, _, _ in outer_calls] == [
+        "plain",
+        "plain",
+        "llm",
+        "llm",
+        "relation",
+        "relation",
+    ]
+    assert [kind for kind, _ in bind_calls] == [
+        "plain",
+        "plain",
+        "llm",
+        "llm",
+        "relation",
+        "relation",
+    ]
+
+
+def test_global_llm_validates_before_append_and_failure_is_atomic(
+    monkeypatch,
+) -> None:
+    decorators = importlib.import_module("activegraph.behaviors.decorators")
+    live = importlib.import_module("activegraph.runtime._live")
+    order: list[str] = []
+
+    class SpyRegistry(list):
+        def append(self, value):
+            order.append("append")
+            super().append(value)
+
+    registry = SpyRegistry()
+    monkeypatch.setattr(decorators, "_REGISTRY", registry)
+    monkeypatch.setattr(
+        live,
+        "validate_behavior_against_live_runtimes",
+        lambda behavior: order.append("validate"),
+    )
+
+    @decorators.llm_behavior(name="ordered")
+    def ordered(event, graph, ctx, out):
+        pass
+
+    assert order == ["validate", "append"]
+    assert registry == [ordered]
+
+    order.clear()
+    registry.clear()
+
+    def reject(behavior):
+        order.append("validate")
+        raise RuntimeError("rejected")
+
+    monkeypatch.setattr(live, "validate_behavior_against_live_runtimes", reject)
+    with pytest.raises(RuntimeError, match="rejected"):
+
+        @decorators.llm_behavior(name="rejected")
+        def rejected(event, graph, ctx, out):
+            pass
+
+    assert order == ["validate"]
+    assert registry == []
+
+
+def test_pack_behavior_decorators_have_no_transient_global_effects(
+    monkeypatch,
+) -> None:
+    decorators = importlib.import_module("activegraph.behaviors.decorators")
+    live = importlib.import_module("activegraph.runtime._live")
+    effects: list[str] = []
+
+    class SpyRegistry(list):
+        def append(self, value):
+            effects.append("append")
+            super().append(value)
+
+    monkeypatch.setattr(decorators, "_REGISTRY", SpyRegistry())
+    monkeypatch.setattr(
+        live,
+        "validate_behavior_against_live_runtimes",
+        lambda behavior: effects.append("validate"),
+    )
+
+    @pack_api.behavior(name="plain")
+    def plain(event, graph, ctx):
+        pass
+
+    @pack_api.llm_behavior(name="llm")
+    def llm(event, graph, ctx, out):
+        pass
+
+    @pack_api.relation_behavior("edge", name="relation")
+    def relation(rel, event, graph, ctx):
+        pass
+
+    assert effects == []
+    assert getattr(plain, "_pack_local") is True
+    assert getattr(llm, "_pack_local") is True
+    assert getattr(relation, "_pack_local") is True
+
+
+def test_llm_outer_validation_precedence_matches_across_namespaces() -> None:
+    cases = [
+        {
+            "pattern": "(a:c) OR b",
+            "activate_after": "not events",
+            "output_schema": "not-a-schema",
+        },
+        {
+            "activate_after": "not events",
+            "output_schema": "not-a-schema",
+        },
+    ]
+    for kwargs in cases:
+        errors: list[tuple[type[Exception], str]] = []
+        for decorator in (llm_behavior, pack_api.llm_behavior):
+            with pytest.raises(Exception) as exc_info:
+                decorator(**kwargs)
+            errors.append((type(exc_info.value), str(exc_info.value)))
+        assert errors[0] == errors[1]
 
 
 # ----------------------------------------- input_schema inference (v1.3)

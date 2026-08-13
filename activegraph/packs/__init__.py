@@ -6,9 +6,9 @@ exposes:
 
 - The `Pack` dataclass (frozen, equality by (name, version)).
 - Pack-aware decorators: `@behavior`, `@llm_behavior`,
-  `@relation_behavior`, `@tool`. Identical signatures to the
-  decorators in `activegraph.*` except they DO NOT register
-  globally — a pack module is safe to import without a runtime.
+  `@relation_behavior`, `@tool`. They share construction semantics
+  with `activegraph.*` but attach pack metadata instead of registering
+  globally; pack `@tool` additionally exposes `export_globally`.
 - `ObjectType`, `RelationType`, `PackPolicy`, `PackPrompt` —
   the value objects that go into a `Pack`.
 - `EmptySettings` — Pydantic placeholder for packs with no
@@ -38,6 +38,7 @@ import hashlib
 import re
 import sys
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
@@ -60,9 +61,10 @@ from activegraph.behaviors.base import (
     Behavior,
     LLMBehavior,
     RelationBehavior,
-    _llm_behavior_fn_placeholder,
 )
+from activegraph.behaviors import _factory as behavior_factory
 from activegraph.tools.base import Tool
+from activegraph.tools import _factory as tool_factory
 
 
 # ---------------------------------------------------------------- exceptions
@@ -722,12 +724,8 @@ def _check_unique(names: list[str], kind: str, pack_name: str) -> None:
 
 # ----------------------------------------------------- pack-aware decorators
 #
-# Identical signatures to the activegraph.* decorators; the ONLY
-# difference is `_REGISTRY.append(...)` is skipped — packs collect
-# their behaviors explicitly via `Pack(behaviors=[...])`, so global
-# registration would be a bug. Each returned Behavior / Tool object
-# carries `_pack_local = True` so the Pack constructor can verify
-# the right decorator was used (CONTRACT v0.9 #3).
+# Construction semantics are shared with activegraph.* decorators. Packs apply
+# pack-local metadata instead of global registration/live-runtime validation.
 
 
 def behavior(
@@ -747,39 +745,20 @@ def behavior(
     ``priority`` is reserved metadata; dispatch remains registration-ordered.
     """
 
-    from activegraph.runtime.patterns import parse as _parse_pattern
-    from activegraph.runtime.scheduler import parse_activate_after as _parse_aa
-
-    compiled_matcher = None
-    if pattern is not None:
-        compiled_matcher = _parse_pattern(pattern).compile()
-    delay_n: Optional[int] = None
-    if activate_after is not None:
-        delay_n = _parse_aa(activate_after)
+    bind = behavior_factory.build_behavior(
+        name=name,
+        on=on,
+        where=where,
+        view=view,
+        creates=creates,
+        budget=budget,
+        priority=priority,
+        pattern=pattern,
+        activate_after=activate_after,
+    )
 
     def wrap(fn: Callable[..., None]) -> Behavior:
-        # v1.3: arity check at decoration time (see activegraph/_signature.py).
-        from activegraph._signature import validate_handler_signature
-
-        validate_handler_signature(
-            fn,
-            expected_params=("event", "graph", "ctx"),
-            decorator="@behavior",
-            allow_annotated_extras=True,
-        )
-        b = Behavior(
-            name=name or fn.__name__,
-            fn=fn,
-            on=list(on or []),
-            where=dict(where) if where else None,
-            view_spec=dict(view) if view else None,
-            creates=list(creates or []),
-            budget=dict(budget) if budget else None,
-            priority=priority,
-            pattern=pattern,
-            pattern_matcher=compiled_matcher,
-            activate_after=delay_n,
-        )
+        b = bind(fn)
         b._pack_local = True  # type: ignore[attr-defined]
         # Attach metadata to the underlying function so packs can inspect
         # without instantiating a runtime.
@@ -800,7 +779,7 @@ def llm_behavior(
     on: Optional[list[str]] = None,
     where: Optional[dict[str, Any]] = None,
     description: str = "",
-    model: str = "claude-sonnet-4-5",
+    model: Optional[str] = None,
     output_schema: Optional[type] = None,
     view: Optional[dict[str, Any]] = None,
     creates: Optional[list[str]] = None,
@@ -822,51 +801,31 @@ def llm_behavior(
     ``priority`` is reserved metadata; dispatch remains registration-ordered.
     """
 
-    from activegraph.runtime.patterns import parse as _parse_pattern
-    from activegraph.runtime.scheduler import parse_activate_after as _parse_aa
-
-    compiled_matcher = None
-    if pattern is not None:
-        compiled_matcher = _parse_pattern(pattern).compile()
-    delay_n: Optional[int] = None
-    if activate_after is not None:
-        delay_n = _parse_aa(activate_after)
+    bind = behavior_factory.build_llm_behavior(
+        name=name,
+        on=on,
+        where=where,
+        description=description,
+        model=model,
+        output_schema=output_schema,
+        view=view,
+        creates=creates,
+        budget=budget,
+        deterministic=deterministic,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        timeout_seconds=timeout_seconds,
+        prompt_template=prompt_template,
+        priority=priority,
+        pattern=pattern,
+        activate_after=activate_after,
+        tools=tools,
+        max_tool_turns=max_tool_turns,
+    )
 
     def wrap(fn: Callable[..., None]) -> LLMBehavior:
-        # v1.3: arity check at decoration time (see activegraph/_signature.py).
-        from activegraph._signature import validate_handler_signature
-
-        validate_handler_signature(
-            fn,
-            expected_params=("event", "graph", "ctx", "llm_output"),
-            decorator="@llm_behavior",
-            allow_annotated_extras=True,
-        )
-        b = LLMBehavior(
-            name=name or fn.__name__,
-            fn=_llm_behavior_fn_placeholder,
-            on=list(on or []),
-            where=dict(where) if where else None,
-            view_spec=dict(view) if view else None,
-            creates=list(creates or []),
-            budget=dict(budget) if budget else None,
-            priority=priority,
-            handler=fn,
-            description=description,
-            model=model,
-            output_schema=output_schema,
-            deterministic=deterministic,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            timeout_seconds=timeout_seconds,
-            prompt_template=prompt_template,
-            pattern=pattern,
-            pattern_matcher=compiled_matcher,
-            activate_after=delay_n,
-            tools=list(tools) if tools else [],
-            max_tool_turns=max_tool_turns,
-        )
+        b = bind(fn)
         b._pack_local = True  # type: ignore[attr-defined]
         fn.__pack_meta__ = {  # type: ignore[attr-defined]
             "kind": "llm_behavior",
@@ -898,40 +857,21 @@ def relation_behavior(
     ``priority`` is reserved metadata; dispatch remains registration-ordered.
     """
 
-    from activegraph.runtime.patterns import parse as _parse_pattern
-    from activegraph.runtime.scheduler import parse_activate_after as _parse_aa
-
-    compiled_matcher = None
-    if pattern is not None:
-        compiled_matcher = _parse_pattern(pattern).compile()
-    delay_n: Optional[int] = None
-    if activate_after is not None:
-        delay_n = _parse_aa(activate_after)
+    bind = behavior_factory.build_relation_behavior(
+        relation_type,
+        on=on,
+        name=name,
+        where=where,
+        view=view,
+        creates=creates,
+        budget=budget,
+        priority=priority,
+        pattern=pattern,
+        activate_after=activate_after,
+    )
 
     def wrap(fn: Callable[..., None]) -> RelationBehavior:
-        # v1.3: arity check at decoration time (see activegraph/_signature.py).
-        from activegraph._signature import validate_handler_signature
-
-        validate_handler_signature(
-            fn,
-            expected_params=("relation", "event", "graph", "ctx"),
-            decorator="@relation_behavior",
-            allow_annotated_extras=True,
-        )
-        rb = RelationBehavior(
-            name=name or fn.__name__,
-            fn=fn,
-            relation_type=relation_type,
-            on=list(on or []),
-            where=dict(where) if where else None,
-            view_spec=dict(view) if view else None,
-            creates=list(creates or []),
-            budget=dict(budget) if budget else None,
-            priority=priority,
-            pattern=pattern,
-            pattern_matcher=compiled_matcher,
-            activate_after=delay_n,
-        )
+        rb = bind(fn)
         rb._pack_local = True  # type: ignore[attr-defined]
         fn.__pack_meta__ = {  # type: ignore[attr-defined]
             "kind": "relation_behavior",
@@ -949,7 +889,7 @@ def tool(
     description: str = "",
     input_schema: Optional[type] = None,
     output_schema: Optional[type] = None,
-    cost_per_call: Any = "0.0",
+    cost_per_call: Any = Decimal("0"),
     timeout_seconds: float = 30.0,
     deterministic: bool = False,
     export_globally: bool = False,
@@ -960,44 +900,25 @@ def tool(
     name (`{pack}.{name}`) AND the global short name. Default is
     pack-scoped only.
     """
-    from decimal import Decimal
+    bind = tool_factory.build_tool(
+        name=name,
+        description=description,
+        input_schema=input_schema,
+        output_schema=output_schema,
+        cost_per_call=cost_per_call,
+        timeout_seconds=timeout_seconds,
+        deterministic=deterministic,
+    )
 
     def wrap(fn: Callable[..., Any]) -> Tool:
-        # v1.3: arity check at decoration time, plus input_schema
-        # inference from the first parameter's Pydantic annotation when
-        # input_schema= is omitted (see activegraph/_signature.py).
-        from activegraph._signature import (
-            infer_tool_input_schema,
-            validate_handler_signature,
-        )
-
-        validate_handler_signature(
-            fn,
-            expected_params=("args", "ctx"),
-            decorator="@tool",
-            allow_annotated_extras=False,
-        )
-        t = Tool(
-            name=name or fn.__name__,
-            fn=fn,
-            description=description,
-            input_schema=(
-                input_schema
-                if input_schema is not None
-                else infer_tool_input_schema(fn)
-            ),
-            output_schema=output_schema,
-            cost_per_call=Decimal(str(cost_per_call)),
-            timeout_seconds=timeout_seconds,
-            deterministic=deterministic,
-        )
+        t = bind(fn)
         t._pack_local = True  # type: ignore[attr-defined]
         t._export_globally = bool(export_globally)  # type: ignore[attr-defined]
         fn.__pack_meta__ = {  # type: ignore[attr-defined]
             "kind": "tool",
             "name": t.name,
-            "deterministic": deterministic,
-            "export_globally": export_globally,
+            "deterministic": t.deterministic,
+            "export_globally": bool(export_globally),
         }
         return t
 

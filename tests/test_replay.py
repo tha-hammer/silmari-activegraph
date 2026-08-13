@@ -11,6 +11,7 @@ from activegraph import (
     ReplayDivergenceError,
     Runtime,
     behavior,
+    clear_registry,
 )
 
 
@@ -153,6 +154,106 @@ def test_replay_strict_type_mismatch_records_one_metric(tmp_path):
         "activegraph_replay_divergence_detected_total",
         {"reason": "type_mismatch"},
     ) == [1.0]
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "llm.requested",
+        "tool.responded",
+        "pattern.matched",
+        "approval.proposed",
+        "embedding.requested",
+        "dev.override",
+        "authority.decision",
+        "context.foo",
+        "pack.loaded",
+        "goal.created",
+        "object.created",
+        "custom.event",
+        "runtimeish.event",
+    ],
+)
+def test_strict_replay_includes_nonstructural_history(tmp_path, event_type):
+    from activegraph.core.event import Event
+    from activegraph.store.sqlite import SQLiteEventStore
+
+    clear_registry()
+
+    @behavior(name="det", on=["goal.created"])
+    def det(event, graph, ctx):
+        graph.add_object("claim", {"text": "stable"})
+
+    db = _tmp_db(tmp_path)
+    runtime = Runtime(
+        Graph(clock=FrozenClock()), behaviors=[det], persist_to=db
+    )
+    runtime.run_goal("go")
+    goal = next(event for event in runtime.graph.events if event.type == "goal.created")
+    payload = {}
+    if event_type == "object.created":
+        payload = {
+            "object": {
+                "id": "probe#1",
+                "type": "probe",
+                "data": {},
+                "version": 1,
+                "provenance": {},
+            }
+        }
+    SQLiteEventStore(db, run_id=runtime.run_id).append(
+        Event(
+            id="evt_injected",
+            type=event_type,
+            payload=payload,
+            caused_by=goal.id,
+            timestamp=runtime.graph.clock.now(),
+        )
+    )
+
+    with pytest.raises(ReplayDivergenceError):
+        Runtime.load(
+            db, run_id=runtime.run_id, behaviors=[det], replay_strict=True
+        )
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "behavior.started",
+        "relation_behavior.completed",
+        "runtime.idle",
+        "runtime.budget_exhausted",
+        "context.read",
+    ],
+)
+def test_strict_replay_excludes_structural_and_context_read_history(
+    tmp_path, event_type
+):
+    from activegraph.core.event import Event
+    from activegraph.store.sqlite import SQLiteEventStore
+
+    db = _tmp_db(tmp_path)
+
+    @behavior(name="det", on=["goal.created"])
+    def det(event, graph, ctx):
+        graph.add_object("claim", {"text": "stable"})
+
+    runtime = Runtime(
+        Graph(clock=FrozenClock()), behaviors=[det], persist_to=db
+    )
+    runtime.run_goal("go")
+    goal = next(event for event in runtime.graph.events if event.type == "goal.created")
+    SQLiteEventStore(db, run_id=runtime.run_id).append(
+        Event(
+            id="evt_injected",
+            type=event_type,
+            caused_by=goal.id,
+            timestamp=runtime.graph.clock.now(),
+        )
+    )
+
+    Runtime.load(db, run_id=runtime.run_id, behaviors=[det], replay_strict=True)
 
 
 def test_replay_emits_no_store_writes(tmp_path):

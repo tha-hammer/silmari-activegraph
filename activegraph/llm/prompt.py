@@ -36,7 +36,6 @@ path in user code.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -44,6 +43,7 @@ from typing import Any, Optional
 from activegraph.core.event import Event
 from activegraph.core.view import View
 from activegraph.frame import Frame
+from activegraph.llm import prompt_identity
 from activegraph.llm.types import LLMMessage
 
 
@@ -83,28 +83,24 @@ class AssembledPrompt:
         """Canonical content used for hashing. Recorded-at timestamps,
         latencies, and other run-specific data are NOT included."""
 
-        out: dict[str, Any] = {
-            "model": self.model,
-            "system": self.system,
-            "messages": [m.to_dict() for m in self.messages],
-            "output_schema_name": self.output_schema_name,
-            "output_schema_json": self.output_schema_json,
-            "max_tokens": int(self.max_tokens),
-            "temperature": float(self.temperature),
-            "top_p": float(self.top_p),
-            "deterministic": bool(self.deterministic),
-        }
-        if self.structured_output_mode == "native":
-            out["structured_output_mode"] = "native"
-        return out
-
-    def canonical_json(self) -> str:
-        return json.dumps(
-            self.to_hashable(), sort_keys=True, separators=(",", ":")
+        return prompt_identity.build_prompt_identity_payload(
+            model=self.model,
+            system=self.system,
+            messages=self.messages,
+            output_schema_name=self.output_schema_name,
+            output_schema_json=self.output_schema_json,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            deterministic=self.deterministic,
+            structured_output_mode=self.structured_output_mode,
         )
 
+    def canonical_json(self) -> str:
+        return prompt_identity.canonical_prompt_json(self.to_hashable())
+
     def hash(self) -> str:
-        return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
+        return prompt_identity.hash_prompt_payload(self.to_hashable())
 
 
 # ---------- view serialization (CONTRACT v0.6 #13 — format is locked) -------
