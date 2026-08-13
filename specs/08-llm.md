@@ -30,6 +30,7 @@ graph TD
   subgraph llm["activegraph/llm/"]
     PROMPT["prompt.py<br/>assemble_prompt, AssembledPrompt<br/>serialize_view LOCKED"]
     PID["prompt_identity.py<br/>canonical identity payload + SHA-256"]
+    CSH["_claude_shared.py<br/>Claude model/pricing/native facts"]
     TYPES["types.py<br/>LLMMessage, LLMResponse, ToolCall"]
     PROV["provider.py<br/>LLMProvider Protocol"]
     EMBP["embedding.py<br/>EmbeddingProvider, HashEmbeddingProvider"]
@@ -59,12 +60,15 @@ graph TD
   PROMPT --> CORE
   PROMPT --> PID
   ANT --> PROV
+  ANT --> CSH
   OAI --> PROV
   CC --> PROV
+  CC --> CSH
   OR --> PROV
   OR -->|protected-hook reuse| OAI
   REC --> PROV
   REC --> PID
+  REC --> ERR
   ANT --> WIRE
   OAI --> WIRE
   CC --> WIRE
@@ -87,7 +91,10 @@ graph TD
 
 ### Protocols
 
-- `LLMProvider` — `runtime_checkable` Protocol; 3 required methods + 3 additive, getattr-guarded members — `activegraph/llm/provider.py:146`
+- `LLMProvider` — `runtime_checkable` Protocol declaring one attribute and five methods; the three
+  call-surface methods are `complete`, `estimate_cost`, and `count_tokens`, while `default_model`,
+  `recognizes_model`, and native support are compatibility-looked-up by Runtime —
+  `activegraph/llm/provider.py:145-211`
 - `LLMProviderCapabilities` — additive frozen descriptor outside the Protocol; absent declarations
   resolve to `FULL_LLM_PROVIDER_CAPABILITIES` through `get_llm_provider_capabilities`
 - `EmbeddingProvider` — `runtime_checkable` Protocol; `embed()` + `default_model` — `activegraph/llm/embedding.py:32`
@@ -95,22 +102,22 @@ graph TD
 
 ### Data shapes (public contract)
 
-- `LLMMessage(role, content, tool_use_id, tool_name, tool_calls)` — frozen dataclass — `activegraph/llm/types.py:35`
+- `LLMMessage(role, content, tool_use_id, tool_name, tool_calls)` — frozen dataclass — `activegraph/llm/types.py:34-71`
 - `Role = Literal["user","assistant","tool"]` — `activegraph/llm/types.py:31`
-- `ToolCall(id, name, args)` — frozen dataclass — `activegraph/llm/types.py:75`
-- `LLMResponse(raw_text, parsed, input_tokens, output_tokens, cost_usd, latency_seconds, model, finish_reason, seed, cache_hit, provider_meta, tool_calls)` — mutable dataclass — `activegraph/llm/types.py:94`
-- `AssembledPrompt(system, messages, model, max_tokens, temperature, top_p, output_schema_name, output_schema_json, deterministic, structured_output_mode, sections)` — `activegraph/llm/prompt.py:53`
+- `ToolCall(id, name, args)` — frozen dataclass — `activegraph/llm/types.py:74-90`
+- `LLMResponse(raw_text, parsed, input_tokens, output_tokens, cost_usd, latency_seconds, model, finish_reason, seed, cache_hit, provider_meta, tool_calls)` — mutable dataclass — `activegraph/llm/types.py:93-129`
+- `AssembledPrompt(system, messages, model, max_tokens, temperature, top_p, output_schema_name, output_schema_json, deterministic, structured_output_mode, sections)` — `activegraph/llm/prompt.py:53-103`
 
 ### Prompt assembly (pure, no I/O)
 
-- `assemble_prompt(...) -> AssembledPrompt` — top-level assembler; "Pure function over its arguments — no I/O, no provider calls" — `activegraph/llm/prompt.py:457`, docstring `:482`
-- `serialize_view(view, *, around, depth) -> str` — **format is locked and snapshot-tested; changing it is a breaking change** — `activegraph/llm/prompt.py:108`, `:116-118`
-- `build_system_prompt(...)` — `activegraph/llm/prompt.py:188`
-- `build_user_message(...)` — `activegraph/llm/prompt.py:343`
-- `build_instruction(creates, output_schema_name)` — `activegraph/llm/prompt.py:401`
-- `schema_to_json(schema) -> Optional[dict]` — Pydantic v2 `model_json_schema()` with a name-only shell fallback — `activegraph/llm/prompt.py:437`
-- `example_instance_from_schema(schema)` — deterministic placeholder instance, depth-bounded at 6 — `activegraph/llm/prompt.py:254`; worker `_example_instance` at `:281`
-- `_strip_volatile(value)` — recursively drops `provenance`, `timestamp`, `run_id` from the event payload before hashing/prompting — `activegraph/llm/prompt.py:374-395`
+- `assemble_prompt(...) -> AssembledPrompt` — top-level assembler; "Pure function over its arguments — no I/O, no provider calls" — `activegraph/llm/prompt.py:458-544`, docstring `:477-483`
+- `serialize_view(view, *, around, depth) -> str` — **format is locked and snapshot-tested; changing it is a breaking change** — `activegraph/llm/prompt.py:109-178`, `:115-119`
+- `build_system_prompt(...)` — `activegraph/llm/prompt.py:189-252`
+- `build_user_message(...)` — `activegraph/llm/prompt.py:344-357`
+- `build_instruction(creates, output_schema_name)` — `activegraph/llm/prompt.py:402-432`
+- `schema_to_json(schema) -> Optional[dict]` — Pydantic v2 `model_json_schema()` with a name-only shell fallback — `activegraph/llm/prompt.py:438-452`
+- `example_instance_from_schema(schema)` — deterministic placeholder instance, depth-bounded at 6 — `activegraph/llm/prompt.py:255-338`
+- `_strip_volatile(value)` — recursively drops `provenance`, `timestamp`, `run_id` from the event payload before hashing/prompting — `activegraph/llm/prompt.py:378-396`
 
 ### Prompt identity
 
@@ -164,9 +171,9 @@ OpenRouterProvider.llm_capabilities = LLMProviderCapabilities(
 ```
 
 `OpenRouterProvider` is public from `activegraph.llm` but is deliberately not re-exported from the
-top-level `activegraph` package. The generated `activegraph/baml_client` runtime bridge remains an
-explicit `[baml]` integration, not an `LLMProvider` and not a fifth shipped-provider ownership
-candidate.
+top-level `activegraph` package. The `[baml]` extra currently reserves `baml_bridge` for a future
+generated-client integration. No BAML source or generated client ships in this tree, and no BAML
+implementation participates in `LLMProvider` ownership (`pyproject.toml:52-57`).
 
 - `RecordedLLMProvider(fixtures_dir, *, structured_output_mode="prompt")` — `activegraph/llm/recorded.py:187`
 - `RecordingLLMProvider(inner, fixtures_dir)` — `activegraph/llm/recorded.py:332`
@@ -181,6 +188,7 @@ candidate.
   auth; 408 network/timeout; every other 4xx request error; 5xx/unknown/missing network error —
   `activegraph/llm/wire.py:113`
 - `classify_provider_exception(e) -> reason_code` — `activegraph/llm/wire.py:134`
+- `retry_after_seconds(e) -> Optional[float]` — shared retry-header parser — `activegraph/llm/wire.py:164-177`
 - `parse_structured_response(text, schema)` — the sole boundary between raw provider text and typed objects — `activegraph/llm/parsing.py:38`
 - `native_schema_compatible(schema) -> bool` — offline pre-flight for constrained decoding — `activegraph/llm/native.py:53`
 - `inject_additional_properties_false(schema)` — the only permitted schema mutation — `activegraph/llm/native.py:142`
@@ -204,12 +212,12 @@ below. Separately, `activegraph/__init__.py` re-exports `LLMBehaviorError` and
 
 ### llm <-> runtime (completion turn loop)
 
-The primary seam. `runtime/runtime.py` imports `LLMProvider`, `LLMMessage`, `ToolCall`,
-`LLMBehaviorError`, and `MissingProviderError` at module level (`runtime.py:97-106`) and lazily
-imports `native_schema_compatible` / `schema_to_json` at `runtime.py:1227-1230`. The single hot call
-site is `Runtime._invoke_llm_body` (`runtime.py:1993`), whose documented step order lives at
-`runtime.py:1911-1924`. Registration-time entry is `Runtime._ensure_registry` (`runtime.py:1239`),
-which raises `MissingProviderError(behavior_name=b.name)` at `runtime.py:1258` when any `LLMBehavior`
+The primary seam. `runtime/runtime.py` imports prompt identity and LLM protocol/types/errors at
+module level (`runtime.py:68,97-106`) and lazily imports native/schema helpers at `:1231-1232`.
+`Runtime._invoke_llm` wraps the invocation (`runtime.py:1910-2000`) and the hot body is
+`Runtime._invoke_llm_body` (`runtime.py:2002-2561`). Registration-time entry is
+`Runtime._ensure_registry` (`runtime.py:1243-1328`), which raises
+`MissingProviderError(behavior_name=b.name)` at `runtime.py:1259-1262` when any `LLMBehavior`
 is registered with `llm_provider is None`.
 
 ```ebnf
@@ -224,7 +232,12 @@ completion-request ::= complete( "system" "=" string ,
                                  [ "tools" "=" tool-def-list ] ,
                                  [ "structured_output_mode" "=" "native" ] )
                        (* keyword-only, all of them; the mode kwarg is passed ONLY
-                          when native resolved — runtime.py:2213-2221 *)
+                          when native resolved — runtime.py:2218-2249 *)
+
+fixture-identity-extension ::= [ "prompt_hash" "=" sha256hex ,
+                                  "deterministic" "=" bool ]
+                               (* atomic pair, only when the provider advertises
+                                  accepts_prompt_identity — runtime.py:2229-2248 *)
 
 message-list       ::= message { message }
 message            ::= LLMMessage( role , content [ , tool_use_id ]
@@ -247,19 +260,21 @@ returned-name      ::= canonical-name | identifier
                           canonicalizes custom-provider short names before persistence *)
 
 completion-failure ::= LLMBehaviorError( reason , message , payload_extras )
+                     | PromptIdentityError(
+                         "incomplete_metadata_pair" | "hash_mismatch", ... )
 reason             ::= terminal-reason | transient-reason
 terminal-reason    ::= "llm.parse_error" | "llm.schema_violation" | "llm.fixture_missing"
                      | "llm.auth_error" | "llm.request_error"
 transient-reason   ::= "llm.network_error" | "llm.rate_limited"
-payload_extras     ::= "{" "model" , "exception_type" , "message"
-                           [ , "retry_after_seconds" ] "}"
+payload_extras     ::= json-object
+                       (* reason/provider-specific; bounded at provider boundaries
+                          where that provider promises a bound *)
 
-(* additive declarations, all getattr-guarded by the runtime *)
+required-provider-methods ::= complete(...) | estimate_cost(...) | count_tokens(...)
+(* compatibility members, getattr-guarded by the runtime *)
 provider-decls     ::= "default_model" ":" model-name
                      | recognizes_model( name ) "->" bool
                      | supports_native_structured_output( model ) "->" bool
-                     | estimate_cost( input_tokens , output_tokens , model ) "->" Decimal
-                     | count_tokens( system , messages , model ) "->" int
 
 capability-decl    ::= "llm_capabilities" ":" LLMProviderCapabilities
                        (* additive, not a Protocol member; absent means FULL *)
@@ -268,7 +283,8 @@ mode-resolution    ::= "native"  when runtime.native_structured_output
                                   and behavior.model is not None
                                   and getattr(provider,"supports_native_structured_output")(model)
                                   and native_schema_compatible( schema_to_json(output_schema) )
-                     | "prompt"  otherwise     (* silent, debug-logged, audited *)
+                     | "prompt"  otherwise     (* always audited; only schema subset
+                                                   failure is debug-logged *)
 
 tool-ref             ::= Tool | string
 bound-tools          ::= tuple( resolve( tool-ref , behavior-owner ) )
@@ -288,8 +304,10 @@ returned-resolution  ::= exact-bound-canonical-name
 - All Protocol methods are keyword-only (`provider.py:152-184`). Three are required — `complete`,
   `estimate_cost`, `count_tokens`. Three members are additive and getattr-guarded by the runtime —
   `default_model`, `recognizes_model`, `supports_native_structured_output` (`provider.py:150`,
-  `:186-211`) — so custom pre-v1.0.2 providers keep working; they just require explicit `model=` and
-  never get native mode. `llm_capabilities` is separately additive without becoming a Protocol
+  `:186-211`) — so custom pre-v1.0.2 providers keep working. When `default_model` is absent Runtime
+  retains the byte-compatible fallback `"claude-sonnet-4-5"` for model-less behaviors
+  (`runtime.py:4474-4489`); missing native support selects prompt mode. `llm_capabilities` is
+  separately additive without becoming a Protocol
   member: an absent descriptor resolves to `FULL_LLM_PROVIDER_CAPABILITIES`, preserving historical
   custom-provider behavior.
 - `recognizes_model` must be **permissive**: unknown names — fine-tuned models, internal deployment
@@ -297,6 +315,11 @@ returned-resolution  ::= exact-bound-canonical-name
 - No streaming, no multi-model orchestration (`provider.py:33-34`). Tool-loop ownership is the
   runtime's: the provider returns `tool_calls`, the runtime invokes the tools and re-calls
   `complete()` with a `role="tool"` message (`provider.py:34-37`).
+- `accepts_prompt_identity` is an intentional fixture extension, not a Protocol member. Runtime
+  sends `prompt_hash` and `deterministic` only as an atomic pair to providers advertising it
+  (`runtime.py:2229-2248`; `recorded.py:201,345`). Recorded providers validate the pair before I/O;
+  `PromptIdentityError` is re-raised without retry or provider-failure bookkeeping
+  (`recorded.py:96-146`; `runtime.py:2250-2254`).
 - `LLMBehavior.tools` is the mutable authoring surface (`Tool | str`). On each registry pass the
   runtime resolves it once to a homogeneous `tuple[Tool, ...]`, preserving order and duplicates.
   Provider definitions, authorization, and dispatch consume that same tuple. Pack-local object
@@ -313,10 +336,10 @@ returned-resolution  ::= exact-bound-canonical-name
   `reason="llm.network_error", extras={"phase":"count_tokens"}` (`runtime.py:2087-2094`).
 - `estimate_cost` prices the **worst case** — `max_tokens` is passed as the output-token estimate
   (`runtime.py:2095`).
-- Native fallback is **silent-but-audited, never an error** (`native.py:16-17`,
-  `runtime.py:1216-1218`): a non-qualifying schema logs one debug line at registration
-  (`runtime.py:1231-1235`) and the resolved mode rides every `llm.requested` payload
-  (`runtime.py:2148-2152`).
+- Native fallback is **audited, never an error**: every structured-output request records its
+  resolved mode (`runtime.py:2155-2159`). Only a schema that reaches and fails the subset preflight
+  produces a debug line (`runtime.py:1231-1240`); flag-off, model-none, or missing/false provider
+  support fall back silently (`runtime.py:1224-1230`).
 - `native_schema_compatible` is deliberately conservative (`native.py:53-65`): root must be an
   object; only 15 allowlisted keywords (`native.py:28-50`); **every object property must be in
   `required`** — optional fields would need a semantic rewrite "the framework refuses to do
@@ -387,7 +410,7 @@ Reason-code raise sites:
 regenerated prompts hit the same recorded responses" (`cache.py:3-5`). The originating
 `llm.requested` id is stored for lineage but is not the key (`cache.py:6-7`; `CachedEntry` at
 `:41`). The runtime populates it from an event stream on `Runtime.load(..., replay_llm_cache=True)`
-and `runtime.fork(...)` (`runtime.py:3824`, `:4026`, `:4769`), and records inline after each live
+and `runtime.fork(...)` (`runtime.py:3823`, `:4024-4026`, strict hydration `:4795`), and records inline after each live
 call (`runtime.py:2361-2368`) so same-run repeats hit too.
 
 ```ebnf
@@ -486,8 +509,8 @@ embed-hydrate    ::= from_events( event-stream ) "->" EmbeddingCache
 - `from_events` validation is strict and silent: it skips error responses and rejects non-list
   vectors, mixed dimensionality, bool/non-numeric components, non-finite floats, and an input-count
   mismatch, `continue`-ing past the offending pair (`embedding_cache.py:76-127`).
-- The `embedding.requested` event stores **only the content hash, never the input text**
-  (`runtime.py:1574-1579`, payload at `:1606-1616`); the response event stores the vectors
+- The `embedding.requested` event stores model/count/cache metadata and the content hash, but never
+  the input text (`runtime.py:1606-1616`); the response event stores the vectors
   (`runtime.py:1679-1692`).
 - Under `replay_strict`, `Runtime.embed` refuses to fall through to live I/O **even when a provider
   is configured** (`runtime.py:1636-1645`).
@@ -497,7 +520,7 @@ embed-hydrate    ::= from_events( event-stream ) "->" EmbeddingCache
 `LLMBehavior.build_prompt` (`behaviors/base.py:146`) is the only behaviors-side entry into `llm/`.
 It lazily imports `assemble_prompt` at `:161` and calls it at `:183-200`; `AssembledPrompt` is a
 `TYPE_CHECKING`-only import at `:30`, so `behaviors` carries no runtime import edge for the type.
-The runtime calls it at `runtime.py:2025-2032` with `structured_output_mode=so_mode`. It is public
+The runtime calls it at `runtime.py:2024-2032` with `structured_output_mode=so_mode`. It is public
 per CONTRACT v0.6 #20 — "Reproducible (pure over inputs); cheap (no I/O)" (`behaviors/base.py:157-158`).
 
 ```ebnf
@@ -560,9 +583,10 @@ volatile-stripped ::= json minus keys { "provenance" , "timestamp" , "run_id" }
   "Return an INSTANCE ... NOT the schema itself" framing — added because "some models echo the JSON
   Schema definition back instead of an instance, triggering `llm.schema_violation`"
   (`prompt.py:229-249`, rationale `:234-238`); `build_instruction` repeats the framing
-  (`prompt.py:413-424`). In native mode the schema dump, example, and framing are all **omitted** in
-  favor of one sentence, because constrained decoding eliminates the failure mode
-  (`prompt.py:220-228`).
+  (`prompt.py:402-425`). In native mode the **system prompt's** schema dump, example, and framing
+  are omitted in favor of one sentence (`prompt.py:221-250`). The independently generated task
+  instruction is not mode-aware and still contains the instance/example language because
+  `assemble_prompt` calls `build_instruction` without the mode (`prompt.py:499-502`).
 - When `self.model is None`, `build_prompt` falls back to the hardcoded `"claude-sonnet-4-5"` **for
   inspection only** (`behaviors/base.py:182`).
 
@@ -575,9 +599,10 @@ each shipped completion provider then translates at its external boundary. The r
 `tool_defs`.
 
 ```ebnf
-tool-definition ::= schema_to_json( input_schema ) "->" ( json-schema | None )
+tool-definition ::= schema_to_json( input_schema ) "->" json-schema
 json-schema     ::= pydantic_v2.model_json_schema()
-                  | "{" "type" ":" "object" , "title" ":" class-name "}"   (* fallback *)
+                  | "{" "type" ":" "object" , "title" ":" class-name "}"   (* model fallback *)
+                  | "{" "type" ":" "object" , "properties" ":" "{}" "}"  (* no input schema *)
 ```
 
 **Contract notes.** `tools/cache.py:3` and `tools/recorded.py:3` state that they *mirror*
@@ -644,9 +669,9 @@ changes breaking — a scripted provider's dispatch silently misroutes if the he
 | Target | Symbol | Site | Why |
 |---|---|---|---|
 | `core/event.py` | `Event` | `prompt.py:43`, `cache.py:36`, `embedding_cache.py:17` | Prompt serializes the triggering event (`prompt.py:360-372`); both caches walk an event log in `from_events` |
-| `core/view.py` | `View` | `prompt.py:44` | `serialize_view` reads `view.objects()`, `view.relations()`, `view.events()` (`prompt.py:129`, `:142`, `:147`) |
+| `core/view.py` | `View` | `prompt.py:44` | `serialize_view` reads `view.objects()`, `view.relations()`, `view.events()` (`prompt.py:130,139,148`) |
 | `activegraph/frame.py` (top-level, **not** `core/`) | `Frame` | `prompt.py:45` | `build_system_prompt` reads `frame.goal` and `frame.constraints` (`prompt.py:211-216`) |
-| `activegraph/errors.py` (top-level) | `ExecutionError`, `RegistrationError` | `errors.py:30` | Parent classes for the three LLM error types (`errors.py:202`, `:256`, `:300`) |
+| `activegraph/errors.py` (top-level) | `ExecutionError`, `RegistrationError`, `internal_bug_fields` | `errors.py:30` | Parent classes and internal invariant rendering for the three LLM error types (`errors.py:202-356`) |
 
 ### llm -> vendor SDKs (the external wire)
 
@@ -727,14 +752,16 @@ narrowed-schema ::= json-schema with additionalProperties:false injected on ever
   OpenAI does the same despite the API having one, OpenRouter inherits that response translation,
   and Claude Code returns the same framework shape.
 - `parse_structured_response` extraction order: verbatim `json.loads` → fenced ` ```json ` block →
-  first balanced `{...}` / `[...]` span (`parsing.py:51-65`, regexes at `:34-35`). Provider symmetry
+  one greedy regex span from the first opening brace/bracket to a final matching close
+  (`parsing.py:51-65`, regexes at `:34-35`). This is not balanced-delimiter scanning. Provider symmetry
   is an explicit promise: "AnthropicProvider and OpenAIProvider produce identical errors for
   identical responses through this function" (`parsing.py:21-22`).
 - **Static cost accounting** in `AnthropicProvider` and `OpenAIProvider` is pure `Decimal`
   arithmetic over a per-million-token family-prefix table using **longest matching prefix**
-  (`anthropic.py:46-62`, `openai.py:67-83`); unknown models fall back to `claude-sonnet-4` /
-  `gpt-4o` (`anthropic.py:59-60`, `openai.py:80-81`). Tables are constructor-overridable via
-  `pricing=` (`anthropic.py:93`, `openai.py:128`). Those providers surface
+  (`anthropic.py:42-56,217-228`, `openai.py:56-83,355-366`); unknown models fall back to
+  `claude-sonnet-4` / `gpt-4o`. Anthropic's default table is shared with Claude Code in
+  `_claude_shared.py:19-26`, while OpenAI's stays local. Both accept constructor overrides
+  (`anthropic.py:64-84`, `openai.py:126-147`). Those providers surface
   `retry_after_seconds` through the shared lowercase-header parser (`wire.py:164-177`; provider call
   sites `anthropic.py:183-185`, `openai.py:308-310`). OpenRouter's returned-cost contract is
   intentionally different and is specified below.
@@ -807,7 +834,8 @@ unsupported routed endpoints fail rather than silently ignoring parameters. No O
 reasoning parameter widens the shared Protocol.
 
 **Estimates, realized cost, and budgets.** Constructor `pricing` values are ActiveGraph-owned USD
-per one million tokens with exactly `input` and `output` decimal values. Missing fields, booleans,
+per one million tokens; each entry must contain valid `input` and `output`, and only those two are
+copied (extra input keys are not rejected). Missing fields, booleans,
 malformed values, negatives, NaN, and either infinity are rejected at construction. Estimation
 removes one optional leading `~` and selects the longest key whose next model character is `-`,
 `.`, `_`, or `:` (or which matches exactly). `openrouter/free` and recognized `:free` models are
@@ -868,11 +896,11 @@ The inherited SDK-exception payload remains the separately characterized OpenAI 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant RT as Runtime._invoke_llm_body<br/>runtime.py:1993
+    participant RT as Runtime._invoke_llm_body<br/>runtime.py:2002
     participant BH as LLMBehavior.build_prompt<br/>behaviors/base.py:146
-    participant PA as assemble_prompt<br/>prompt.py:457
+    participant PA as assemble_prompt<br/>prompt.py:458
     participant CA as LLMCache<br/>cache.py:46
-    participant PR as AnthropicProvider<br/>anthropic.py:83
+    participant PR as AnthropicProvider<br/>anthropic.py:59
     participant WI as wire.py
     participant SDK as anthropic SDK
     participant PS as parse_structured_response<br/>parsing.py:38
@@ -885,7 +913,8 @@ sequenceDiagram
     RT->>RT: _hash_turn_prompt(prompt, tool_defs) [runtime.py:4527]
     RT->>CA: get(prompt_hash) [gated on replay_llm_cache]
     CA-->>RT: None (miss)
-    RT->>PR: count_tokens(system, messages, model) [runtime.py:2088]
+    Note over RT,PR: count_tokens + estimate_cost only when<br/>budget.has_cost_limit() on a cache miss
+    RT->>PR: count_tokens(system, messages, model) [runtime.py:2083-2121]
     PR-->>RT: input_tokens
     RT->>PR: estimate_cost(input_tokens, max_tokens, model) [runtime.py:2102]
     PR-->>RT: Decimal cost
@@ -898,7 +927,11 @@ sequenceDiagram
     WI-->>PR: canonical name
     Note over PR,PS: parsed skipped while tool_calls present<br/>anthropic.py:191-196
     PR-->>RT: LLMResponse(tool_calls=[ToolCall(...)])
+    RT->>RT: charge cost + canonicalize returned tool names
+    RT->>CA: record first-turn response [runtime.py:2339-2368]
+    RT->>RT: emit llm.responded before tool dispatch [runtime.py:2369-2381]
     RT->>RT: invoke tool, append role="tool" LLMMessage
+    RT->>RT: hash running messages for turn 2; cache lookup; conditional cost gate
     RT->>PR: complete(... running_messages + tool result ...)
     PR->>SDK: messages.create(...)
     SDK-->>PR: final text
@@ -918,40 +951,42 @@ blocking sleep (`runtime.py:2271-2281`).
 
 ## Finding status
 
-### Still open or intentionally absent
+1. **Resolved — public prompt identity is distinct from the runtime turn-cache key.**
+   `AssembledPrompt.hash()` is a stable public content-identity helper (`prompt.py:20-25`); Runtime
+   identity is per turn and includes the tools field (`runtime.py:4527-4555`).
 
-1. **The native-capability `getattr` fallback is meaningful primarily for duck-typed providers.**
-   `_resolve_structured_output_mode` guards
-   `supports_native_structured_output` with `getattr(..., None)` (`runtime.py:1214-1230`). A direct
-   `LLMProvider` subclass that omitted the override would inherit the Protocol stub and receive a
-   falsy `None`, while a duck-typed provider such as `RecordedDiligenceProvider` has no attribute at
-   all. Both outcomes correctly select prompt mode; the two paths simply reach the same result by
-   different Python mechanisms.
+2. **Resolved — prompt identity has one shared owner.** Payload normalization, canonical JSON, and
+   SHA-256 live in `prompt_identity.py:19-64`; public, runtime, and fixture producers delegate to it.
 
-2. **There is no proactive rate limiter, concurrency cap, RPM tracker, or circuit breaker in the
-   LLM path.** Rate limiting is reactive: a classified 429 may honor `retry-after`, then the runtime
-   blocks its current thread before retrying (`wire.py:113-177`, `runtime.py:2255-2281`). This is a
-   documented absence, not an implied package responsibility.
+3. **Resolved — fixture identity honors declared determinism.** Runtime passes an atomic
+   hash/declared-bit pair, providers validate it, and recorded replay retains a canonical-first,
+   bounded legacy read fallback (`runtime.py:2229-2254`; `recorded.py:96-180`).
 
-3. **The package/top-level export split is intentional.** `activegraph.llm.__all__` includes all
-   four providers, capability symbols, `sanitize_tool_name`, and `native_schema_compatible`
-   (`llm/__init__.py:44-98`), while the top-level `activegraph` package exports LLM error types but
-   no provider classes.
+4. **Resolved — Anthropic pricing documentation states only the actual fallback.**
+   `anthropic.py:42-56` contains no warning claim.
 
-### Resolved findings from the 2026-08 repair sets
+5. **Resolved documentation issue — native support is a compatibility lookup.** Missing or false
+   support selects prompt mode (`runtime.py:1224-1230`); duck-typed absence and an inherited
+   Protocol stub both reach that result.
 
-- **08.1–08.3 resolved:** `AssembledPrompt.hash()` is now documented as public content identity,
-  all prompt hashes share `prompt_identity.py`, and runtime-supplied declared determinism is the
-  canonical fixture identity with a bounded legacy read fallback (`prompt.py:20-25`,
-  `prompt_identity.py:19-64`, `recorded.py:96-181`).
-- **08.4 resolved:** Anthropic's `_pricing_for` docstring now states only the fallback it actually
-  performs (`anthropic.py:42-56`).
-- **08.6 resolved:** exception classification and `retry-after` parsing are shared in `wire.py`,
-  with Anthropic/OpenAI importing the shared functions (`wire.py:134-177`, `anthropic.py:35-36`,
-  `openai.py:46-47`).
-- **08.7–08.8 resolved:** `native.py` defines `__all__`, and the package exports
-  `native_schema_compatible` plus `sanitize_tool_name` (`native.py:25`, `llm/__init__.py:50-68`).
-- **08.9 reconciled:** the component map and outbound dependency table above distinguish `core/`,
-  top-level `frame.py`, and top-level `errors.py`.
-- **08.10 resolved:** `RecordedDiligenceProvider` now documents the actual `behavior named "..."`
-  and `## Triggering event` probes (`packs/diligence/fixtures/__init__.py:56-74`, `:152-180`).
+6. **Resolved — retry-header parsing is shared.** `wire.retry_after_seconds` owns the behavior and
+   Anthropic/OpenAI import it (`wire.py:164-177`; `anthropic.py:36`; `openai.py:47`).
+
+7. **Still open/intentional absence — no proactive limiter, concurrency cap, or circuit breaker.**
+   Rate limiting is reactive and sleeps the current runtime thread
+   (`runtime.py:2279-2280,2319-2320,4435-4459`).
+
+8. **Resolved — `native.py` declares its local public surface.** It exports both native helpers;
+   `activegraph.llm` re-exports `native_schema_compatible` (`native.py:25`; `llm/__init__.py:50,93`).
+
+9. **Resolved/verified boundary — package and top-level exports intentionally differ.**
+   `activegraph.llm.__all__` includes provider classes (`llm/__init__.py:71-98`); top-level
+   `activegraph.__all__` exports the error leaves but not provider classes
+   (`activegraph/__init__.py:168-244`).
+
+10. **Resolved — the component map names all four outbound dependency targets.** `llm/` imports
+    only core Event/View, top-level Frame, and top-level error helpers.
+
+11. **Resolved — the Diligence fixture documentation matches its sniffing logic.** It names the
+    `behavior named "..."` and `## Triggering event` probes
+    (`packs/diligence/fixtures/__init__.py:56-74,152-194`).
