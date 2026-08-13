@@ -27,10 +27,12 @@ Entry points:
     object, per the spec's identity mapping. Since ``Pack`` grew a
     declarative ``capabilities`` field (spec Q8), declared
     ``capabilities`` ARE checked here too — two-way by
-    ``(provider, capability)`` with ``risk_class`` agreement (a
-    relabeled risk class is exactly the swap the decision surface must
-    catch). Only ``consumes`` stays out of scope, being imperative
-    gateway wiring the loader cannot observe.
+    ``(provider, capability)`` with exact ``risk_class`` and
+    ``action_class`` agreement (a relabel is exactly the swap the
+    decision surface must catch). ``credential_ref`` is recorded but
+    not compared. Only ``consumes`` stays out of scope: it parses to a
+    tuple as host-owned wiring metadata and is excluded from both the
+    normal loader and strict sandbox surface comparison.
   * :func:`compute_content_hash` / :func:`verify_content_hash` — the
     spec §4 canonical byte stream over the pack directory EXCLUDING
     ``manifest.toml``, byte-exact, with this implementation's
@@ -124,7 +126,7 @@ class PackManifestError(PackError, ValueError):
 @dataclass(frozen=True)
 class CapabilityDecl:
     """One ``[[surface.capabilities]]`` entry: a gateway capability
-    this pack's host wiring registers, with its risk class.
+    this pack declares for its host wiring to register.
 
     ``action_class`` (CONTRACT v1.9 #1, ADR 0016) is the OPTIONAL
     canonical consequence class — ``R0|R1|R2|R3|R4`` — that drives the
@@ -132,7 +134,9 @@ class CapabilityDecl:
     ineligible for the new path's automation (it fails closed to
     approval). ``risk_class`` stays the required legacy/operational
     label; the two fields are separate policy dimensions and neither is
-    ever inferred from the other.
+    ever inferred from the other. The declaration is verified and
+    recorded; ActiveGraph does not register the gateway or resolve
+    ``credential_ref``.
     """
 
     provider: str
@@ -146,9 +150,10 @@ class CapabilityDecl:
 class PackManifest:
     """A parsed, schema-valid ``manifest.toml``. PROVISIONAL shape.
 
-    Field names mirror the spec's tables; ``raw`` preserves the full
-    parsed TOML for consumers that need keys this dataclass doesn't
-    surface yet.
+    Field names mirror the spec's tables; list-shaped ``consumes`` is
+    normalized to a tuple but remains host-owned metadata excluded from
+    ``verify_surface``. ``raw`` preserves the full parsed TOML for consumers
+    that need keys this dataclass doesn't surface yet.
     """
 
     name: str
@@ -393,10 +398,11 @@ def verify_surface(manifest: PackManifest, pack: Any) -> None:
     ``capabilities`` ARE verified here (spec Q8, runtime half): since
     ``Pack`` carries a declarative ``capabilities`` field, this runs
     the same two-way check keyed by ``(provider, capability)`` and
-    additionally requires ``risk_class`` agreement on any pair
-    declared on both sides. Only ``consumes`` stays out of scope —
-    it is imperative gateway wiring invisible at ``load_pack`` time,
-    left to static CI / evolution gates.
+    additionally requires exact ``risk_class`` and ``action_class``
+    agreement on any pair declared on both sides. ``credential_ref`` is
+    recorded but not compared. Only ``consumes`` stays out of scope: normal
+    loading and strict sandbox materialization both parse it but exclude it
+    from surface verification because gateway wiring remains host-owned.
     """
     violations: list[str] = []
 

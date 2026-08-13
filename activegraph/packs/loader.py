@@ -282,8 +282,8 @@ def load_pack_into_runtime(
     # are picked up. Runtime's `_ensure_registry` is the single seam.
     rt.registry = None
 
-    # If a graph is already attached, install the schema validators
-    # NOW so subsequent live add_object calls are gated.
+    # If a graph is already attached, install the schema validators NOW so
+    # subsequent live add_object calls are schema-validated.
     if rt.graph is not None:
         _install_graph_validators(rt.graph, state)
 

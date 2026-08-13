@@ -102,10 +102,57 @@ def test_replay_strict_non_deterministic_behavior_raises(tmp_path):
     rt.run_goal("x")
 
     toggle["value"] = "second"
+    from tests.test_observability_metrics import RecordingMetrics
+
+    metrics = RecordingMetrics()
     with pytest.raises(ReplayDivergenceError) as excinfo:
-        Runtime.load(db, run_id=rt.run_id, replay_strict=True)
+        Runtime.load(
+            db,
+            run_id=rt.run_id,
+            replay_strict=True,
+            metrics=metrics,
+        )
     # The error pins an event id so the operator knows where it diverged.
     assert excinfo.value.event_id.startswith("evt_")
+    assert excinfo.value.kind == "length_mismatch"
+    assert metrics.values(
+        "counter",
+        "activegraph_replay_divergence_detected_total",
+        {"reason": "length_mismatch"},
+    ) == [1.0]
+
+
+def test_replay_strict_type_mismatch_records_one_metric(tmp_path):
+    db = str(tmp_path / "type-mismatch.db")
+    toggle = {"first": True}
+
+    @behavior(name="changes_event_type", on=["goal.created"])
+    def changes_event_type(event, graph, ctx):
+        if toggle["first"]:
+            graph.add_object("recorded_type", {})
+        else:
+            graph.emit("live.type", {})
+
+    runtime = Runtime(Graph(clock=FrozenClock()), behaviors=[changes_event_type], persist_to=db)
+    runtime.run_goal("x")
+    toggle["first"] = False
+    from tests.test_observability_metrics import RecordingMetrics
+
+    metrics = RecordingMetrics()
+    with pytest.raises(ReplayDivergenceError) as exc_info:
+        Runtime.load(
+            db,
+            run_id=runtime.run_id,
+            behaviors=[changes_event_type],
+            replay_strict=True,
+            metrics=metrics,
+        )
+    assert exc_info.value.kind == "type_mismatch"
+    assert metrics.values(
+        "counter",
+        "activegraph_replay_divergence_detected_total",
+        {"reason": "type_mismatch"},
+    ) == [1.0]
 
 
 def test_replay_emits_no_store_writes(tmp_path):

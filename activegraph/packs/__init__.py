@@ -433,8 +433,15 @@ class RelationType:
 class PackPolicy:
     """A policy declared by a pack.
 
-    `requires_approval`: tuple of object type names whose `add_object`
-    is gated until `runtime.approve(...)` is called.
+    ``requires_approval`` lists object types for which this policy supplies
+    pack-owner attribution when behavior code explicitly calls
+    ``Context.propose_object``. It does not intercept ``Graph.add_object``.
+
+    ``auto_apply`` is reserved compatibility metadata. List input is
+    normalized to a tuple, but neither the loader nor Runtime reads it. Its
+    values have no defined object-type, setting, exemption, or automatic grant
+    semantics. Contents deliberately receive no validation beyond the existing
+    sequence normalization.
     """
 
     name: str
@@ -558,6 +565,12 @@ class Pack:
     full structural equality would not work and isn't what users
     care about. The identity that matters is "is this the same pack
     name and version" — that's what idempotent loading hinges on.
+
+    ``capabilities`` is the declarative, auditable half of a host-owned
+    gateway integration. ``Pack`` validates entry type, closed risk/action
+    classes, and pair uniqueness; manifest verification checks the declaration
+    two ways. Loading records it but never registers a gateway or resolves a
+    credential.
     """
 
     name: str
@@ -574,11 +587,14 @@ class Pack:
     # (manifest spec Q8). Entries are CapabilityDecl instances from
     # activegraph.packs.manifest. The runtime never registers these —
     # registration stays imperative host wiring — but the declaration
-    # is loader-introspectable: verify_surface two-way checks it
-    # against the manifest, and load_pack records it in the
-    # pack.loaded payload so decision surfaces read a pack's declared
-    # outbound reach from the graph. The gateway-side check ("did the
-    # registering pack declare this?") is downstream's half.
+    # is loader-introspectable: verify_surface two-way checks identity,
+    # risk_class, and action_class against the manifest, and load_pack
+    # records it in the pack.loaded payload so decision surfaces read a
+    # pack's declared outbound reach from the graph. The gateway-side
+    # registration/credential check is downstream's half. Construction
+    # deliberately does not require non-empty provider/capability/
+    # credential_ref strings; it validates entry type, closed classes,
+    # and (provider, capability) uniqueness only.
     capabilities: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
@@ -726,7 +742,10 @@ def behavior(
     pattern: Optional[str] = None,
     activate_after: Any = None,
 ) -> Callable[[Callable[..., None]], Behavior]:
-    """Pack-aware `@behavior`. Does not register globally."""
+    """Pack-aware `@behavior`. Does not register globally.
+
+    ``priority`` is reserved metadata; dispatch remains registration-ordered.
+    """
 
     from activegraph.runtime.patterns import parse as _parse_pattern
     from activegraph.runtime.scheduler import parse_activate_after as _parse_aa
@@ -798,7 +817,10 @@ def llm_behavior(
     tools: Optional[list[Any]] = None,
     max_tool_turns: int = 6,
 ) -> Callable[[Callable[..., None]], LLMBehavior]:
-    """Pack-aware `@llm_behavior`. Does not register globally."""
+    """Pack-aware `@llm_behavior`. Does not register globally.
+
+    ``priority`` is reserved metadata; dispatch remains registration-ordered.
+    """
 
     from activegraph.runtime.patterns import parse as _parse_pattern
     from activegraph.runtime.scheduler import parse_activate_after as _parse_aa
@@ -871,7 +893,10 @@ def relation_behavior(
     pattern: Optional[str] = None,
     activate_after: Any = None,
 ) -> Callable[[Callable[..., None]], RelationBehavior]:
-    """Pack-aware `@relation_behavior`. Does not register globally."""
+    """Pack-aware `@relation_behavior`. Does not register globally.
+
+    ``priority`` is reserved metadata; dispatch remains registration-ordered.
+    """
 
     from activegraph.runtime.patterns import parse as _parse_pattern
     from activegraph.runtime.scheduler import parse_activate_after as _parse_aa
@@ -1084,15 +1109,15 @@ def load_by_name(name: str) -> Pack:
 
 # ----------------------------------------------------- approval primitives
 #
-# v0.9 ships a minimal approval surface so the diligence pack's
-# memo_approval / risk_approval policies have something to gate on.
+# v0.9 ships a minimal explicit approval surface used by the diligence pack's
+# memo_approval / risk_approval policies for proposal-owner attribution.
 # A pending approval is a value object held in the runtime; user
 # code (or a CLI subcommand) calls runtime.approve(id).
 
 
 @dataclass(frozen=True)
 class PendingApproval:
-    """An object creation that's gated behind a policy approval.
+    """An explicitly proposed object creation awaiting a decision.
 
     The `id` is unique within the runtime instance and is reused as
     the eventual object id once approved. `kind` is "object" in
@@ -1105,7 +1130,7 @@ class PendingApproval:
     object_type: str
     data: dict[str, Any]
     reason: str
-    pack: str  # the pack whose policy gated this
+    pack: str  # pack attributed by the first matching loaded policy, if any
 
 
 __all__ = [

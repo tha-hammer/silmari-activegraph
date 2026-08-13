@@ -17,6 +17,26 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
 
 ### Added
 
+- **Complete standard metric emission** (CONTRACT v1.11 #7). All 24
+  existing `METRIC_NAMES` now have executable public production paths with
+  unchanged names and tag keys: exact LLM/tool request, cache, response,
+  failure, and malformed-input semantics; every behavior kind; live queue,
+  finite Runtime-owned budget, pattern, sink, and strict-replay observations;
+  and bounded metric-only label fallbacks. Queue depth is local last-writer
+  state, direct Budget mutation is outside immediate freshness, and failed
+  activation/load creates no queue/budget gauge ghosts. Metrics do not change
+  graph event payloads or ordering.
+
+- **Explicit JSON-log payload redaction** (CONTRACT v1.11 #6). The
+  operator schema appends optional `payload` as its seventeenth field.
+  Explicit payloads supplied through `runtime_log_extra(payload=...)`
+  or direct stdlib `extra={"payload": ...}` are detached and redacted
+  exactly once by the JSON formatter installed by `configure_logging`.
+  Invalid inputs or callback results fail closed by omitting only that
+  field. Built-in event, LLM, tool, pack, and behavior-failure logs
+  remain payload-free; human logging, arbitrary operator handlers,
+  event persistence, and sinks are outside this formatter boundary.
+
 - **`ClaudeCodeProvider`** (CONTRACT v1.11 #1). A third `LLMProvider`,
   `activegraph/llm/claude_code.py`, backed by the Claude Agent SDK
   (`pip install "activegraph[claude-code]"`, or via `[llm]`/`[all]` —

@@ -90,6 +90,8 @@ class RelationBehavior:
     view_spec: Optional[dict[str, Any]] = None
     creates: list[str] = field(default_factory=list)
     budget: Optional[dict[str, Any]] = None
+    # Reserved metadata. Runtime dispatch is always registration-ordered,
+    # including unequal values and ties.
     priority: int = 0
     # Pattern subscriptions also work on relation behaviors. The match
     # fires once per (event, relation) pair when the pattern matches.

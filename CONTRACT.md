@@ -8651,3 +8651,178 @@ The supported minimum OpenAI Python SDK is `1.55.3` with HTTPX 0.28.x. Literal
 HTTP compatibility tests at that exact floor prove preservation of
 `usage.cost`, choice/top-level error extensions, and `finish_reason="error"`;
 CI installs `[dev,openrouter]` and has a separate exact-minimum lane.
+
+## v1.11 #3. Object approval is explicit; policy attributes ownership
+
+This clause is an append-only correction to two inaccurate historical
+descriptions. It supersedes only v0.9 #15's statements that
+`memo_approval` means "memo writes require approval" and `risk_approval`
+means "risk objects require approval", plus v1.4 #3's statement that a
+disabled pack's "gating policies stop gating". The original clauses remain
+in place as history.
+
+1. `Graph.add_object` is always an immediate write. It emits
+   `object.created` and returns the materialized object regardless of loaded
+   `Policy` or `PackPolicy` declarations. No declaration intercepts or
+   rewrites this call.
+2. `Context.propose_object` is the only object-approval entry point. It
+   always creates a pending approval and emits `approval.proposed`; the
+   object is absent until `Runtime.approve` materializes it and emits
+   `object.created`. There is no runtime auto-grant setting.
+3. `PackPolicy.requires_approval` supplies owner attribution for explicit
+   proposals. The loader records matching canonical policy names; the first
+   matching loaded policy determines `PendingApproval.pack` and the `pack`
+   field of `approval.proposed`. No policy id or route is stored on the
+   approval. Per-behavior `Policy.requires_approval` is audit metadata and
+   likewise does not intercept writes.
+4. Disabling a pack removes its attribution from future explicit proposals.
+   Existing pending approvals and their durable events remain unchanged and
+   may still be approved or denied. This correction changes no approval or
+   object event schema.
+
+## v1.11 #4. Capability declarations are verified; wiring remains host-owned
+
+This append-only correction supersedes only v1.4 #1's statement that both
+`capabilities` and `consumes` are excluded from `verify_surface`. It also
+clarifies v1.9 #1: adding `action_class` to the verified capability surface
+did not make a declaration register a gateway or resolve credentials. The
+historical clauses remain in place as archaeology.
+
+1. `Pack.capabilities` is declaration data. Construction requires
+   `CapabilityDecl` entries, validates closed `risk_class` and optional
+   `action_class` values, and rejects duplicate `(provider, capability)`
+   pairs. It does not require non-empty provider, capability, or
+   `credential_ref` values.
+2. `verify_surface` checks capabilities in both directions by
+   `(provider, capability)` and requires exact `risk_class` and
+   `action_class` agreement for shared pairs. `credential_ref` is recorded
+   but not compared.
+3. For a discoverable manifest, normal `Runtime.load_pack` retains v1.6 #1's
+   warning tier: a capability mismatch emits one structured
+   `pack.manifest_invalid` warning and the pack remains loaded and
+   dispatchable. Fork-trial sandbox materialization uses the same comparison
+   strictly before runtime loading, so the mismatch fails materialization.
+4. Manifest `consumes` parses and normalizes to a tuple but is excluded from
+   `verify_surface` on both connectors. A consumes-only difference neither
+   warns during normal load nor fails sandbox materialization.
+5. `pack.loaded` records capability declarations for audit. ActiveGraph does
+   not create a gateway registry, register an implementation, resolve a
+   credential, or use `consumes` for runtime authority. Host code owns those
+   operations and the gateway-side declaration check.
+
+## v1.11 #5. Delayed relation behavior fire-time contract
+
+This append-only amendment corrects and completes v0.7 #13. Event-count
+timing remains unchanged and wall-clock scheduling remains out of scope.
+
+1. A `RelationBehavior` with `activate_after=N` is scheduled once per matching
+   behavior/event, then executes at its due event-count tick. Fire-time matching
+   uses the exact still-registered behavior object and its unchanged name; a
+   rebuilt registry or newly reloaded same-name wrapper cannot inherit old work.
+2. "Current graph state" means current relation candidates and current pattern
+   bindings. `where=` is re-evaluated against the original triggering event
+   payload, because the query language has no graph root for `where`. No
+   trigger-time relation IDs or relation enumeration order are persisted.
+3. A successful fire-time pattern evaluation emits exactly one
+   `pattern.matched` marker for the scheduled behavior/event before the first
+   relation lifecycle start. Every relation invocation receives the identical
+   complete `ctx.matches` binding list.
+4. Disabling a pack cancels pending entries owned by its exact behavior
+   wrappers before the registry is rebuilt. Reloading may create new work, but
+   it never resurrects a disabled wrapper's entry; other behaviors retain FIFO.
+5. If budget capacity ends before a due entry starts, the entire unprocessed
+   due suffix is restored at the front in FIFO order. Once a relation entry
+   starts fan-out, its local remaining relations are non-resumable, exactly like
+   immediate fan-out: no cursor is stored, completed relations never repeat,
+   and a contained handler failure does not prevent siblings while capacity
+   remains.
+
+## v1.11 #6. Explicit JSON log payloads are detached and redacted
+
+This append-only amendment extends v0.8 #6's structured logging schema and
+v1.0.3 #3's `doc_url` addition. Those historical clauses remain unchanged.
+Appending optional `payload` is an additive v1.11 schema change; removing or
+renaming any field remains breaking.
+
+1. `LOG_FIELDS` is exactly these 17 fields in this order:
+   `timestamp`, `level`, `logger`, `message`, `run_id`, `event_id`,
+   `behavior`, `tool`, `model`, `cache_hit`, `cost_usd`, `latency_seconds`,
+   `reason`, `error_type`, `error_message`, `doc_url`, `payload`. As before,
+   inapplicable fields are omitted rather than nulled.
+2. `payload` is caller-supplied opt-in data, never an implicit copy of a graph
+   event, prompt, response, tool argument/output, or goal. Either
+   `runtime_log_extra(payload=mapping)` or direct stdlib
+   `extra={"payload": mapping}` crosses the same final boundary: the
+   `JsonLineFormatter` on the ActiveGraph handler installed by
+   `configure_logging(json_output=True)`.
+3. Input may be any `Mapping`. The formatter materializes and deep-copies it
+   into a detached concrete `dict`, then invokes the process-global configured
+   redactor exactly once. The callback must return a concrete `dict`. With no
+   callback, the detached mapping is emitted unchanged; a later
+   `configure_logging(..., payload_redactor=None)` clears the callback.
+4. The callback result is validated with the formatter's exact final JSON
+   semantics: `json.dumps(..., separators=(",", ":"), ensure_ascii=False)`.
+   A non-Mapping input, copy failure, callback exception, non-dict result, or
+   serialization failure omits `payload` without losing the otherwise valid log
+   line and never falls back to the original. Copy, callback, and serialization
+   catch `Exception`, not `BaseException`.
+5. The promise is limited to that configured ActiveGraph JSON formatter.
+   Arbitrary operator-installed handlers are outside it. Human output
+   (`json_output=False`) never interpolates payload or invokes the callback.
+   Event persistence and `EventSink` export are separate policy surfaces; log
+   redaction changes neither. Built-in framework log records remain
+   payload-free, including event-emitted records and behavior-failure records
+   whose graph events retain their original data or traceback.
+
+## v1.11 #7. Standard metrics are emitted from authoritative runtime seams
+
+This append-only amendment completes and clarifies v0.8 #8–#10 and #C4,
+including the v1.8 gauge-retirement limitation. The exact 24 existing
+`METRIC_NAMES`, kinds, and tag keys are unchanged; adding or changing a row
+remains a public API change. An executable public-production-path matrix proves
+every catalog row is actually observed with its declared kind and exact tags.
+
+1. Every accepted live graph event increments
+   `activegraph_events_emitted_total`. Runtime-owned `llm.requested`,
+   `llm.responded`, `tool.requested`, and `tool.responded` additionally map to
+   their standard families. Requests count every attempt, including cache hits
+   and retries; cache-hit counters require literal `cache_hit is True`.
+   Request-side LLM labels use the request model and response-side labels use
+   the response model. Missing/non-string names use `unknown_model` or
+   `unknown_tool`.
+2. A response `error` Mapping is failure, absent/`None` is success, and another
+   non-`None` shape is malformed and omits family-specific response metrics.
+   Successful LLM tokens accept exact nonnegative integers. Successful cost
+   accepts a finite nonnegative decimal value, with a logical cache hit forced
+   to zero. Tool duration accepts finite nonnegative latency, with cache hits
+   and explicit early-error responses forced to zero. Invalid tool input is
+   post-request and therefore records call, failure, and zero duration;
+   missing/undeclared-tool and budget gates reached before the request remain
+   behavior-only.
+3. Plain, LLM, and relation behavior invocation paths increment before work;
+   relation fan-out counts once per relation. Duration covers only the
+   developer handler. Exactly one failure observation is owned by each
+   `behavior.failed` emission.
+4. Metric labels are deliberately closed without rewriting diagnostic event or
+   log values. Documented LLM, tool, budget, and replay codes pass through;
+   missing/open values normalize to bounded values including `unknown_reason`,
+   `llm.other`, `tool.other`, `budget.other`, `exception.other`, and `other`.
+5. `activegraph_queue_depth` is one untagged shared series. Each successful
+   activation, listener push, recovery batch, and successful pop publishes that
+   Runtime's local main-queue depth: **last writer wins; it is not a sum**.
+   Independent depths require independent backend instances or registries.
+6. Budget gauges publish only for finite `max_events` and `max_cost_usd`, after
+   successful activation/load and Runtime-owned `consume`/`add_cost`
+   observations. Direct mutation or replacement of public `Runtime.budget` has
+   no immediate metric-freshness guarantee. Failed construction or strict load
+   creates no initial queue/budget gauge ghost. The three-method protocol has
+   no deletion operation, so zero and older run-id series follow backend
+   retention.
+7. Every actual shared pattern matcher call is counted and timed, including an
+   empty result or raised evaluation. Each strict replay divergence that
+   escapes a public boundary is counted once using the closed exception kind;
+   reconstructed and fresh verifier work uses NoOp metrics, preventing ordinary
+   simulated-work observations and double counting.
+8. Standard observations always use exactly the catalog kind and tag-key set.
+   Instrumentation is non-throwing and does not change graph event payloads or
+   ordering. Attached sink metrics retain the v1.8 worker-owned semantics.

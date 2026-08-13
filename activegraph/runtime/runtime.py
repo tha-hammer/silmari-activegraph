@@ -61,6 +61,7 @@ import re
 import random as _random
 import time as _time
 import traceback
+from collections.abc import Mapping
 
 
 def _monotonic() -> float:
@@ -73,7 +74,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, Optional,
 from activegraph.behaviors.base import Behavior, LLMBehavior, RelationBehavior
 from activegraph.behaviors.decorators import get_registry
 from activegraph.core.event import Event
-from activegraph.core.graph import Graph, evaluate_where as _evaluate_where
+from activegraph.core.graph import Graph
 from activegraph.core.graph_store import GraphStore
 from activegraph.core.ids import IDGen
 from activegraph.core.view import View
@@ -144,7 +145,16 @@ from activegraph.tools.errors import (
 from activegraph.tools.recorded import DirectToolInvoker
 
 from activegraph.observability.logging import get_logger, runtime_log_extra
-from activegraph.observability.metrics import Metrics, NoOpMetrics
+from activegraph.observability.metrics import (
+    Metrics,
+    NoOpMetrics,
+    normalize_behavior_metric_reason,
+    normalize_llm_metric_reason,
+    normalize_metric_model,
+    normalize_metric_tool,
+    normalize_replay_metric_reason,
+    normalize_tool_metric_reason,
+)
 from activegraph.observability.status import (
     BehaviorInfo,
     BudgetSnapshot,
@@ -161,6 +171,11 @@ class Context:
     policy: Optional[Policy]
     random: _random.Random
     clock: Any  # Clock-like
+    # Compatibility field populated only for @llm_behavior invocation
+    # contexts. Plain/relation contexts keep None. Recorded generation still
+    # belongs to Runtime's @llm_behavior path; direct provider calls from a
+    # handler are unsupported because they bypass events, cache, budget, and
+    # replay governance.
     llm_provider: Optional[LLMProvider] = None
     # v0.7: pattern bindings for the current invocation. Empty list for
     # behaviors that don't declare a pattern. The handler is fired
@@ -195,15 +210,13 @@ class Context:
         *,
         reason: str = "",
     ) -> str:
-        """Defer creation of an object behind a policy approval.
+        """Explicitly defer object creation for operator approval.
 
-        Returns the proposal id. The object materializes when
-        `runtime.approve(id)` is called. Intended for use by behaviors
-        whose pack policy gates `object_type` writes.
-
-        Convenience: behaviors can just call `graph.add_object` if their
-        pack settings say auto-approval is on; this helper is the
-        explicit path when gating is enabled.
+        This call always creates a pending approval and returns its id. The
+        object materializes only when ``runtime.approve(id)`` is called.
+        Direct ``Graph.add_object`` calls remain immediate regardless of
+        loaded policies. A matching pack policy supplies pack-owner
+        attribution for the proposal; it does not decide whether to defer.
         """
         if self._runtime is None:
             from activegraph.runtime.exec_errors import RuntimeContextRequiredError
@@ -307,6 +320,48 @@ def _doc_url_for_reason(reason: str) -> str:
         if reason.startswith(prefix):
             return f"{DOCS_BASE_URL}/errors/{slug}"
     return f"{DOCS_BASE_URL}/errors/execution-error"
+
+
+def _metric_nonnegative_number(
+    value: object, *, allow_decimal_string: bool = False
+) -> Optional[float]:
+    """Return one finite nonnegative metric value without broad coercion.
+
+    Runtime event payloads use numeric token/latency fields and decimal strings
+    for costs. Booleans, numeric strings outside the cost field, negative
+    values, and non-finite values are malformed and therefore omitted.
+    """
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        if not allow_decimal_string:
+            return None
+        try:
+            decimal_value = Decimal(value)
+        except (ArithmeticError, TypeError, ValueError):
+            return None
+        if not decimal_value.is_finite() or decimal_value < 0:
+            return None
+        number = float(decimal_value)
+        return number if math.isfinite(number) else None
+    if not isinstance(value, (int, float, Decimal)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
+def _metric_nonnegative_integer(value: object) -> Optional[float]:
+    """Return an exact token-count payload value or omit malformed input."""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return float(value)
 
 
 class Runtime:
@@ -453,9 +508,13 @@ class Runtime:
         if self.frame is not None and self.frame.id is None:
             self.frame.id = graph.ids.frame()
 
-        # v0.8: observability — metrics defaults to NoOp so the runtime
-        # is fully functional without any metrics backend configured.
-        self.metrics: Metrics = metrics if metrics is not None else NoOpMetrics()
+        # Keep the requested backend dormant until every constructor
+        # validation succeeds. Load/fork also rely on this seam so replay and
+        # queue recovery cannot publish history as fresh observations.
+        requested_metrics: Metrics = (
+            metrics if metrics is not None else NoOpMetrics()
+        )
+        self.metrics: Metrics = NoOpMetrics()
         self._log = get_logger("activegraph.runtime")
 
         self._queue = EventQueue()
@@ -468,7 +527,6 @@ class Runtime:
         # Stash for tool result message between _invoke_tool and the
         # turn-loop caller. Always cleared after consumption.
         self._last_tool_result_message: Optional[LLMMessage] = None
-        graph.add_listener(self._on_event)
         self._idle_emitted = False
 
         # ---- v0.5: persistence wiring ----
@@ -542,12 +600,16 @@ class Runtime:
             _resolve_and_validate_llm_capabilities(source, self.llm_provider, self.budget)
         from activegraph.runtime._live import track_runtime
 
+        graph.add_listener(self._on_event)
+        self.metrics = requested_metrics
         try:
             self._attach_sink_configs(initial_sink_configs)
+            track_runtime(self)
+            self._record_initial_metric_snapshot()
         except Exception:
             graph._remove_listener(self._on_event)  # noqa: SLF001
+            self.metrics = NoOpMetrics()
             raise
-        track_runtime(self)
 
     def _attach_sink_configs(self, configs: Iterable[SinkConfig]) -> None:
         """Attach prevalidated configs atomically from the caller's view."""
@@ -567,6 +629,48 @@ class Runtime:
             for attached_sink in attached_sinks:
                 self.graph.remove_sink(attached_sink, timeout=1.0)
             raise
+
+    def _record_queue_depth(self) -> None:
+        """Publish this runtime's current queue depth (last-writer gauge)."""
+
+        depth = len(self._queue)
+        self._max_queue_depth_observed = max(self._max_queue_depth_observed, depth)
+        self.metrics.gauge("activegraph_queue_depth", {}, float(depth))
+
+    def _record_budget_events_remaining(self) -> None:
+        limit = self.budget.limits["max_events"]
+        if math.isfinite(limit):
+            remaining = max(0.0, limit - self.budget.used["max_events"])
+            self.metrics.gauge(
+                "activegraph_budget_events_remaining",
+                {"run_id": self.run_id},
+                float(remaining),
+            )
+
+    def _record_budget_cost_remaining(self) -> None:
+        if self.budget.cost_limit is not None:
+            remaining = max(
+                Decimal("0"), self.budget.cost_limit - self.budget.cost_used
+            )
+            self.metrics.gauge(
+                "activegraph_budget_cost_remaining_usd",
+                {"run_id": self.run_id},
+                float(remaining),
+            )
+
+    def _record_initial_metric_snapshot(self) -> None:
+        self._record_queue_depth()
+        self._record_budget_events_remaining()
+        self._record_budget_cost_remaining()
+
+    def _consume_budget(self, key: str, amount: float = 1.0) -> None:
+        self.budget.consume(key, amount)
+        if key == "max_events":
+            self._record_budget_events_remaining()
+
+    def _add_budget_cost(self, amount: Decimal) -> None:
+        self.budget.add_cost(amount)
+        self._record_budget_cost_remaining()
 
     # ---------- public surface ----------
 
@@ -863,6 +967,7 @@ class Runtime:
             "activegraph_events_emitted_total",
             {"event_type": event.type},
         )
+        self._record_llm_tool_event_metrics(event)
         # CONTRACT v1.3 #4: promote applies its delta quiescently —
         # the events persist and project, but never enqueue for
         # behavior matching. The promote.applied marker is emitted
@@ -872,8 +977,8 @@ class Runtime:
         # Don't enqueue our own lifecycle events for re-matching.
         # v0.7 adds `llm.*`, `tool.*`, `pattern.*`, `behavior.scheduled`
         # to the suppression list — they're internal to the runtime's
-        # bookkeeping. (User behaviors that want to audit LLM/tool
-        # activity can still subscribe via the registry's lookup.)
+        # bookkeeping. They still persist, project, reach sinks, and feed
+        # the standard metrics mapper above; they do not schedule behaviors.
         if (
             event.type.startswith("behavior.")
             or event.type.startswith("relation_behavior.")
@@ -901,12 +1006,7 @@ class Runtime:
         ):
             return
         self._queue.push(event)
-        self._max_queue_depth_observed = max(
-            self._max_queue_depth_observed, len(self._queue)
-        )
-        self.metrics.gauge(
-            "activegraph_queue_depth", {}, float(len(self._queue))
-        )
+        self._record_queue_depth()
         # New activity → we're not idle anymore.
         self._idle_emitted = False
         # INFO: one log line per enqueued event. High-volume; operators
@@ -919,7 +1019,125 @@ class Runtime:
             ),
         )
 
+    def _record_llm_tool_event_metrics(self, event: Event) -> None:
+        """Map Runtime-owned LLM/tool events to the standard metric catalog.
+
+        Graph events remain the source of truth. This observer reads only the
+        four Runtime-owned event types and tolerates malformed public
+        ``Graph.emit`` payloads without changing or rejecting those events.
+        """
+
+        payload: Mapping[str, Any] = (
+            event.payload if isinstance(event.payload, Mapping) else {}
+        )
+        if event.type == "llm.requested":
+            tags = {"model": normalize_metric_model(payload.get("model"))}
+            self.metrics.counter("activegraph_llm_calls_total", tags)
+            if payload.get("cache_hit") is True:
+                self.metrics.counter("activegraph_llm_cache_hits_total", tags)
+            return
+
+        if event.type == "tool.requested":
+            tags = {"tool": normalize_metric_tool(payload.get("tool"))}
+            self.metrics.counter("activegraph_tools_calls_total", tags)
+            if payload.get("cache_hit") is True:
+                self.metrics.counter("activegraph_tools_cache_hits_total", tags)
+            return
+
+        if event.type == "llm.responded":
+            self._record_llm_response_metrics(payload)
+            return
+
+        if event.type == "tool.responded":
+            self._record_tool_response_metrics(payload)
+
+    def _record_llm_response_metrics(self, payload: Mapping[str, Any]) -> None:
+        error = payload.get("error")
+        if error is not None and not isinstance(error, Mapping):
+            return
+
+        tags = {"model": normalize_metric_model(payload.get("model"))}
+        if isinstance(error, Mapping):
+            self.metrics.counter(
+                "activegraph_llm_failed_total",
+                {
+                    **tags,
+                    "reason": normalize_llm_metric_reason(error.get("reason")),
+                },
+            )
+        else:
+            for field, metric_name in (
+                ("input_tokens", "activegraph_llm_tokens_in"),
+                ("output_tokens", "activegraph_llm_tokens_out"),
+            ):
+                value = _metric_nonnegative_integer(payload.get(field))
+                if value is not None:
+                    self.metrics.histogram(metric_name, tags, value)
+            cost = (
+                0.0
+                if payload.get("cache_hit") is True
+                else _metric_nonnegative_number(
+                    payload.get("cost_usd"), allow_decimal_string=True
+                )
+            )
+            if cost is not None:
+                self.metrics.histogram("activegraph_llm_cost_usd", tags, cost)
+
+    def _record_tool_response_metrics(self, payload: Mapping[str, Any]) -> None:
+        error = payload.get("error")
+        if error is not None and not isinstance(error, Mapping):
+            return
+
+        tags = {"tool": normalize_metric_tool(payload.get("tool"))}
+        if isinstance(error, Mapping):
+            self.metrics.counter(
+                "activegraph_tools_failed_total",
+                {
+                    **tags,
+                    "reason": normalize_tool_metric_reason(error.get("reason")),
+                },
+            )
+
+        duration = (
+            0.0
+            if payload.get("cache_hit") is True
+            else _metric_nonnegative_number(payload.get("latency_seconds"))
+        )
+        if duration is not None:
+            self.metrics.histogram(
+                "activegraph_tools_duration_seconds", tags, duration
+            )
+
     # ---------- public entry points ----------
+
+    def _record_pattern_evaluation(self, elapsed_seconds: float) -> None:
+        """Observe one matcher call without changing matcher control flow."""
+
+        try:
+            self.metrics.counter("activegraph_patterns_evaluated_total", {})
+            self.metrics.histogram(
+                "activegraph_patterns_evaluation_duration_seconds",
+                {},
+                elapsed_seconds,
+            )
+        except Exception:
+            # Metrics implementations are specified as non-throwing; keep the
+            # runtime boundary defensive so observation never masks matching.
+            return
+
+    def _record_replay_divergence(
+        self,
+        error: ReplayDivergenceError,
+        *,
+        metrics: Optional[Metrics] = None,
+    ) -> None:
+        """Count one escaping strict divergence with a bounded kind label."""
+
+        target = self.metrics if metrics is None else metrics
+        target.counter(
+            "activegraph_replay_divergence_detected_total",
+            {"reason": normalize_replay_metric_reason(error.kind)},
+        )
 
     def _resolve_structured_output_mode(self, b: LLMBehavior) -> str:
         """Resolve "native" or "prompt" for one behavior. CONTRACT v1.3 #1.
@@ -986,7 +1204,10 @@ class Runtime:
                     self._structured_output_modes[b.name] = (
                         self._resolve_structured_output_mode(b)
                     )
-        self.registry = Registry(source)
+        self.registry = Registry(
+            source,
+            pattern_observer=self._record_pattern_evaluation,
+        )
 
         # v0.7: assemble the tool registry. Explicit tools= override the
         # global @tool registry, mirroring how behaviors= works.
@@ -1198,11 +1419,13 @@ class Runtime:
                 else None
             )
             if expected is None or expected != inputs_hash:
-                raise ReplayDivergenceError(
+                error = ReplayDivergenceError(
                     event_id=request.id,
                     expected=f"embedding_hash={expected or '<no recorded request>'}",
                     actual=f"embedding_hash={inputs_hash}",
                 )
+                self._record_replay_divergence(error)
+                raise error
 
         if cached is not None:
             vectors = cached
@@ -1210,11 +1433,13 @@ class Runtime:
             if self.replay_strict:
                 # Strict replay is never allowed to fall through to external
                 # embedding I/O, even if a provider object is configured.
-                raise ReplayDivergenceError(
+                error = ReplayDivergenceError(
                     event_id=request.id,
                     expected=f"embedding_response={inputs_hash}",
                     actual=None,
                 )
+                self._record_replay_divergence(error)
+                raise error
             if provider is None:
                 exc = RuntimeError(
                     "Runtime.embed() requires an embedding_provider= on cache miss"
@@ -1275,7 +1500,8 @@ class Runtime:
             if self._queue:
                 event = self._queue.pop()
                 assert event is not None
-                self.budget.consume("max_events")
+                self._record_queue_depth()
+                self._consume_budget("max_events")
                 self._tick += 1
                 matches = cast(Registry, self.registry).match(event, self.graph)
                 for b, rels, p_matches in matches:
@@ -1325,50 +1551,47 @@ class Runtime:
         )
         self._delayed.push(
             ScheduledEntry(
+                behavior=behavior,
                 behavior_name=behavior.name,
-                behavior_index=cast(Registry, self.registry).index_of(behavior),
                 triggering_event_id=event.id,
                 fire_at_event_count=self._tick + behavior.activate_after,
-                where_recheck_path=None,
                 scheduled_event_id=sched_evt.id,
             )
         )
 
     def _fire_due_delayed(self) -> None:
         due = self._delayed.pop_due(self._tick)
-        for entry in due:
+        for index, entry in enumerate(due):
             if not self._budget_remaining():
-                # Re-push and exit — budget exhausted before all due
-                # entries fired; preserved for next run_until_idle.
-                self._delayed.push(entry)
+                # Restore every entry that has not started. Once an entry's
+                # relation fan-out begins it remains non-resumable, matching
+                # immediate relation dispatch (no cursor/repeat model).
+                self._delayed.restore_due_front(due[index:])
                 break
-            behavior = cast(Registry, self.registry).all()[entry.behavior_index]
+            registry = cast(Registry, self.registry)
+            if not registry.contains_identity(entry.behavior):
+                continue
+            behavior = entry.behavior
+            if behavior.name != entry.behavior_name:
+                continue
             # Re-fetch the triggering event so the handler still sees it.
             ev = self._find_event(entry.triggering_event_id)
             if ev is None:
                 continue
-            # Re-check where= against the LATEST graph state.
-            if behavior.where and not _evaluate_where(behavior.where, ev.payload):
-                # Silently skip per CONTRACT v0.7 #13. The trace already
-                # has the behavior.scheduled event; absence of a
-                # behavior.started is sufficient evidence the where
-                # didn't hold.
+            matched = registry._match_behavior(behavior, ev, self.graph)
+            if matched is None:
                 continue
-            # Re-check pattern as well so a stale pattern hit doesn't
-            # fire after the graph has moved on. We pass empty matches
-            # if there's no pattern.
-            p_matches: list[Any] = []
-            if behavior.pattern_matcher is not None:
-                p_matches = behavior.pattern_matcher.matches(ev, self.graph)
-                if not p_matches:
-                    continue
+            relations, p_matches = matched
+            if p_matches:
+                self._emit_pattern_matched(behavior, ev, p_matches)
             # Dispatch as normal (without re-scheduling — we are AT the
             # fire moment).
             if isinstance(behavior, RelationBehavior):
-                # For relation behaviors we'd need to refetch relations.
-                # Defer this rare combination to a future enhancement.
-                continue
-            if isinstance(behavior, LLMBehavior):
+                for relation in relations:
+                    if not self._budget_remaining():
+                        break
+                    self._invoke_relation(behavior, relation, ev, p_matches)
+            elif isinstance(behavior, LLMBehavior):
                 self._invoke_llm(behavior, ev, p_matches)
             else:
                 self._invoke(behavior, ev, p_matches)
@@ -1394,7 +1617,7 @@ class Runtime:
     # ---------- invocation ----------
 
     def _invoke(self, b: Behavior, event: Event, matches: Optional[list[Any]] = None) -> None:
-        self.budget.consume("max_behavior_calls")
+        self._consume_budget("max_behavior_calls")
         # v1.10 #1: one recorder per execution when tracing is on; None
         # keeps the wrapper and view byte-identical to pre-v1.10.
         recorder = ReadRecorder() if self.trace_context_reads else None
@@ -1447,10 +1670,6 @@ class Runtime:
                 "activegraph_behaviors_duration_seconds",
                 {"behavior": b.name},
                 _monotonic() - _t0,
-            )
-            self.metrics.counter(
-                "activegraph_behaviors_failed_total",
-                {"behavior": b.name, "reason": f"exception.{type(e).__name__}"},
             )
             # v1.0.3 #3: route through _emit_behavior_failed so the
             # WARNING log line and the event emission stay in one
@@ -1509,7 +1728,10 @@ class Runtime:
           behavior.completed
         """
 
-        self.budget.consume("max_behavior_calls")
+        self._consume_budget("max_behavior_calls")
+        self.metrics.counter(
+            "activegraph_behaviors_invoked_total", {"behavior": b.name}
+        )
 
         # v1.10 #1: one recorder per execution when tracing is on.
         # `plain_view` stays unwrapped so recording the prompt's object
@@ -1571,7 +1793,7 @@ class Runtime:
                 plain_view=plain_view,
             )
         finally:
-            self.budget.consume("max_llm_calls")
+            self._consume_budget("max_llm_calls")
         self._emit_context_read(b.name, event.id, started_evt.id, recorder)
 
     def _invoke_llm_body(
@@ -1788,11 +2010,13 @@ class Runtime:
                         else None
                     )
                     if expected is not None and expected != turn_hash:
-                        raise ReplayDivergenceError(
+                        error = ReplayDivergenceError(
                             event_id=requested_evt.id,
                             expected=f"prompt_hash={expected}",
                             actual=f"prompt_hash={turn_hash}",
                         )
+                        self._record_replay_divergence(error)
+                        raise error
 
                 if cached is not None:
                     turn_response = cached
@@ -1909,7 +2133,7 @@ class Runtime:
                     self._llm_cache.record(
                         turn_hash, turn_response, requesting_event_id=requested_evt.id
                     )
-                self.budget.add_cost(turn_response.cost_usd)
+                self._add_budget_cost(turn_response.cost_usd)
                 break
 
             if turn_response is None:
@@ -2079,6 +2303,7 @@ class Runtime:
         # ---- Invoke developer handler with provenance stamping -----------
         bgraph._llm_request_event_id = successful_llm_request_id  # noqa: SLF001
         bgraph._tool_request_event_ids = list(tool_request_event_ids)  # noqa: SLF001
+        handler_t0 = _monotonic()
         try:
             cast("Callable[..., None]", b.handler)(event, bgraph, ctx, response.parsed)
         except ReplayDivergenceError:
@@ -2092,6 +2317,12 @@ class Runtime:
         except Exception as e:
             self._emit_behavior_failed(b.name, event.id, e)
             return
+        finally:
+            self.metrics.histogram(
+                "activegraph_behaviors_duration_seconds",
+                {"behavior": b.name},
+                _monotonic() - handler_t0,
+            )
 
         self._emit_lifecycle(
             "behavior.completed",
@@ -2127,7 +2358,7 @@ class Runtime:
         import logging
         import uuid
 
-        self.budget.consume("max_tool_calls")
+        self._consume_budget("max_tool_calls")
         args_hash = hash_tool_call(tool_name=tool.name, args=call.args)
 
         # Validate input
@@ -2255,7 +2486,7 @@ class Runtime:
             self._tool_cache.record(
                 args_hash, tool_response, requesting_event_id=req_evt.id
             )
-            self.budget.add_cost(tool_response.cost_usd)
+            self._add_budget_cost(tool_response.cost_usd)
 
         # Validate output (if schema)
         validated_output = tool_response.output
@@ -2506,6 +2737,13 @@ class Runtime:
         # tool.*, ConfigurationError for budget.*, else the generic
         # execution-error page.
         log_reason = reason or f"exception.{type(exc).__name__}"
+        self.metrics.counter(
+            "activegraph_behaviors_failed_total",
+            {
+                "behavior": behavior_name,
+                "reason": normalize_behavior_metric_reason(log_reason),
+            },
+        )
         self._log.warning(
             f"behavior failed: {behavior_name} (reason={log_reason})",
             extra=runtime_log_extra(
@@ -2527,7 +2765,10 @@ class Runtime:
         event: Event,
         matches: Optional[list[Any]] = None,
     ) -> None:
-        self.budget.consume("max_behavior_calls")
+        self._consume_budget("max_behavior_calls")
+        self.metrics.counter(
+            "activegraph_behaviors_invoked_total", {"behavior": b.name}
+        )
         # v1.10 #1: one recorder per execution when tracing is on. The
         # `relation` argument itself is pushed to the behavior, not read
         # by it, so it never enters the read set.
@@ -2565,6 +2806,7 @@ class Runtime:
                 "relation_id": relation.id,
             },
         )
+        handler_t0 = _monotonic()
         try:
             b.run(relation, event, bgraph, ctx)
         except ReplayDivergenceError:
@@ -2577,6 +2819,12 @@ class Runtime:
             # v1.10 #1: a failed frame still commits its read trace.
             self._emit_context_read(b.name, event.id, started_evt.id, recorder)
             return
+        finally:
+            self.metrics.histogram(
+                "activegraph_behaviors_duration_seconds",
+                {"behavior": b.name},
+                _monotonic() - handler_t0,
+            )
 
         self._emit_lifecycle(
             "behavior.completed",
@@ -2898,6 +3146,12 @@ class Runtime:
         )
         state.tool_short_to_canonical = _rebuild_shorts(state.tool_owners)
 
+        owned_behavior_objects = [
+            b
+            for b in self._pack_behaviors
+            if getattr(b, "_pack_owner", None) == name
+        ]
+        self._delayed.cancel_behaviors(owned_behavior_objects)
         self._pack_behaviors = [
             b
             for b in self._pack_behaviors
@@ -3055,7 +3309,8 @@ class Runtime:
         from activegraph.packs.loader import _ensure_pack_state
 
         state = _ensure_pack_state(self)
-        # Find the pack that gates this object type, if any.
+        # Attribute the first matching loaded policy's pack, if any. Policies
+        # do not intercept writes; Context.propose_object chose this path.
         gating = state.gated_object_types.get(object_type, [])
         owner_pack = gating[0].split(".", 1)[0] if gating else ""
         n = state._next_approval_n
@@ -3307,6 +3562,9 @@ class Runtime:
         Recorded ``context.read`` events replay like any other event
         either way, and strict replay never diverges on them.
         """
+        requested_metrics: Metrics = (
+            metrics if metrics is not None else NoOpMetrics()
+        )
         sink_configs = _normalize_sink_configs(sinks)
         chosen = run_id or _most_recent_run_id(path)
         if chosen is None:
@@ -3355,7 +3613,7 @@ class Runtime:
             replay_tool_cache=replay_tool_cache,
             tool_cache=tcache,
             replay_reinvoke_deterministic=replay_reinvoke_deterministic,
-            metrics=metrics,
+            metrics=NoOpMetrics(),
             sinks=None,
             native_structured_output=native_structured_output,
             embedding_provider=embedding_provider,
@@ -3381,20 +3639,34 @@ class Runtime:
         _rebuild_pending_approvals(rt, events)
 
         if replay_strict:
-            _verify_replay(
-                graph,
-                events,
-                behaviors,
-                frame,
-                policy,
-                budget,
-                seed,
-                llm_provider=llm_provider,
-                embedding_provider=embedding_provider,
-                native_structured_output=native_structured_output,
-            )
+            try:
+                _verify_replay(
+                    graph,
+                    events,
+                    behaviors,
+                    frame,
+                    policy,
+                    budget,
+                    seed,
+                    llm_provider=llm_provider,
+                    embedding_provider=embedding_provider,
+                    native_structured_output=native_structured_output,
+                )
+            except ReplayDivergenceError as error:
+                rt._record_replay_divergence(
+                    error,
+                    metrics=requested_metrics,
+                )
+                raise
 
-        rt._attach_sink_configs(sink_configs)
+        rt.metrics = requested_metrics
+        try:
+            rt._attach_sink_configs(sink_configs)
+            rt._record_initial_metric_snapshot()
+        except Exception:
+            graph._remove_listener(rt._on_event)  # noqa: SLF001
+            rt.metrics = NoOpMetrics()
+            raise
         return rt
 
     def fork(
@@ -3432,6 +3704,9 @@ class Runtime:
         an external graph database. The fork's event log remains the source
         of truth — this only changes where the projection is materialized.
         """
+        requested_metrics: Metrics = (
+            metrics if metrics is not None else NoOpMetrics()
+        )
         sink_configs = _normalize_sink_configs(sinks)
         from activegraph.store.sqlite import SQLiteEventStore
 
@@ -3556,7 +3831,7 @@ class Runtime:
             replay_tool_cache=replay_tool_cache,
             tool_cache=tcache,
             replay_reinvoke_deterministic=replay_reinvoke_deterministic,
-            metrics=metrics,
+            metrics=NoOpMetrics(),
             sinks=None,
             # CONTRACT v1.3 #1: forks inherit the parent's mode posture
             # so pre-populated caches stay reachable.
@@ -3584,7 +3859,14 @@ class Runtime:
         # v1.4: the fork inherits approvals still pending at the fork
         # point, rebuilt from its copied log.
         _rebuild_pending_approvals(rt, events)
-        rt._attach_sink_configs(sink_configs)
+        rt.metrics = requested_metrics
+        try:
+            rt._attach_sink_configs(sink_configs)
+            rt._record_initial_metric_snapshot()
+        except Exception:
+            fork_graph._remove_listener(rt._on_event)  # noqa: SLF001
+            rt.metrics = NoOpMetrics()
+            raise
         return rt
 
     def diff(self, other: "Runtime") -> Diff:
@@ -4181,6 +4463,7 @@ def _requeue_unfired(rt: "Runtime", events: list[Event]) -> None:
             drain_idx = i
     suffix = events[drain_idx + 1:]
     if not suffix:
+        rt._record_queue_depth()  # noqa: SLF001 — recovery bookkeeping
         return
     fired_on: set[str] = set()
     for e in suffix:
@@ -4204,6 +4487,7 @@ def _requeue_unfired(rt: "Runtime", events: list[Event]) -> None:
         if (e.actor or "").startswith("promote:"):
             continue
         rt._queue.push(e)  # noqa: SLF001 — internal seam by design
+    rt._record_queue_depth()  # noqa: SLF001 — publish once after recovery batch
     if rt._queue:
         rt._idle_emitted = False
 

@@ -20,10 +20,18 @@ How it works:
     `scheduler.due(graph)` which returns the pending entries whose
     fire counters have been reached.
 
-  * For each due entry, the runtime RE-CHECKS the `where=` clause
-    against the latest graph state before invoking. If it no longer
-    holds, the invocation is silently skipped (no extra event). If it
-    holds, the behavior fires normally.
+  * Each entry stores the exact behavior object plus its name. Pack disable
+    cancels entries by identity, so a newly loaded wrapper cannot inherit old
+    work.
+
+  * At fire time the runtime re-matches the original event. Relation
+    candidates and pattern bindings come from current graph state; `where=`
+    remains a filter over the original event payload. A current pattern emits
+    one `pattern.matched` marker before fan-out.
+
+  * When capacity ends before an entry starts, the complete unprocessed due
+    suffix is restored in FIFO order. Once relation fan-out starts it is local
+    and non-resumable, matching immediate dispatch (no cursor or repeats).
 
 Parsing `activate_after`:
   * int → number of events
@@ -37,17 +45,19 @@ a clear message pointing at CONTRACT v0.7 #13.
 from __future__ import annotations
 
 import re
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
+
+from activegraph.runtime.registry import BehaviorLike
 
 
 @dataclass
 class ScheduledEntry:
+    behavior: BehaviorLike
     behavior_name: str
-    behavior_index: int  # registry index — preserves CONTRACT #10 order
     triggering_event_id: str
     fire_at_event_count: int
-    where_recheck_path: Optional[str]  # currently unused; always None
     scheduled_event_id: str  # the behavior.scheduled event id
 
 
@@ -59,6 +69,23 @@ class DelayedQueue:
 
     def push(self, entry: ScheduledEntry) -> None:
         self.entries.append(entry)
+
+    def cancel_behaviors(self, behaviors: Collection[BehaviorLike]) -> int:
+        """Cancel entries owned by the exact supplied behavior objects."""
+        targets = tuple(behaviors)
+        kept: list[ScheduledEntry] = []
+        removed = 0
+        for entry in self.entries:
+            if any(entry.behavior is behavior for behavior in targets):
+                removed += 1
+            else:
+                kept.append(entry)
+        self.entries = kept
+        return removed
+
+    def restore_due_front(self, entries: Sequence[ScheduledEntry]) -> None:
+        """Restore an unprocessed due suffix ahead of retained future work."""
+        self.entries = list(entries) + self.entries
 
     def pop_due(self, current_event_count: int) -> list[ScheduledEntry]:
         due: list[ScheduledEntry] = []

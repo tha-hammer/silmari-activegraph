@@ -1,6 +1,8 @@
-"""Per-behavior policy. v0 is permissive — fields are recorded but not enforced
-beyond a couple of obvious checks. Hardening lands in v0.6 alongside LLM
-behaviors, where unbounded tool/cost spend is the real risk.
+"""Per-behavior policy metadata.
+
+The fields are recorded for audit and future hardening; they do not intercept
+graph mutations.  In particular, ``requires_approval`` does not turn direct
+``Graph.add_object`` calls into pending approvals.
 """
 
 from __future__ import annotations
@@ -15,11 +17,12 @@ class Policy:
 
     ``behavior`` names the behavior the lists scope to; the ``can_*``
     fields enumerate the object types, relation types, patches, and
-    tool names it may touch, and ``requires_approval`` routes matching
-    writes through the pending-approval flow. v0 semantics stand:
-    fields are recorded with the run for audit; the actively enforced
-    gate today is approval routing (pack policies, CONTRACT v0.9),
-    with broader enforcement reserved for a hardening pass.
+    tool names it may touch. ``requires_approval`` is declarative
+    metadata only: behavior code must explicitly call
+    ``Context.propose_object`` to create a pending approval. Pack-level
+    ``PackPolicy.requires_approval`` separately supplies owner attribution
+    for such explicit proposals; neither surface intercepts direct graph
+    writes. Broader enforcement is reserved for a hardening pass.
     """
 
     behavior: Optional[str] = None

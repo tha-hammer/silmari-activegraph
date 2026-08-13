@@ -499,17 +499,88 @@ policies = [
 ]
 ```
 
-Loaded policies modify how `graph.add_object` behaves: objects of
-the listed types are emitted as `object.proposed` (not
-`object.created`) and require `rt.approve(id)` before becoming
-visible in the projected graph.
+`requires_approval` supplies pack-owner attribution when behavior code
+explicitly calls `ctx.propose_object` for a listed type. The call emits
+`approval.proposed`; `rt.approve(id)` later materializes the object and
+emits `object.created`.
+
+Loaded policies do not modify `graph.add_object`. A direct add is immediate,
+emits `object.created`, and creates no pending approval. The behavior author
+chooses the operator-review path by calling `Context.propose_object`.
 
 Policy names are pack-scoped via the same prefixing rule:
 `diligence.memo_approval`.
 
-`DiligenceSettings.auto_approve_memos: bool = True` (default true so
-the demo flows without manual intervention) lets the pack flip the
-gating off. Set to `False` to see the approval flow.
+If a pack setting selects between immediate and reviewed operation, behavior
+code must branch on that setting and call the appropriate API. The runtime
+does not turn `requires_approval` into an automatic interception or grant.
+
+`PackPolicy.auto_apply` is reserved compatibility metadata and currently has
+no runtime effect. List input is normalized to a tuple, but the loader and
+runtime do not read it. Its values have no defined object-type, setting,
+exemption, or automatic grant semantics. Do not use the field to configure,
+bypass, or automatically decide an approval workflow.
+
+---
+
+## 9.1. Capability declarations and host-owned wiring
+
+A pack can declare outbound gateway capabilities in both Python and its
+manifest:
+
+```python
+from activegraph.packs.manifest import CapabilityDecl
+
+pack = Pack(
+    ...,
+    capabilities=(
+        CapabilityDecl(
+            provider="search",
+            capability="query",
+            risk_class="medium",
+            action_class="R2",
+            credential_ref="search/default",
+        ),
+    ),
+)
+```
+
+```toml
+[surface]
+consumes = ["search.query"]
+
+[[surface.capabilities]]
+provider = "search"
+capability = "query"
+risk_class = "medium"
+action_class = "R2"
+credential_ref = "search/default"
+```
+
+These declarations are verified and audited, not imperatively wired:
+
+- `Pack(...)` requires `CapabilityDecl` entries, closed
+  `risk_class`/`action_class` values, and unique `(provider, capability)`
+  pairs. It does not require non-empty provider, capability, or credential
+  strings.
+- `verify_surface` compares capabilities in both directions by
+  `(provider, capability)` and requires exact `risk_class` and `action_class`
+  agreement. It does not compare `credential_ref`.
+- Normal `Runtime.load_pack` performs that check for a discoverable manifest
+  as a warning tier: a mismatch emits `reason="pack.manifest_invalid"`, but the
+  pack remains loaded and dispatchable before 2.0.
+- Sandbox materialization applies the same capability comparison strictly,
+  after bundle verification and import but before `Runtime.load_pack`; a
+  mismatch fails materialization.
+- A successful load records capabilities in the `pack.loaded` audit payload.
+  ActiveGraph does not create a gateway registry or resolve credentials from
+  the declaration. Host code owns registration, credential resolution, and
+  the gateway-side check that a registration was declared.
+
+Manifest `consumes` is different. It is parsed and normalized to a tuple, but
+it is host-owned wiring metadata and is excluded from `verify_surface` in both
+normal and sandbox paths. A `consumes`-only difference neither warns nor fails
+materialization, and it never registers a runtime capability.
 
 ---
 
@@ -671,15 +742,17 @@ calling `load_by_name`.
 
 ## 15. Trust model and packs as code
 
-**Packs are not sandboxed.** A pack is a Python package. Installing
+**Packs are not sandboxed during ordinary in-process loading.** A pack is a Python package. Installing
 a pack is equivalent to installing any Python package: it can read
 your files, make network calls, exec arbitrary code in your process.
 Trust at install time, not at runtime.
 
 The runtime does not enforce any pack-specific privilege
-restrictions. There is no allowlist, no capability system, no
-syscall filter. If you don't trust a pack's source, don't install
-it. This is the same model as `pip` and as Python itself.
+restrictions. Capability declarations are verified and audited metadata, not
+an allowlist or gateway registration system, and there is no syscall filter.
+If you don't trust a pack's source, don't install it. This is the same model
+as `pip` and as Python itself. The separate fork-trial sandbox is an explicit
+evaluation workflow, not a restriction placed on normal `load_pack`.
 
 This decision is locked. See CONTRACT v0.9 #12.
 

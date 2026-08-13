@@ -58,6 +58,7 @@ relation_types = []
 behaviors = []
 tools = []
 settings_schema = ""
+consumes = ["gateway.search", "archive.write"]
 
 [[surface.capabilities]]
 provider = "meeting"
@@ -88,6 +89,7 @@ def test_load_manifest_round_trip(tmp_path):
     assert m.pack_deps == {"core": ">=0.1"}
     assert m.object_types == ("meeting",)
     assert m.capabilities[0].risk_class == "medium"
+    assert m.consumes == ("gateway.search", "archive.write")
     assert m.fixtures_deterministic is True
 
 
@@ -149,7 +151,38 @@ def test_surface_check_passes_on_agreement(tmp_path):
             ),
         ),
     )
+    # The non-empty manifest consumes tuple is host-owned metadata, so it is
+    # intentionally absent from Pack and excluded from this comparison.
     verify_surface(m, pack)  # no raise
+
+
+def test_consumes_only_difference_is_excluded_from_verify_surface(tmp_path):
+    from activegraph.packs.manifest import CapabilityDecl
+
+    manifest = load_manifest(_write_pack(tmp_path))
+    pack = Pack(
+        name="meeting_notes",
+        version="0.1.0",
+        object_types=_pack().object_types,
+        capabilities=(
+            CapabilityDecl(
+                provider="meeting",
+                capability="export_summary",
+                risk_class="medium",
+            ),
+        ),
+    )
+
+    assert manifest.consumes == ("gateway.search", "archive.write")
+    verify_surface(manifest, pack)
+
+    changed = GOOD_MANIFEST.replace(
+        'consumes = ["gateway.search", "archive.write"]',
+        'consumes = ["different.host.route"]',
+    )
+    changed_manifest = load_manifest(_write_pack(tmp_path / "changed", changed))
+    assert changed_manifest.consumes == ("different.host.route",)
+    verify_surface(changed_manifest, pack)
 
 
 def test_surface_check_catches_both_directions(tmp_path):

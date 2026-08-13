@@ -87,10 +87,11 @@ class OpenTelemetryMetrics:
 
         values_key = (name, keys, tuple(tags[k] for k in keys))
         with self._gauge_value_lock:
+            unseen = values_key not in self._gauge_values
             previous = self._gauge_values.get(values_key, 0.0)
             delta = float(value) - previous
             self._gauge_values[values_key] = float(value)
-        if delta:
+        if unseen or delta:
             gauge.add(delta, attributes=_attributes(tags))
 
     def _creation_lock(self, key: tuple[Any, ...]) -> threading.Lock:
