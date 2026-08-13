@@ -13,8 +13,9 @@ object and relation type names remain flat; and a scaffolder that emits a runnab
 
 The imperative `Pack` and declarative `manifest.toml` halves meet at a scoped surface check:
 `verify_surface` compares name/version and the declared object-type, relation-type, behavior, tool,
-settings-schema, and capability surface. Policies, prompts, descriptions, licenses, dependencies,
-fixtures, and `consumes` are outside that comparison (`activegraph/packs/manifest.py:437-536`). The
+settings-schema, and capability identity/risk/action surface. Policies, prompts, descriptions,
+licenses, dependencies, fixtures, `consumes`, and capability `credential_ref` are outside that
+comparison (`activegraph/packs/manifest.py:437-536`). The
 manifest module remains **PROVISIONAL** (`activegraph/packs/manifest.py:9-17`).
 
 ## Component map
@@ -28,6 +29,8 @@ graph TD
 
     subgraph imperative["imperative half - Python"]
         DEC["pack-local decorators<br/>behavior / llm_behavior /<br/>relation_behavior / tool<br/>__init__.py:771-965"]
+        BF["behaviors._factory<br/>pattern / schedule / signature builders"]
+        TF["tools._factory<br/>signature / schema builder"]
         LPD["load_prompts_from_dir<br/>__init__.py:490-557"]
         PACK["Pack<br/>shallow-frozen; eq+hash = name,version<br/>__init__.py:563-730"]
     end
@@ -48,11 +51,15 @@ graph TD
     SCAF["scaffold_pack<br/>scaffold.py:23-88"]
 
     RT["Runtime<br/>runtime/runtime.py:3261-3615"]
+    BIND["owner-aware ToolRef binding<br/>runtime.py:1243-1395"]
     GR["core.Graph<br/>validator hook slots<br/>core/graph.py:212-218"]
     SB["sandbox._materialize_pack<br/>sandbox/_child.py:120-169"]
     CLI["cli pack new / pack list<br/>cli/main.py:166-218"]
 
-    DEC --> PACK
+    DEC --> BF
+    DEC --> TF
+    BF --> PACK
+    TF --> PACK
     LPD --> PACK
     PMD --> LPD
     MT --> LM
@@ -62,12 +69,15 @@ graph TD
     SCAF -.emits skeleton.-> PACK
 
     RT -->|load_pack| LPIR
+    BF -->|eager: patterns + scheduler| RT
     LPIR --> PRS
     LPIR --> WARN
     WARN --> LM
     WARN --> VS
     LPIR -->|installs validators + emits pack.loaded| GR
     RT -->|reads short-name tables| PRS
+    RT --> BIND
+    PRS --> BIND
 
     SB --> HASH
     SB --> LM
@@ -80,7 +90,7 @@ graph TD
 
 Value objects and public API (`activegraph/packs/__init__.py`):
 
-- `Pack` — frozen dataclass; equality/hash by `(name, version)` only;
+- `Pack` — shallow-frozen dataclass; equality/hash by `(name, version)` only;
   `capabilities` is verified/audited declaration data, while gateway
   registration and credential resolution remain host-owned —
   `activegraph/packs/__init__.py:563-730`
@@ -193,11 +203,11 @@ Contract notes — all violations raise `PackValidationError`:
    validator from `packaging.version.Version`. Surrounding whitespace and
    non-strings fail. Valid spelling is preserved exactly rather than normalized.
 3. `settings_schema` must be a Pydantic `BaseModel` subclass (`activegraph/packs/__init__.py:634-638`).
-4. Within-pack name uniqueness across object types, relation types, behaviors, tools, policies, and
-   prompts (`activegraph/packs/__init__.py:642-648`).
+4. Names are unique **within each component category**; the same short name may appear in different
+   categories (`activegraph/packs/__init__.py:640-646`).
 5. Every behavior must be a `Behavior`/`RelationBehavior` **and** carry `_pack_local is True` — this
    is how using `activegraph.behavior` instead of `activegraph.packs.behavior` is caught
-   (`activegraph/packs/__init__.py:651-663`); the same rule applies to tools (`:664-674`).
+   (`activegraph/packs/__init__.py:648-661`); the same rule applies to tools (`:662-672`).
 6. `capabilities` entries must be `CapabilityDecl` with `risk_class ∈ {low, medium, high, critical}`,
    `action_class ∈ {R0..R4}` or empty, and `(provider, capability)` unique within the pack
    (`activegraph/packs/__init__.py:681-712`). `action_class` is **never** derived from `risk_class`
@@ -215,7 +225,10 @@ loader reads exactly the byte set the manifest content hash pins
 (`activegraph/packs/__init__.py:512-516`). `content_hash` is
 `"sha256:" + sha256(body).hexdigest()[:16]` — **16 hex chars, truncated** — and it, not the declared
 `version`, is recorded as prompt-body audit identity in `pack.loaded`; no runtime/replay path
-compares it (`activegraph/packs/__init__.py:480-487,723-730`; `activegraph/packs/loader.py:973-1005`). Missing dir,
+compares it (`activegraph/packs/__init__.py:480-487,723-730`; `activegraph/packs/loader.py:973-1005`).
+Strict replay instead compares the full assembled `llm.requested.payload.prompt_hash`; a pack prompt
+body affects that hash transitively through prompt assembly, but its short `PackPrompt` hash is not
+the compared value (`activegraph/runtime/runtime.py:2072-2075,2143-2147,4780-4795`). Missing dir,
 non-dir path, missing or malformed frontmatter, missing `version`, duplicate prompt name, and IO
 failure all raise `PackPromptLoadError` (`activegraph/packs/__init__.py:490-557`).
 
@@ -236,8 +249,8 @@ manifest        ::= pack-table provenance-table integrity-table
 pack-table      ::= "[pack]"
                     "name"        "=" pack-name        (* ^[a-z][a-z0-9_]{0,63}$ *)
                     "version"     "=" pep440-version
-                    "description" "=" nonempty-string
-                    [ "license"   "=" string ] ;       (* parsed, never validated *)
+                    "description" "=" value-coerced-to-nonempty-string
+                    [ "license"   "=" value-coerced-to-string ] ;
 
 provenance-table::= "[pack.provenance]"
                     "authored_by" "=" ( "human" | "agent" )
@@ -252,11 +265,11 @@ sha256-hex64    ::= "sha256:" 64 * hex-lower ;
 
 dependencies-table
                 ::= "[dependencies]"
-                    "activegraph"   "=" pep440-specifier-set     (* REQUIRED *)
-                    [ "python"      "=" pep440-specifier-set ]
+                    "activegraph"   "=" comparator-shaped-string     (* REQUIRED *)
+                    [ "python"      "=" comparator-shaped-string ]
                     [ "python-deps" "=" string-list ]
-                    [ "[dependencies.packs]"          { name "=" pep440-specifier-set } ]
-                    [ "[dependencies.optional-packs]" { name "=" pep440-specifier-set } ] ;
+                    [ "[dependencies.packs]"          { name "=" comparator-shaped-string } ]
+                    [ "[dependencies.optional-packs]" { name "=" comparator-shaped-string } ] ;
 
 surface-table   ::= "[surface]"
                     [ "object_types"    "=" string-list ]
@@ -268,10 +281,10 @@ surface-table   ::= "[surface]"
                     { capability-entry } ;
 
 capability-entry::= "[[surface.capabilities]]"
-                    "provider"         "=" string
-                    "capability"       "=" string
+                    [ "provider"         "=" value-coerced-to-string ]
+                    [ "capability"       "=" value-coerced-to-string ]
                     "risk_class"       "=" ( "low" | "medium" | "high" | "critical" )
-                    [ "credential_ref" "=" string ]
+                    [ "credential_ref" "=" value-coerced-to-string ]
                     [ "action_class"   "=" ( "R0"|"R1"|"R2"|"R3"|"R4" ) ] ;
                     (* risk_class and action_class are INDEPENDENT vocabularies;
                        neither is ever inferred from the other — ADR 0016 *)
@@ -300,17 +313,20 @@ canonical-stream::= { file-entry } ;                (* sorted by utf8(relpath) *
 file-entry      ::= utf8(relpath) 0x00 u64be(len(bytes)) bytes ;
 excluded        ::= "__pycache__/**" | "*.pyc" | ".*"
                   | "manifest.toml" ;               (* content hash ONLY *)
-rejected        ::= symlink(file|dir) | non-NFC-path | non-UTF8-path ;
+rejected        ::= nonhidden-symlink(file|dir) | non-NFC-path | non-UTF8-path ;
 ```
 
 Contract notes:
 
 - `pack.integrity.signature` is **reserved**: a non-empty value is *rejected*, never ignored, so the
   seam cannot be used for a downgrade (`activegraph/packs/manifest.py:297-313`).
-- `dependencies.activegraph` is required and must be a PEP 440 specifier set
-  (`activegraph/packs/manifest.py:315-351`). Ranges are checked **syntactically only** — semantic
-  resolution against a running runtime is explicitly out of scope
-  (`activegraph/packs/manifest.py:226-434`).
+- `dependencies.activegraph` is required. Dependency constraints are accepted by the
+  comparator-shaped `_SPECIFIER_RE`; `packaging.specifiers.SpecifierSet` is not used, so this is
+  syntax screening rather than complete PEP 440 validation or semantic resolution
+  (`activegraph/packs/manifest.py:64-66,315-351`). Several scalar fields are intentionally
+  string-coerced: description/license, settings-schema, dependency ranges, and capability fields
+  do not all reject non-string TOML values (`:285-305,315-399`). Provider/capability may be absent
+  or empty; `risk_class` remains mandatory by validation.
 - `fixtures.entrypoint` must be a nonempty relative path from the manifest directory, contain no
   `..` or symlink component, resolve inside the pack, and name an existing regular file.
   `fixtures.deterministic` must be a bool. The entrypoint is a resource declaration, not an
@@ -320,17 +336,18 @@ Contract notes:
   travels with the pack (`activegraph/packs/manifest.py:610-624`, `:675-694`).
   `compute_bundle_hash` **includes** it and is what external pins verify — because the manifest is
   the very document a reviewer approves (`activegraph/packs/manifest.py:627-672`).
-- `_hash_pack_dir` rejects symlinks (file **and** directory) loudly, rejects paths that are not
-  UTF-8-encodable or not NFC-normalized, sorts entries by UTF-8 path bytes, and frames each file as
+- `_hash_pack_dir` excludes hidden entries before checking for symlinks, so hidden symlinks are
+  skipped and only non-hidden file/directory symlinks are rejected. It rejects paths that are not
+  UTF-8-encodable or NFC-normalized, sorts by UTF-8 path bytes, and frames each file as
   `path_bytes ‖ 0x00 ‖ u64be(len) ‖ raw_bytes` (`activegraph/packs/manifest.py:539-607`).
 - `verify_surface` is a two-way identity mapping over `object_types`, `relation_types`, `behaviors`,
   `tools`, `settings_schema`, and `capabilities` (`activegraph/packs/manifest.py:437-536`). `name`
-  and `version` must match exactly (`:445-453`); `settings_schema` is compared as the **class name
-  string**, with `""` meaning `EmptySettings` (`:463-477`); capabilities are keyed by
+  and `version` must match exactly (`:463-471`); `settings_schema` is compared as the **class name
+  string**, with `""` meaning `EmptySettings` (`:484-495`); capabilities are keyed by
   `(provider, capability)` with mandatory agreement on **both** `risk_class` and `action_class` — a
-  relabeled risk class is precisely the swap the decision surface must catch (`:478-532`). Policies,
-  prompts, descriptions, licenses, dependencies, fixtures, and `consumes` remain outside this
-  declared-surface comparison.
+  relabeled risk class is precisely the swap the decision surface must catch (`:496-532`). Policies,
+  prompts, descriptions, licenses, dependencies, fixtures, `consumes`, and capability
+  `credential_ref` remain outside this declared-surface comparison.
 
 ### packs <-> runtime
 
@@ -340,23 +357,25 @@ construction — `_pack_state: Optional[PackRuntimeState]`, `_pack_behaviors`, `
 (`activegraph/runtime/runtime.py:156-158`), and makes its runtime pack imports function-local. In
 the reverse direction, the pack module imports shared `behaviors._factory` and `tools._factory`
 modules at import time; those factories own signature/pattern/scheduler construction. The runtime
-direction remains lazy except for type checking.
+direction remains lazy except for type checking. Consequently the eager import path is
+`packs -> behaviors._factory -> runtime.patterns/runtime.scheduler`; Runtime's calls back into
+`packs` remain function-local.
 
 | Runtime member | Calls into packs | file:line |
 |---|---|---|
 | `Runtime.load_pack(pack, settings=None) -> bool` | `loader.load_pack_into_runtime` | `activegraph/runtime/runtime.py:3261-3273` |
 | `Runtime.loaded_packs() -> list[Pack]` | reads `_pack_state.loaded_packs` | `activegraph/runtime/runtime.py:3275-3279` |
 | `Runtime.disable_pack(name) -> bool` | `PackNotFoundError`, `loader.AMBIGUOUS` | `activegraph/runtime/runtime.py:3281-3420` |
-| `Runtime.get_behavior(name)` | `loader.AMBIGUOUS`, `behavior_short_to_canonical` | `activegraph/runtime/runtime.py:3422-3462` |
-| `Runtime.get_tool(name) -> Tool` | `loader.AMBIGUOUS`, `tool_short_to_canonical` | `activegraph/runtime/runtime.py:3464-3504` |
-| `Runtime._pack_settings_for_behavior(b)` | `_pack_state.pack_settings[b._pack_owner]` | `activegraph/runtime/runtime.py:3506-3515` |
-| `Runtime.pending_approvals()` | `_pack_state.pending_approvals` | `activegraph/runtime/runtime.py:3519-3532` |
-| `Runtime._add_pending_approval(...) -> str` | `PendingApproval`, `loader._ensure_pack_state` | `activegraph/runtime/runtime.py:3534-3582` |
-| `Runtime.approve(approval_id, approved_by)` | pops `pending_approvals`; emits `approval.granted` then adds the object | `activegraph/runtime/runtime.py:3584-3615` |
-| `Ctx.pack_settings(pack_name)` | `_runtime._pack_state.pack_settings` | `activegraph/runtime/runtime.py:207-213` |
-| `Ctx.propose_object(object_type, data, *, reason)` | `_runtime._add_pending_approval` | `activegraph/runtime/runtime.py:215-251` |
+| `Runtime.get_behavior(name)` | `loader.AMBIGUOUS`, `behavior_short_to_canonical` | `activegraph/runtime/runtime.py:3419-3459` |
+| `Runtime.get_tool(name) -> Tool` | `loader.AMBIGUOUS`, `tool_short_to_canonical` | `activegraph/runtime/runtime.py:3461-3501` |
+| `Runtime._pack_settings_for_behavior(b)` | `_pack_state.pack_settings[b._pack_owner]` | `activegraph/runtime/runtime.py:3503-3512` |
+| `Runtime.pending_approvals()` | `_pack_state.pending_approvals` | `activegraph/runtime/runtime.py:3516-3529` |
+| `Runtime._add_pending_approval(...) -> str` | `PendingApproval`, `loader._ensure_pack_state` | `activegraph/runtime/runtime.py:3531-3580` |
+| `Runtime.approve(approval_id, approved_by)` | pops `pending_approvals`; emits `approval.granted` then adds the object | `activegraph/runtime/runtime.py:3582-3615` |
+| `Context.pack_settings(pack_name)` | `_runtime._pack_state.pack_settings` | `activegraph/runtime/runtime.py:217-224` |
+| `Context.propose_object(object_type, data, *, reason)` | `_runtime._add_pending_approval` | `activegraph/runtime/runtime.py:226-247` |
 | approval-queue rebuild on `Runtime.load` / `fork` | `PendingApproval`, `loader._ensure_pack_state` | calls `activegraph/runtime/runtime.py:3872,4096`; implementation `:5094-5135` |
-| `Runtime._ensure_registry()` | merges `_pack_behaviors` into `Registry`, `_pack_tools` into `tool_registry`, re-registers short name when `_export_globally` | `activegraph/runtime/runtime.py:1243-1328` |
+| `Runtime._ensure_registry()` | merges pack behaviors/tools, registers global aliases, and resolves immutable owner-aware behavior tool bindings | `activegraph/runtime/runtime.py:1243-1395` |
 
 ```ebnf
 load-call       ::= "load_pack_into_runtime" "(" Runtime "," Pack [ "," settings ] ")"
@@ -394,19 +413,26 @@ register-behavior
 short(table)    ::= if absent    -> table[short] = canonical
                   | if different -> table[short] = "<<AMBIGUOUS>>" ;
 
-load-failure    ::= PackVersionConflictError   (* same name, different version *)
+pre-mutation-failure
+                ::= PackValidationError        (* shallow-mutable tool membership *)
+                  | PackVersionConflictError   (* same name, different version *)
                   | PackConflictError          (* canonical / flat / global-export collision *)
-                  | PackSettingsMissingError ; (* schema needs values, none given *)
+                  | PackSettingsMissingError   (* settings absent/invalid or override invalid *)
+                  | other preparation Exception ;
+late-failure    ::= Exception during loaded-payload/event emission
+                    (* contribution mutation is not rolled back *) ;
 
 disable-call    ::= "disable_pack" "(" pack-name ")" "->" boolean "!" PackNotFoundError ;
 disable-effect  ::= deregister(behaviors, tools, object_types, relation_types,
                                policies, settings)
                     rebuild(short-name-tables)  (* removal can RESOLVE ambiguity *)
+                    cancel-delayed(pack-owned-behaviors)
                     rebuild(registry)
                     emit("pack.disabled") ;
 disable-nonEffect
-                ::= graph-state-unchanged ∧ memory-not-reclaimed
+                ::= domain-objects-and-relations-unchanged ∧ memory-not-reclaimed
                     ∧ pending-approvals-retained ;
+                    (* pack.disabled still appends to the event log *)
 ```
 
 Contract notes:
@@ -414,9 +440,9 @@ Contract notes:
 - **Load boundary**: membership, version, settings, conflict checks, and preparation of canonical
   behavior/tool copies finish before contribution mutation (`activegraph/packs/loader.py:63-255`).
   `_ensure_pack_state` may first initialize empty private bookkeeping (`:68-69,523-530`); the first
-  contribution mutation is at `:259`. A failure of the final `pack.loaded` emit can still occur
-  after mutation (`:306-318`), so the source's absolute atomicity wording is not a universal
-  guarantee; this remains a code-only gap.
+  contribution mutation is at `:259`. Payload construction or the final `pack.loaded` emit can
+  still fail after mutation (`:306-318,973-1013`), so the source's absolute atomicity wording is
+  not a universal guarantee; this remains a code-only gap.
 - **Namespacing asymmetry**: behaviors, tools, and policies register under `f"{pack.name}.{short}"`
   (`activegraph/packs/loader.py:117-120,264-290`), and canonical collisions across packs
   raise `PackConflictError` (`:110-232`). **Object types and relation types are NOT
@@ -443,12 +469,18 @@ Contract notes:
   parameter injection (the loader inspects the handler signature with `typing.get_type_hints` and
   binds any extra parameter annotated with the settings class, with a string-annotation fallback —
   `activegraph/packs/loader.py:840-912`), `ctx.settings`, and `ctx.pack_settings(name)`
-  (`activegraph/runtime/runtime.py:207-213`).
+  (`activegraph/runtime/runtime.py:217-224`).
 - **Originals are never mutated**: the loader constructs fresh `Behavior`/`LLMBehavior`/
   `RelationBehavior` and `Tool` objects with the canonical name
   (`activegraph/packs/loader.py:673-759`, `:822-837`), stamping `_pack_local`, `_pack_owner`,
   `_short_name` (and `_export_globally` on tools). `_pack_owner` is what `disable_pack` filters on
-  (`activegraph/runtime/runtime.py:3379-3388`).
+  (`activegraph/runtime/runtime.py:3380-3395`).
+- **Tool identity is owner-aware**: before mutation, own-pack `Tool` object references are replaced
+  with the exact canonical copies (`activegraph/packs/loader.py:234-255,793-837`). On each registry
+  build, Runtime resolves string/object references owner-first and stores an immutable binding
+  tuple for execution (`activegraph/runtime/runtime.py:1243-1395`).
+- `disable_pack` cancels pending delayed entries for the exact behavior objects owned by the pack
+  before removing them from the registry (`activegraph/runtime/runtime.py:3380-3397`).
 - **Prompts are not `prompt_template`**: markdown bodies routinely contain literal `{...}` that would
   crash `str.format`, so the same-named prompt body is appended to the behavior's `description`,
   landing under "Role:" in the system prompt (`activegraph/packs/loader.py:762-790`).
@@ -534,7 +566,8 @@ Contract notes:
 - **Legacy-invariance rule**: `action_class` joins a capability entry *only when declared*, so a pack
   without it produces a byte-identical `pack.loaded` event to pre-v1.9 runtimes
   (`activegraph/packs/loader.py:985-1004`).
-- `pack.disabled` is the symmetric event (`activegraph/runtime/runtime.py:3399-3416`).
+- `pack.disabled` is the symmetric event (`activegraph/runtime/runtime.py:3399-3416`). Disabling
+  leaves domain objects/relations intact, but the event itself still appends to the graph log.
 
 ### packs <-> sandbox
 
@@ -560,10 +593,10 @@ materialize     ::= verify_bundle_hash(expected, root)      (* BEFORE any import
                     pack := unique-module-level-Pack [ named manifest.name ]
                     [ verify_surface(manifest, pack) ]
                     "->" Pack ;
+                    (* both optional manifest operations are present or absent together *)
 ordering-invariant
                 ::= hash-before-import ;   (* an unverified pack is never exec'd *)
-failure         ::= PackManifestError
-                  | RuntimeError("must expose exactly one ... Pack") ;
+failure         ::= Exception -> materialization_failed ;
 ```
 
 Contract notes: malformed or empty pins fail at construction (`activegraph/sandbox/__init__.py:102-126`).
@@ -620,9 +653,10 @@ implementation.
 ### packs <-> top-level `activegraph`
 
 `activegraph/__init__.py:141-166` re-exports the *using* surface: `Pack`, `ObjectType`,
-`RelationType`, `PackPolicy`, `PackPrompt`, `EmptySettings`, `DiscoveredPack`, `PendingApproval`, all
-`PackError` plus seven concrete error classes, `discover`, `load_by_name`, `clear_discovery_cache`, and
-`load_prompts_from_dir`. The pack-aware decorators are **deliberately not re-exported** — authors
+`RelationType`, `PackPolicy`, `PackPrompt`, `EmptySettings`, `DiscoveredPack`, `PendingApproval`,
+`PackError` plus seven concrete error classes, `discover`, `load_by_name`,
+`clear_discovery_cache`, and `load_prompts_from_dir`. The pack-aware decorators are **deliberately
+not re-exported** — authors
 must write `from activegraph.packs import behavior` so the import path makes the
 no-global-registration boundary explicit (`activegraph/__init__.py:141-166`).
 
@@ -637,13 +671,16 @@ Outbound-only, verified by exhaustive grep of `activegraph/packs/*.py`:
 | `tools.base` | `Tool` | `activegraph/packs/__init__.py:68`; `activegraph/packs/loader.py:49` |
 | `tools._factory` | `build_tool` | `activegraph/packs/__init__.py:69,943-951` |
 | `tools.decorators` | `get_tool_registry` (lazy, to check global short-name collisions) | `activegraph/packs/loader.py:211-218` |
+| `packs.validation` | shared name/version validators | `activegraph/packs/__init__.py:70`; `manifest.py:61`; `scaffold.py:17` |
 | `activegraph.errors` | `PackError`, `RegistrationError`, `MissingOptionalDependency` | `activegraph/packs/__init__.py:50-58,89-93`; `activegraph/packs/manifest.py:60` |
 | pydantic | `BaseModel`, `ValidationError` | `activegraph/packs/__init__.py:50-58`; `activegraph/packs/loader.py:34` |
 
 Contract note: pack decorators construct `Behavior`/`Tool` instances but never register them
 anywhere; the `_pack_local` stamp is what proves that. Signature and schema inference are owned by
-the shared factory modules. There is **no executable `activegraph.llm` import in the pack
-machinery** — that edge exists only through the bundled example pack's recorded fixtures
+the shared factory modules; `behaviors._factory` eagerly imports runtime pattern/schedule parsers,
+while both factories import the shared signature helpers. There is **no executable
+`activegraph.llm` import in the pack machinery** — that edge exists only through the bundled
+example pack's recorded fixtures
 (`activegraph/packs/diligence/fixtures/__init__.py:19,205`). A repair-pack docstring contains an
 Anthropic import example, but does not execute it. Any system-map `packs -> llm` edge should be
 labeled example-pack-only.
@@ -666,13 +703,13 @@ sequenceDiagram
     Note over LD: validate mutable membership first
     LD->>LD: _validate_pack_tool_membership(pack)
     LD->>ST: _ensure_pack_state(rt)
-    LD->>LD: idempotency + version check (loader.py:68-108)
+    LD->>LD: idempotency + version check (loader.py:68-104)
     LD-->>RT: return False if (name, version) already loaded
     LD->>LD: _build_settings(pack, settings) (loader.py:560-660)
     LD->>LD: conflict scan — canonical behaviors/tools/policies,<br/>flat object/relation types, global exports (loader.py:110-232)
     LD->>LD: prepare fresh canonical behavior/tool copies and wrappers<br/>still pre-contribution-mutation (loader.py:234-255)
 
-    Note over LD,ST: contribution mutation (loader.py:257+)
+    Note over LD,ST: contribution mutation (loader.py:259+)
     LD->>ST: loaded_packs[name] = pack; pack_settings[name] = settings_obj
     LD->>ST: behavior_owners[canonical] = pack
     LD->>ST: _add_short_name(behavior_short_to_canonical, short, canonical)
@@ -690,6 +727,8 @@ sequenceDiagram
     LD->>LD: classify, then log structured WARNING once per (name, version)
     LD-->>RT: True
     RT-->>Caller: True
+    Caller->>RT: next public drain / run entry point
+    RT->>RT: _ensure_registry() merges contributions and<br/>resolves owner-aware immutable Tool bindings
 ```
 
 ## Open questions
@@ -701,47 +740,56 @@ sequenceDiagram
 
 2. **Resolved boundary: `PackPolicy.auto_apply` is reserved compatibility metadata.** It is
    declared and list-to-tuple normalized, but intentionally unread by the loader and runtime
-   (`activegraph/packs/__init__.py:439-462`; `tests/test_packs.py:191-249`). Its values have no defined object-type,
-   setting, exemption, or automatic grant semantics. No content validation is added beyond the
-   existing sequence normalization; a future contract must define semantics before activation.
+   (`activegraph/packs/__init__.py:439-462`; `tests/test_packs.py:191-249`). Its values have no
+   defined object-type, setting, exemption, or automatic grant semantics. No content validation is
+   added beyond the existing sequence normalization; a future contract must define semantics
+   before activation.
 
-3. **Partially resolved — only one orphan remains.** The unused `pre_ambiguous_behaviors`,
-   `pre_ambiguous_tools`, and `copy` import are gone. `_compute_new_ambiguous_shorts` remains at
-   `activegraph/packs/loader.py:547-554` with no callers.
+3. **Resolved original finding; one residual orphan remains.** The unused
+   `pre_ambiguous_behaviors`, `pre_ambiguous_tools`, and `copy` import are gone.
+   `_compute_new_ambiguous_shorts` remains at `activegraph/packs/loader.py:547-554` with no callers.
 
 4. **Resolved — supported Runtime instances always have a Graph.** `Runtime.__init__(graph: Graph,
    ...)` requires and unconditionally assigns it (`activegraph/runtime/runtime.py:407-410,449-462`);
    `Runtime.load_pack` passes `self` to the private loader (`:3261-3273`). A graph-less runtime is
-   outside the supported public seam.
+   outside the supported public seam. This closes the original `graph=None` hypothesis, but not the
+   broader reachable late-failure atomicity gap described in the load-boundary notes above.
 
 5. **Resolved — production manifests exist.** The bundled Diligence pack ships a
    wheel-included manifest verified against its live surface and normative content hash. The
    scaffolder emits the same verified artifact, an explicit absolute locator, package-data rules,
-   and a real fixture resource (`activegraph/packs/scaffold.py:42-87,151-180`).
+   and a real fixture resource (`activegraph/packs/diligence/manifest.toml:1-36`;
+   `pyproject.toml:195-196`; `activegraph/packs/scaffold.py:42-87,151-180`). Diligence itself leaves
+   `manifest_path=None` and is found through legacy component discovery
+   (`activegraph/packs/diligence/__init__.py:59-83`).
 
-6. **Resolved — one Pack identity validator plus scaffold normalization.** Pack construction and manifest parsing use
-   `^[a-z][a-z0-9_]{0,63}$`. The scaffolder separately accepts a normalized 1–64 character kebab
-   distribution slug, then validates its derived snake identity with the common validator. Existing
-   strip/lowercase scaffold normalization remains compatible; underscores are not distribution
-   slugs (`activegraph/packs/validation.py:11-35`; `activegraph/packs/scaffold.py:23-39`).
+6. **Resolved — one Pack identity validator plus scaffold normalization.** Pack construction and
+   manifest parsing use `^[a-z][a-z0-9_]{0,63}$`. The scaffolder separately accepts a normalized
+   1–64 character kebab distribution slug, then validates its derived snake identity with the
+   common validator. Existing strip/lowercase scaffold normalization remains compatible;
+   underscores are not distribution slugs (`activegraph/packs/validation.py:11-35`;
+   `activegraph/packs/scaffold.py:23-39`).
 
 7. **Resolved distinction — different hashes serve different scopes.** `PackPrompt.content_hash` is
    `sha256:` plus 16 hex characters and is recorded in `pack.loaded`
    (`activegraph/packs/__init__.py:465-487,723-730`). Manifest content/bundle hashes are 64 hex
-   characters and remain manifest/external-pin data (`activegraph/packs/manifest.py:539-694`).
-   Prompt hashes are recorded for audit but are not replay-compared by current runtime code.
+   characters and remain manifest/external-pin data; they never appear in `pack.loaded`
+   (`activegraph/packs/manifest.py:539-694`). Prompt hashes are recorded for audit but are not
+   replay-compared; strict replay uses the assembled `llm.requested.prompt_hash`
+   (`activegraph/runtime/runtime.py:2072-2075,2143-2147,4780-4795`).
 
 8. **Resolved — shared exact-preserving PEP 440 validation.** Pack construction and manifest parsing
    reject invalid/non-string/padded values at their earliest boundary, preserve the caller's exact
    valid spelling, and `verify_surface` still requires exact textual equality. Thus `1.0` and `1.0.0`
    are individually valid but deliberately do not describe the same Pack identity
-   (`activegraph/packs/validation.py:25-35`; `activegraph/packs/manifest.py:445-453`).
+   (`activegraph/packs/validation.py:25-35`; `activegraph/packs/manifest.py:463-471`).
 
 9. **Status qualifier — the manifest module is explicitly PROVISIONAL**
    (`activegraph/packs/manifest.py:1-17`). Every consumer of this spec should carry that qualifier.
 
-10. **Resolved boundary — best-effort legacy discovery plus explicit locator.** It resolves modules from behavior/tool
-    functions, `settings_schema`, and object schemas only. A relation-only/componentless pack, or
+10. **Resolved compatibility boundary — best-effort legacy discovery plus explicit locator.** It
+    resolves modules from behavior/tool functions, `settings_schema`, and object schemas only. A
+    relation-only/componentless pack, or
     one whose components live in `__main__`, must declare `manifest_path`. Unexpected discovery or
     checking failures are visible as identity-deduped structured WARNINGs rather than DEBUG noise
     (`activegraph/packs/loader.py:343-485`).
@@ -757,6 +805,7 @@ sequenceDiagram
     `activegraph/packs/loader.py:985-1004`; `tests/test_pack_manifest.py`,
     `tests/test_manifest_warning_tier.py`, `tests/test_sandbox_trial.py`).
 
-12. **Resolved import-graph correction.** `packs -> llm` is not a machinery dependency; it exists only via the
-    bundled example pack's recorded fixtures. The scaffolder does import its sibling manifest and
-    validation helpers so generated artifacts use the authoritative validators and hash algorithm.
+12. **Resolved import-graph correction.** `packs -> llm` is not a machinery dependency; it exists
+    only via the bundled example pack's recorded fixtures. The scaffolder now has real imports of
+    its sibling manifest and validation helpers, and the main pack module eagerly imports shared
+    behavior/tool factories; the behavior factory in turn imports runtime pattern/schedule parsers.
