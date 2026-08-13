@@ -65,6 +65,14 @@ per-error recovery prose see the
 
 ::: activegraph.ReservedFieldError
 
+::: activegraph.ObjectNotFoundError
+
+::: activegraph.PatchNotFoundError
+
+::: activegraph.ApplyPatchNotFoundError
+
+::: activegraph.RejectPatchNotFoundError
+
 ::: activegraph.RuntimeContextRequiredError
 
 ::: activegraph.InvalidPatchLifecycleState
@@ -116,3 +124,17 @@ per-error recovery prose see the
 ::: activegraph.InvalidArgumentType
 
 ::: activegraph.IncompatibleRuntimeState
+
+::: activegraph.RuntimeClosedError
+
+## Migration storage errors
+
+::: activegraph.MigrationBackendConflictError
+
+::: activegraph.UnsupportedMigrationBackendError
+
+::: activegraph.UnsupportedMigrationCapabilityError
+
+::: activegraph.MigrationBackendLoadError
+
+::: activegraph.MigrationBackendCloseError

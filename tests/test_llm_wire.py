@@ -14,6 +14,7 @@ from activegraph.llm.wire import (
     build_tool_name_map,
     classify_provider_exception,
     classify_provider_status,
+    retry_after_seconds,
     restore_tool_name,
     sanitize_tool_name,
 )
@@ -120,6 +121,38 @@ def test_classify_provider_status_matches_the_exception_based_ladder():
     assert classify_provider_status(422) == "llm.request_error"
     assert classify_provider_status(500) == "llm.network_error"
     assert classify_provider_status(None) == "llm.network_error"
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        (None, None),
+        (object(), None),
+        (type("Response", (), {"headers": None})(), None),
+        (type("Response", (), {"headers": object()})(), None),
+        (type("Response", (), {"headers": {}})(), None),
+        (type("Response", (), {"headers": {"retry-after": None}})(), None),
+        (type("Response", (), {"headers": {"retry-after": "bad"}})(), None),
+        (
+            type(
+                "Response", (), {"headers": {"retry-after": "Wed, 21 Oct 2015"}}
+            )(),
+            None,
+        ),
+        (type("Response", (), {"headers": {"Retry-After": "4"}})(), None),
+        (type("Response", (), {"headers": {"retry-after": 2}})(), 2.0),
+        (type("Response", (), {"headers": {"retry-after": 1.25}})(), 1.25),
+        (type("Response", (), {"headers": {"retry-after": "3.5"}})(), 3.5),
+        (type("Response", (), {"headers": {"retry-after": -2}})(), -2.0),
+    ],
+)
+def test_retry_after_seconds_preserves_narrow_header_semantics(
+    response, expected
+) -> None:
+    error = Exception("provider failure")
+    if response is not None:
+        error.response = response
+    assert retry_after_seconds(error) == expected
 
 
 # ---------------------------------------------------------- retry set

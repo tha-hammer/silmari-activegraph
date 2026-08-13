@@ -125,8 +125,10 @@ def _materialize_pack(job: dict[str, Any]) -> Any:
     or one ``extra_packs`` entry (v1.7 addendum 1b), which uses the
     identical chain. Order is the design's §3: bundle hash BEFORE any
     import (the pin covers manifest.toml per the v1.4 amendment),
-    then manifest schema, then import, then the two-way surface check
-    against the live Pack.
+    then manifest schema, then import, then the strict two-way surface check
+    against the live Pack. That check includes declared capabilities and their
+    risk/action classes; ``consumes`` remains parsed host-owned metadata and is
+    intentionally excluded.
     """
     from activegraph.packs import Pack
     from activegraph.packs.manifest import (
@@ -137,8 +139,7 @@ def _materialize_pack(job: dict[str, Any]) -> Any:
 
     root = Path(job["pack_root"])
     manifest = None
-    if job.get("expected_bundle_hash"):
-        verify_bundle_hash(job["expected_bundle_hash"], root)
+    verify_bundle_hash(job["expected_bundle_hash"], root)
     if job.get("manifest_required", True):
         manifest = load_manifest(root)
 

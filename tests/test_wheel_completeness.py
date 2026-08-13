@@ -97,3 +97,30 @@ def test_wheel_installs_and_quickstart_runs() -> None:
                 f"--- stdout ---\n{result.stdout}\n"
                 f"--- stderr ---\n{result.stderr}"
             )
+
+        manifest_check = subprocess.run(
+            [
+                str(venv_python),
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    "import activegraph.packs.diligence as d; "
+                    "from activegraph.packs.manifest import "
+                    "load_manifest, verify_content_hash, verify_surface; "
+                    "root = Path(d.__file__).resolve().parent; "
+                    "path = root / 'manifest.toml'; "
+                    "assert path.is_file(), path; "
+                    "manifest = load_manifest(path); "
+                    "verify_surface(manifest, d.pack); "
+                    "verify_content_hash(manifest, root)"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert manifest_check.returncode == 0, (
+            "installed Diligence manifest verification failed:\n"
+            f"stdout: {manifest_check.stdout}\n"
+            f"stderr: {manifest_check.stderr}"
+        )

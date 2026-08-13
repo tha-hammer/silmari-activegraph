@@ -13,7 +13,14 @@ import os
 
 import pytest
 
-from activegraph import Graph, Runtime, behavior, clear_registry
+from activegraph import (
+    ActiveGraphError,
+    ConfigurationError,
+    Graph,
+    Runtime,
+    behavior,
+    clear_registry,
+)
 from activegraph import sandbox
 from activegraph.packs.manifest import compute_bundle_hash, compute_content_hash
 from activegraph.sandbox import (
@@ -73,14 +80,26 @@ def main(rt):
 '''
 
 
-def _candidate_dir(tmp_path, scenario=HAPPY_SCENARIO, init=PACK_INIT):
+def _write_fixture_resource(root):
+    fixtures = root / "fixtures"
+    fixtures.mkdir()
+    (fixtures / "run_fixtures.py").write_text("# deterministic\n")
+
+
+def _candidate_dir(
+    tmp_path,
+    scenario=HAPPY_SCENARIO,
+    init=PACK_INIT,
+    manifest_template=MANIFEST_TEMPLATE,
+):
     root = tmp_path / "trial_candidate"
     root.mkdir()
     (root / "__init__.py").write_text(init)
     (root / "scenario.py").write_text(scenario)
+    _write_fixture_resource(root)
     content = compute_content_hash(root)
     (root / "manifest.toml").write_text(
-        MANIFEST_TEMPLATE.format(content_hash=content)
+        manifest_template.format(content_hash=content)
     )
     return root, compute_bundle_hash(root)
 
@@ -133,7 +152,13 @@ def test_happy_path_trial_completes_in_isolation(tmp_path):
 
 def test_bundle_hash_mismatch_refuses_before_import(tmp_path):
     path, parent_run, tip, n_parent = _parent_store(tmp_path)
-    root, _ = _candidate_dir(tmp_path)
+    sentinel = tmp_path / "candidate-imported"
+    init = (
+        "from pathlib import Path\n"
+        f"Path({str(sentinel)!r}).write_text('imported')\n"
+        + PACK_INIT
+    )
+    root, _ = _candidate_dir(tmp_path, init=init)
 
     report = run_forked_trial(
         path,
@@ -148,6 +173,7 @@ def test_bundle_hash_mismatch_refuses_before_import(tmp_path):
     assert "bundle hash mismatch" in report.detail
     # Nothing loaded, nothing ran: the fork carries zero trial events.
     assert report.events_appended == 0
+    assert not sentinel.exists()
     fork = Runtime.load(path, run_id=report.fork_run_id, behaviors=[])
     assert not [e for e in fork.graph.events if e.type == "pack.loaded"]
     _parent_untouched(path, parent_run, n_parent)
@@ -277,6 +303,88 @@ pack = Pack(
     _parent_untouched(path, parent_run, n_parent)
 
 
+CAPABILITY_PACK_INIT = PACK_INIT.replace(
+    "from activegraph.packs import Pack, behavior",
+    "from activegraph.packs import Pack, behavior\n"
+    "from activegraph.packs.manifest import CapabilityDecl",
+).replace(
+    'pack = Pack(name="trial_candidate", version="0.1.0", behaviors=(greeter,))',
+    '''pack = Pack(
+    name="trial_candidate",
+    version="0.1.0",
+    behaviors=(greeter,),
+    capabilities=(
+        CapabilityDecl(
+            provider="meeting",
+            capability="export_summary",
+            risk_class="low",
+            action_class="R2",
+        ),
+    ),
+)''',
+)
+
+CAPABILITY_MISMATCH_MANIFEST = MANIFEST_TEMPLATE.replace(
+    "\n[fixtures]",
+    '''
+[[surface.capabilities]]
+provider = "meeting"
+capability = "export_summary"
+risk_class = "medium"
+action_class = "R2"
+
+[fixtures]''',
+)
+
+CONSUMES_ONLY_MANIFEST = MANIFEST_TEMPLATE.replace(
+    'settings_schema = ""',
+    'settings_schema = ""\nconsumes = ["gateway.search"]',
+)
+
+
+def test_capability_mismatch_fails_strict_sandbox_materialization(tmp_path):
+    path, parent_run, tip, n_parent = _parent_store(tmp_path)
+    root, bundle = _candidate_dir(
+        tmp_path,
+        init=CAPABILITY_PACK_INIT,
+        manifest_template=CAPABILITY_MISMATCH_MANIFEST,
+    )
+
+    report = run_forked_trial(
+        path,
+        parent_run_id=parent_run,
+        at_event=tip,
+        pack_source=PackSource(root_dir=str(root), expected_bundle_hash=bundle),
+        scenario="scenario.py",
+    )
+
+    assert report.outcome == "materialization_failed"
+    assert "meeting.export_summary risk_class mismatch" in report.detail
+    assert report.events_appended == 0
+    _parent_untouched(path, parent_run, n_parent)
+
+
+def test_consumes_only_manifest_difference_passes_strict_sandbox(tmp_path):
+    path, parent_run, tip, n_parent = _parent_store(tmp_path)
+    root, bundle = _candidate_dir(
+        tmp_path,
+        manifest_template=CONSUMES_ONLY_MANIFEST,
+    )
+
+    report = run_forked_trial(
+        path,
+        parent_run_id=parent_run,
+        at_event=tip,
+        pack_source=PackSource(root_dir=str(root), expected_bundle_hash=bundle),
+        scenario="scenario.py",
+    )
+
+    assert report.outcome == "completed", report.detail
+    fork = Runtime.load(path, run_id=report.fork_run_id, behaviors=[])
+    assert [obj.type for obj in fork.graph.all_objects() if obj.type == "greeting"]
+    _parent_untouched(path, parent_run, n_parent)
+
+
 REPLAY_PACK_INIT = '''
 from activegraph.packs import Pack, behavior
 
@@ -356,6 +464,7 @@ def test_recorded_segment_replay_inside_the_trial(tmp_path):
     root.mkdir()
     (root / "__init__.py").write_text(REPLAY_PACK_INIT)
     (root / "scenario.py").write_text(REPLAY_SCENARIO)
+    _write_fixture_resource(root)
     content = compute_content_hash(root)
     (root / "manifest.toml").write_text(
         REPLAY_MANIFEST.format(content_hash=content)
@@ -417,10 +526,11 @@ pack = Pack(name="trial_candidate", version="0.1.0", behaviors=(annotator,))
 '''
 
 
-def _trusted_dir(tmp_path):
+def _trusted_dir(tmp_path, init=TRUSTED_PACK_INIT):
     root = tmp_path / "trusted_helper"
     root.mkdir()
-    (root / "__init__.py").write_text(TRUSTED_PACK_INIT)
+    (root / "__init__.py").write_text(init)
+    _write_fixture_resource(root)
     content = compute_content_hash(root)
     (root / "manifest.toml").write_text(
         TRUSTED_MANIFEST.format(content_hash=content)
@@ -440,6 +550,7 @@ def test_extra_packs_enable_cross_pack_interaction_trials(tmp_path):
     (root / "scenario.py").write_text(
         'def main(rt):\n    rt.run_goal("cross-pack trial")\n'
     )
+    _write_fixture_resource(root)
     annotator_manifest = MANIFEST_TEMPLATE.replace(
         'behaviors = ["greeter"]', 'behaviors = ["annotator"]'
     )
@@ -483,8 +594,20 @@ def test_extra_pack_bundle_mismatch_fails_materialization(tmp_path):
     # An extra pack is pinned exactly like the candidate: a wrong
     # bundle hash refuses the WHOLE trial before anything imports.
     path, parent_run, tip, n_parent = _parent_store(tmp_path)
-    trusted_root, _ = _trusted_dir(tmp_path)
-    root, bundle = _candidate_dir(tmp_path)
+    trusted_sentinel = tmp_path / "trusted-imported"
+    candidate_sentinel = tmp_path / "candidate-imported"
+    trusted_init = (
+        "from pathlib import Path\n"
+        f"Path({str(trusted_sentinel)!r}).write_text('imported')\n"
+        + TRUSTED_PACK_INIT
+    )
+    candidate_init = (
+        "from pathlib import Path\n"
+        f"Path({str(candidate_sentinel)!r}).write_text('imported')\n"
+        + PACK_INIT
+    )
+    trusted_root, _ = _trusted_dir(tmp_path, init=trusted_init)
+    root, bundle = _candidate_dir(tmp_path, init=candidate_init)
 
     report = run_forked_trial(
         path,
@@ -502,9 +625,18 @@ def test_extra_pack_bundle_mismatch_fails_materialization(tmp_path):
     assert report.outcome == "materialization_failed"
     assert "bundle hash mismatch" in report.detail
     assert report.events_appended == 0
+    assert not trusted_sentinel.exists()
+    assert not candidate_sentinel.exists()
     fork = Runtime.load(path, run_id=report.fork_run_id, behaviors=[])
     assert not [e for e in fork.graph.events if e.type == "pack.loaded"]
     _parent_untouched(path, parent_run, n_parent)
+
+
+def test_invalid_direct_bundle_pin_fails_before_execution(tmp_path):
+    sentinel = tmp_path / "candidate-imported"
+    with pytest.raises(ValueError, match="expected_bundle_hash"):
+        PackSource(root_dir="/candidate", expected_bundle_hash="")
+    assert not sentinel.exists()
 
 
 # ------------------- diagnosability + startup channel (v1.7 soak fix)
@@ -563,6 +695,67 @@ def test_preflight_fails_loud_with_the_cause_on_a_restricted_env():
     with pytest.raises(SandboxStartupError) as excinfo:
         sandbox._preflight_with(_bare_env(), python_flags=("-S",), timeout=30.0)
     assert "ModuleNotFoundError" in str(excinfo.value)
+
+
+def _raise_deterministic_startup_failure(monkeypatch):
+    def failed_child(job, *, env, wall_clock, python_flags=()):
+        assert job["preflight"] is True
+        return 17, "", "deterministic child import failure\n", False
+
+    monkeypatch.setattr(sandbox, "_run_child", failed_child)
+    return preflight(timeout=1.0)
+
+
+def test_preflight_startup_error_preserves_legacy_message_and_fields(monkeypatch):
+    message = (
+        "trial child could not start (exit 17): "
+        "deterministic child import failure"
+    )
+    with pytest.raises(SandboxStartupError) as excinfo:
+        _raise_deterministic_startup_failure(monkeypatch)
+
+    err = excinfo.value
+    assert isinstance(err, SandboxStartupError)
+    assert isinstance(err, ConfigurationError)
+    assert isinstance(err, ActiveGraphError)
+    assert isinstance(err, RuntimeError)
+    assert str(err) == message
+    assert err.args == (message,)
+    assert err.what_failed == ""
+    assert err.why == ""
+    assert err.how_to_fix == ""
+    assert err.context == {}
+    assert err.is_structured() is False
+    assert err.doc_url == (
+        "https://docs.activegraph.ai/errors/sandbox-startup-error"
+    )
+
+
+def test_preflight_startup_error_remains_catchable_as_runtime_error(monkeypatch):
+    try:
+        _raise_deterministic_startup_failure(monkeypatch)
+    except RuntimeError as err:
+        assert type(err) is SandboxStartupError
+    else:
+        pytest.fail("SandboxStartupError was not caught as RuntimeError")
+
+
+def test_preflight_startup_error_is_catchable_as_configuration_error(monkeypatch):
+    try:
+        _raise_deterministic_startup_failure(monkeypatch)
+    except ConfigurationError as err:
+        assert type(err) is SandboxStartupError
+    else:
+        pytest.fail("SandboxStartupError was not caught as ConfigurationError")
+
+
+def test_preflight_startup_error_is_catchable_as_activegraph_error(monkeypatch):
+    try:
+        _raise_deterministic_startup_failure(monkeypatch)
+    except ActiveGraphError as err:
+        assert type(err) is SandboxStartupError
+    else:
+        pytest.fail("SandboxStartupError was not caught as ActiveGraphError")
 
 
 def test_explicit_code_channel_rescues_a_restricted_child():

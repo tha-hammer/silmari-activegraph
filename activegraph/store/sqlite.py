@@ -44,10 +44,12 @@ are file-level helpers.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from typing import Any, Iterator, Optional
 
 from activegraph.core.event import Event
 from activegraph.store.base import RunRecord
+from activegraph.store.errors import _duplicate_event_error
 from activegraph.store.serde import decode_event, encode_event
 
 
@@ -198,6 +200,122 @@ def _row_to_run(row: sqlite3.Row) -> RunRecord:
     )
 
 
+class SQLiteMigrationBackend:
+    """One URL-owned SQLite migration session."""
+
+    def __init__(self, path: str) -> None:
+        self._conn: sqlite3.Connection | None = sqlite3.connect(
+            path, isolation_level=None
+        )
+        self._conn.row_factory = sqlite3.Row
+        _ensure_schema(self._conn)
+
+    def _connection(self) -> sqlite3.Connection:
+        if self._conn is None:
+            raise RuntimeError("SQLite migration backend is closed")
+        return self._conn
+
+    def list_runs(self) -> list[RunRecord]:
+        rows = self._connection().execute(
+            "SELECT * FROM runs ORDER BY created_at"
+        ).fetchall()
+        return [_row_to_run(row) for row in rows]
+
+    def iter_run(self, run_id: str) -> Iterator[Any]:
+        from activegraph.store.migration import CorruptMigrationEvent
+
+        cursor = self._connection().execute(
+            "SELECT * FROM events WHERE run_id = ? ORDER BY seq", (run_id,)
+        )
+        try:
+            for row in cursor:
+                try:
+                    yield _row_to_event(row)
+                except Exception as exc:
+                    from activegraph.store.errors import CorruptedEventPayloadError
+
+                    if not isinstance(exc, CorruptedEventPayloadError):
+                        raise
+                    yield CorruptMigrationEvent(str(row["id"]), exc)
+        finally:
+            cursor.close()
+
+    def write_run_transactionally(
+        self, record: RunRecord, events: Sequence[Event]
+    ) -> int:
+        from activegraph.store import serde
+
+        conn = self._connection()
+        inserted = 0
+        try:
+            conn.execute("BEGIN")
+            conn.execute(
+                """
+                INSERT INTO runs
+                    (run_id, parent_run_id, forked_at_event_id, label,
+                     created_at, goal, frame_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO NOTHING
+                """,
+                (
+                    record.run_id,
+                    record.parent_run_id,
+                    record.forked_at_event_id,
+                    record.label,
+                    record.created_at,
+                    record.goal,
+                    record.frame_id,
+                ),
+            )
+            for event in events:
+                row = serde.encode_event(event)
+                cursor = conn.execute(
+                    """
+                    INSERT INTO events
+                        (id, type, actor, payload, frame_id, caused_by,
+                         timestamp, run_id)
+                    VALUES
+                        (:id, :type, :actor, :payload, :frame_id, :caused_by,
+                         :timestamp, :run_id)
+                    ON CONFLICT(id, run_id) DO NOTHING
+                    """,
+                    {**row, "run_id": record.run_id},
+                )
+                if cursor.rowcount > 0:
+                    inserted += 1
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return inserted
+
+    def close(self) -> None:
+        conn = self._conn
+        if conn is not None:
+            conn.close()
+            self._conn = None
+
+
+class SQLiteMigrationBackendProvider:
+    """Migration provider for ``sqlite`` URLs."""
+
+    schemes = ("sqlite",)
+    capabilities = frozenset({"read", "write"})
+
+    def validate_url(self, url: str) -> None:
+        from activegraph.store.url import parse_store_url
+
+        parsed = parse_store_url(url)
+        if parsed.scheme != "sqlite":
+            raise ValueError("SQLite migration provider requires sqlite:// URL")
+
+    def open(self, url: str) -> SQLiteMigrationBackend:
+        from activegraph.store.url import parse_store_url
+
+        parsed = parse_store_url(url)
+        return SQLiteMigrationBackend(parsed.sqlite_path or "")
+
+
 class SQLiteEventStore:
     """Per-run view onto a SQLite-backed event log.
 
@@ -232,13 +350,18 @@ class SQLiteEventStore:
 
     def append(self, event: Event) -> None:
         row = encode_event(event)
-        self._conn.execute(
+        cursor = self._conn.execute(
             """
             INSERT INTO events (id, type, actor, payload, frame_id, caused_by, timestamp, run_id)
             VALUES (:id, :type, :actor, :payload, :frame_id, :caused_by, :timestamp, :run_id)
+            ON CONFLICT(id, run_id) DO NOTHING
             """,
             {**row, "run_id": self.run_id},
         )
+        if cursor.rowcount == 0:
+            raise _duplicate_event_error(
+                event_id=event.id, run_id=self.run_id, backend="sqlite"
+            )
 
     def iter_events(
         self,
@@ -476,12 +599,15 @@ class SQLiteEventStore:
         """Copy events from parent_run_id up to and including at_event_id
         into new_run_id (CONTRACT v0.5 #11: copy rows, no row-sharing).
 
-        Returns the number of events copied.
+        Destination metadata and the complete ordered prefix commit in one
+        transaction. Returns the number of events copied.
         """
         conn = sqlite3.connect(path, isolation_level=None)
         conn.row_factory = sqlite3.Row
-        _ensure_schema(conn)
+        primary_error: BaseException | None = None
         try:
+            _ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
             cut = conn.execute(
                 "SELECT seq FROM events WHERE id = ? AND run_id = ?",
                 (at_event_id, parent_run_id),
@@ -571,29 +697,31 @@ class SQLiteEventStore:
                 ),
             )
             # Same logical event ids; UNIQUE(id, run_id) makes that safe.
-            rows = conn.execute(
-                "SELECT * FROM events WHERE run_id = ? AND seq <= ? ORDER BY seq",
-                (parent_run_id, cut["seq"]),
-            ).fetchall()
-            n = 0
-            for r in rows:
-                conn.execute(
-                    """
-                    INSERT INTO events (id, type, actor, payload, frame_id, caused_by, timestamp, run_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        r["id"],
-                        r["type"],
-                        r["actor"],
-                        r["payload"],
-                        r["frame_id"],
-                        r["caused_by"],
-                        r["timestamp"],
-                        new_run_id,
-                    ),
-                )
-                n += 1
+            conn.execute(
+                """
+                INSERT INTO events
+                    (id, type, actor, payload, frame_id, caused_by, timestamp, run_id)
+                SELECT id, type, actor, payload, frame_id, caused_by, timestamp, ?
+                FROM events
+                WHERE run_id = ? AND seq <= ?
+                ORDER BY seq
+                """,
+                (new_run_id, parent_run_id, cut["seq"]),
+            )
+            n = int(conn.execute("SELECT changes()").fetchone()[0])
+            conn.execute("COMMIT")
             return n
+        except BaseException as exc:
+            primary_error = exc
+            if conn.in_transaction:
+                try:
+                    conn.execute("ROLLBACK")
+                except BaseException:
+                    pass
+            raise
         finally:
-            conn.close()
+            try:
+                conn.close()
+            except BaseException:
+                if primary_error is None:
+                    raise

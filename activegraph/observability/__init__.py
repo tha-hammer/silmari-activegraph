@@ -27,9 +27,18 @@ from activegraph.observability.metrics import (
     NoOpMetrics,
 )
 from activegraph.observability.migration import (
+    BackendRegistration,
+    CorruptMigrationEvent,
+    MigrationBackend,
+    MigrationBackendProvider,
+    MigrationCapability,
+    MigrationItem,
     MigrationReport,
     MigrationRunReport,
+    clear_migration_backend_cache,
     migrate,
+    register_migration_backend,
+    resolve_migration_backend,
 )
 from activegraph.observability.otel import OpenTelemetryMetrics
 from activegraph.observability.prometheus import PrometheusMetrics
@@ -44,12 +53,18 @@ from activegraph.observability.status import (
 
 __all__ = [
     "BehaviorInfo",
+    "BackendRegistration",
     "BudgetSnapshot",
     "EventSummary",
     "FrameSnapshot",
     "LOG_FIELDS",
     "METRIC_NAMES",
     "Metrics",
+    "CorruptMigrationEvent",
+    "MigrationBackend",
+    "MigrationBackendProvider",
+    "MigrationCapability",
+    "MigrationItem",
     "MigrationReport",
     "MigrationRunReport",
     "NoOpMetrics",
@@ -57,8 +72,11 @@ __all__ = [
     "PrometheusMetrics",
     "RuntimeStatus",
     "configure_logging",
+    "clear_migration_backend_cache",
     "get_logger",
     "migrate",
+    "register_migration_backend",
+    "resolve_migration_backend",
     "runtime_log_extra",
     "status_to_dict",
 ]

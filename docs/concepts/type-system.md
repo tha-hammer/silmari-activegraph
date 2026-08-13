@@ -300,7 +300,7 @@ being useful. Verbs that read naturally in the call site
 
 **Keep the vocabulary small.** Eight to fifteen object types
 covers most domains. The Diligence pack ships eight object types
-and six relation types and is intentionally on the small end of
+and seven relation types and is intentionally on the small end of
 that range — packs that try to model everything tend to model
 nothing. New types earn their place when an actual behavior or
 query needs to distinguish them; future-proofing with speculative
@@ -334,13 +334,14 @@ Eight object types (`activegraph/packs/diligence/object_types.py`):
 | `risk`          | A material risk identified during diligence.        |
 | `memo`          | The final diligence memo for a company.             |
 
-Six relation types:
+Seven relation types:
 
 | Type           | Endpoints (source → target)             | Meaning                                       |
 |----------------|-----------------------------------------|-----------------------------------------------|
 | `addresses`    | `claim` → `question`                    | A claim addresses a research question.        |
 | `supports`     | `evidence` → `claim`                    | Evidence supports a claim.                    |
 | `contradicts`  | `claim` → `claim`                       | Two claims are in conflict.                   |
+| `has_contradiction` | `claim` → `contradiction`          | A claim participates in a contradiction review item. |
 | `references`   | `{claim, memo}` → `document`            | A claim or memo references a source document. |
 | `derived_from` | `{claim, evidence}` → `document`        | Provenance back to a source document.         |
 | `mitigates`    | `{evidence, claim}` → `risk`            | Evidence or a claim mitigates a risk.         |
@@ -351,6 +352,11 @@ they form a small graph ontology that a small set of behaviors
 (claim extractor, contradiction detector, memo synthesizer)
 operates on. None of these types are special to the framework;
 load a different pack and you get a different ontology.
+
+Each detected contradiction gets exactly two `has_contradiction` relations,
+one from each stored claim id. Because `Graph.neighborhood()` traversal is
+undirected, an operator starting from either claim reaches the shared review
+item at depth 1.
 
 The Diligence pack is the [reference pack](../reference/api/packs/diligence.md);
 [`authoring-packs`](../guides/authoring-packs.md) is the how-to for

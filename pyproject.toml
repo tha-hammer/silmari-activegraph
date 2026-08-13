@@ -25,7 +25,7 @@ classifiers = [
 # Pydantic is required for the pack format (object type schemas and
 # settings models). It was optional in v0.8 (LLM-only); v0.9 pulls it
 # into the hard deps so packs Just Work.
-dependencies = ["click>=8,<9", "pydantic>=2"]
+dependencies = ["click>=8,<9", "packaging>=24", "pydantic>=2"]
 
 [project.optional-dependencies]
 # v1.0.1 #5: the [llm] extra carries every shipped provider's SDK so a
@@ -193,7 +193,7 @@ exclude = ["tests*", "examples*"]
 # the gate fails before the wheel can ship.
 
 [tool.setuptools.package-data]
-"activegraph.packs.diligence" = ["prompts/*.md"]
+"activegraph.packs.diligence" = ["manifest.toml", "prompts/*.md"]
 
 [tool.pytest.ini_options]
 markers = [
@@ -243,6 +243,7 @@ ignore_missing_imports = true
 # rest.
 files = [
     "activegraph/behaviors/base.py",
+    "activegraph/behaviors/_factory.py",
     "activegraph/behaviors/decorators.py",
     "activegraph/core/clock.py",
     "activegraph/core/event.py",
@@ -254,9 +255,11 @@ files = [
     "activegraph/errors.py",
     "activegraph/frame.py",
     "activegraph/packs/__init__.py",
+    "activegraph/packs/validation.py",
     "activegraph/packs/diligence/settings.py",
     "activegraph/llm/embedding_cache.py",
     "activegraph/llm/errors.py",
+    "activegraph/llm/prompt_identity.py",
     "activegraph/observability/logging.py",
     "activegraph/observability/migration.py",
     "activegraph/observability/metrics.py",
@@ -289,11 +292,13 @@ files = [
     "activegraph/store/errors.py",
     "activegraph/store/falkordb.py",
     "activegraph/store/memory.py",
+    "activegraph/store/migration.py",
     "activegraph/store/serde.py",
     "activegraph/store/sqlite.py",
     "activegraph/store/url.py",
     "activegraph/tools/base.py",
     "activegraph/tools/context.py",
+    "activegraph/tools/_factory.py",
     "activegraph/tools/decorators.py",
     "activegraph/tools/errors.py",
 ]
@@ -304,6 +309,7 @@ files = [
 [[tool.mypy.overrides]]
 module = [
     "activegraph.behaviors.base",
+    "activegraph.behaviors._factory",
     "activegraph.behaviors.decorators",
     "activegraph.core.clock",
     "activegraph.core.event",
@@ -315,9 +321,11 @@ module = [
     "activegraph.errors",
     "activegraph.frame",
     "activegraph.packs",
+    "activegraph.packs.validation",
     "activegraph.packs.diligence.settings",
     "activegraph.llm.embedding_cache",
     "activegraph.llm.errors",
+    "activegraph.llm.prompt_identity",
     "activegraph.observability.logging",
     "activegraph.observability.migration",
     "activegraph.observability.metrics",
@@ -350,11 +358,13 @@ module = [
     "activegraph.store.errors",
     "activegraph.store.falkordb",
     "activegraph.store.memory",
+    "activegraph.store.migration",
     "activegraph.store.serde",
     "activegraph.store.sqlite",
     "activegraph.store.url",
     "activegraph.tools.base",
     "activegraph.tools.context",
+    "activegraph.tools._factory",
     "activegraph.tools.decorators",
     "activegraph.tools.errors",
 ]

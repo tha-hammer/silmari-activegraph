@@ -65,7 +65,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from activegraph.core.graph import Object, Relation
 from activegraph.core.graph_store import ChainMatch, GraphStore
@@ -138,6 +138,33 @@ def _resolve_connection(
     return None
 
 
+_INDEX_DEFINITIONS = (
+    ("CREATE INDEX FOR (n:AGNode) ON (n.id)", "id"),
+    ("CREATE INDEX FOR (n:AGObject) ON (n.id)", "id"),
+    ("CREATE INDEX FOR ()-[r:AGRelation]->() ON (r.id)", "id"),
+    ("CREATE INDEX FOR ()-[r:AGRelation]->() ON (r.type)", "type"),
+    ("CREATE INDEX FOR (n:AGPatch) ON (n.id)", "id"),
+)
+
+
+def _response_error_type() -> type[Exception]:
+    """Resolve Redis' server-response error lazily for optional installs."""
+    from redis.exceptions import ResponseError
+
+    return cast(type[Exception], ResponseError)
+
+
+def _is_duplicate_index_error(error: Exception, expected_property: str) -> bool:
+    """Match the verified FalkorDB duplicate-index response contract."""
+    try:
+        response_error = _response_error_type()
+    except Exception:
+        return False
+    return isinstance(error, response_error) and str(error) == (
+        f"Attribute '{expected_property}' is already indexed"
+    )
+
+
 class FalkorDBGraphStore(GraphStore):
     """A :class:`GraphStore` backed by a FalkorDB graph.
 
@@ -186,6 +213,7 @@ class FalkorDBGraphStore(GraphStore):
         self._owns_db = False
         if graph is not None:
             self._g = graph
+            self._ensure_indexes()
         else:
             conn = _resolve_connection(url, host, port, username, password)
             if conn is not None:
@@ -203,8 +231,17 @@ class FalkorDBGraphStore(GraphStore):
                 FalkorDB = _require_falkordblite()
                 self._db = FalkorDB(path) if path is not None else FalkorDB()
             self._owns_db = True
-            self._g = self._db.select_graph(graph_name)
-        self._ensure_indexes()
+            try:
+                self._g = self._db.select_graph(graph_name)
+                self._ensure_indexes()
+            except BaseException:
+                close = getattr(self._db, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except BaseException:
+                        pass
+                raise
 
     # ---- schema ----
 
@@ -215,18 +252,13 @@ class FalkorDBGraphStore(GraphStore):
         # ``AGNode(id)``; objects additionally by ``AGObject(id)``; relations
         # are native edges indexed by ``AGRelation(id)`` (lookup) and
         # ``AGRelation(type)`` (kind filtering).
-        statements = (
-            "CREATE INDEX FOR (n:AGNode) ON (n.id)",
-            "CREATE INDEX FOR (n:AGObject) ON (n.id)",
-            "CREATE INDEX FOR ()-[r:AGRelation]->() ON (r.id)",
-            "CREATE INDEX FOR ()-[r:AGRelation]->() ON (r.type)",
-            "CREATE INDEX FOR (n:AGPatch) ON (n.id)",
-        )
-        for stmt in statements:
+        for statement, expected_property in _INDEX_DEFINITIONS:
             try:
-                self._g.query(stmt)
-            except Exception:  # noqa: BLE001 — index-exists is the only expected case
-                pass
+                self._g.query(statement)
+            except Exception as error:
+                if _is_duplicate_index_error(error, expected_property):
+                    continue
+                raise
 
     # ---- objects ----
 

@@ -66,11 +66,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+from activegraph.errors import ConfigurationError
 
 _log = logging.getLogger("activegraph.sandbox")
 
@@ -111,8 +114,16 @@ class PackSource:
     """
 
     root_dir: str
-    expected_bundle_hash: str = ""
+    expected_bundle_hash: str
     manifest_required: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.expected_bundle_hash, str) or re.fullmatch(
+            r"sha256:[0-9a-f]{64}", self.expected_bundle_hash
+        ) is None:
+            raise ValueError(
+                "expected_bundle_hash must match sha256:[0-9a-f]{64}"
+            )
 
 
 @dataclass(frozen=True)
@@ -169,7 +180,7 @@ class TrialReport:
     warnings: tuple[str, ...] = ()
 
 
-class SandboxStartupError(RuntimeError):
+class SandboxStartupError(ConfigurationError, RuntimeError):
     """A trial child could not START under the sandbox env.
 
     Raised by :func:`preflight` when the child fails before it can run
@@ -178,6 +189,8 @@ class SandboxStartupError(RuntimeError):
     the explicit package-path channel exists to prevent). The message
     carries the child's stderr tail so the cause is never opaque.
     """
+
+    _doc_slug = "sandbox-startup-error"
 
 
 def _child_code_paths() -> list[str]:

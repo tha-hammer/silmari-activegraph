@@ -9,7 +9,8 @@ from activegraph import (
     behavior,
     relation_behavior,
 )
-from activegraph.runtime.diff import Diff, DivergentObject
+from activegraph.core.event import Event
+from activegraph.runtime.diff import Diff, DivergentObject, compute_diff
 
 
 def _tmp_db(tmp_path):
@@ -110,6 +111,47 @@ def test_diff_partition_of_events_after_divergence(tmp_path):
         assert not e.type.startswith("behavior.")
         assert not e.type.startswith("relation_behavior.")
         assert not e.type.startswith("runtime.")
+
+
+def test_diff_excludes_only_structural_event_families() -> None:
+    parent = Graph()
+    fork = Graph()
+    event_types = [
+        "behavior.started",
+        "relation_behavior.completed",
+        "runtime.idle",
+        "llm.requested",
+        "tool.responded",
+        "pattern.matched",
+        "approval.proposed",
+        "embedding.requested",
+        "dev.override",
+        "authority.decision",
+        "context.read",
+        "context.foo",
+        "pack.loaded",
+        "goal.created",
+        "object.created",
+        "custom.event",
+        "runtimeish.event",
+    ]
+    for index, event_type in enumerate(event_types):
+        payload = {}
+        if event_type == "object.created":
+            payload = {
+                "object": {
+                    "id": "probe#1",
+                    "type": "probe",
+                    "data": {},
+                    "version": 1,
+                    "provenance": {},
+                }
+            }
+        fork.emit(Event(id=f"evt_{index}", type=event_type, payload=payload))
+
+    diff = compute_diff(parent, fork, "parent", "fork")
+
+    assert [event.type for event in diff.fork_only_events] == event_types[3:]
 
 
 def test_diff_same_logical_event_id_different_payload_is_not_shared(tmp_path):

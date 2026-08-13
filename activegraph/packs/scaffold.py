@@ -13,8 +13,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from activegraph.packs.manifest import compute_content_hash
+from activegraph.packs.validation import validate_pack_name
 
-_PACK_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+
+_DISTRIBUTION_SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
 
 def normalize_pack_name(raw: str) -> tuple[str, str]:
@@ -26,11 +29,14 @@ def normalize_pack_name(raw: str) -> tuple[str, str]:
     - lowercases and validates.
     """
     name = raw.strip().lower()
-    if not _PACK_NAME_RE.match(name):
+    if _DISTRIBUTION_SLUG_RE.fullmatch(name) is None:
         raise ValueError(
-            f"pack name {raw!r} must match [a-z][a-z0-9-]* (lowercase, ASCII)"
+            f"distribution slug {raw!r} must match "
+            f"[a-z][a-z0-9-]{{0,63}} (1–64 lowercase ASCII characters)"
         )
-    return name, name.replace("-", "_")
+    module_name = name.replace("-", "_")
+    validate_pack_name(module_name, field="normalized Pack.name")
+    return name, module_name
 
 
 def scaffold_pack(target_dir: Path, raw_name: str) -> Path:
@@ -44,6 +50,7 @@ def scaffold_pack(target_dir: Path, raw_name: str) -> Path:
         raise FileExistsError(f"{root} already exists")
     root.mkdir(parents=True)
     (root / module_name).mkdir()
+    (root / module_name / "fixtures").mkdir()
     (root / module_name / "prompts").mkdir()
     (root / "tests").mkdir()
 
@@ -61,6 +68,7 @@ def scaffold_pack(target_dir: Path, raw_name: str) -> Path:
         root / module_name / "settings.py": _SETTINGS_TEMPLATE.format(
             pack_name_title=_title(module_name)
         ),
+        root / module_name / "fixtures" / "__init__.py": _FIXTURE_TEMPLATE,
         root / module_name / "prompts" / "example_prompt.md": _PROMPT_TEMPLATE,
         root / "tests" / "test_pack_loads.py": _SMOKE_TEST_TEMPLATE.format(
             module_name=module_name, pack_name=pack_name
@@ -68,6 +76,15 @@ def scaffold_pack(target_dir: Path, raw_name: str) -> Path:
     }
     for path, content in files.items():
         path.write_text(content, encoding="utf-8")
+    content_hash = compute_content_hash(root / module_name)
+    (root / module_name / "manifest.toml").write_text(
+        _MANIFEST_TEMPLATE.format(
+            module_name=module_name,
+            pack_name_title=_title(module_name),
+            content_hash=content_hash,
+        ),
+        encoding="utf-8",
+    )
     return root
 
 
@@ -91,6 +108,9 @@ dependencies = ["activegraph>=0.9", "pydantic>=2"]
 
 [tool.setuptools.packages.find]
 include = ["{module_name}*"]
+
+[tool.setuptools.package-data]
+"{module_name}" = ["manifest.toml", "prompts/*.md"]
 """
 
 
@@ -124,7 +144,7 @@ pytest
 ```
 
 Pack authoring guide:
-<https://github.com/yoheinakajima/activegraph/blob/main/docs/pack_authoring.md>
+<https://github.com/yoheinakajima/activegraph/blob/main/docs/guides/authoring-packs.md>
 """
 
 
@@ -156,6 +176,7 @@ pack = Pack(
     tools=TOOLS,
     prompts=load_prompts_from_dir(_PROMPTS_DIR),
     settings_schema={pack_name_title}Settings,
+    manifest_path=Path(__file__).resolve().with_name("manifest.toml"),
 )
 
 
@@ -285,12 +306,70 @@ the hash changes, even if you forget to bump the declared version.
 """
 
 
+_FIXTURE_TEMPLATE = '''\
+"""Deterministic fixture resources for this pack."""
+'''
+
+
+_MANIFEST_TEMPLATE = '''\
+[pack]
+name = "{module_name}"
+version = "0.1.0"
+description = "An activegraph pack."
+license = ""
+
+[pack.provenance]
+authored_by = "agent"
+generator = "activegraph pack new"
+
+[pack.integrity]
+content_hash = "{content_hash}"
+
+[dependencies]
+activegraph = ">=0.9"
+python = ">=3.11"
+python-deps = ["pydantic>=2"]
+
+[dependencies.packs]
+
+[dependencies.optional-packs]
+
+[surface]
+object_types = ["item"]
+relation_types = []
+behaviors = ["hello"]
+tools = []
+settings_schema = "{pack_name_title}Settings"
+capabilities = []
+consumes = []
+
+[fixtures]
+entrypoint = "fixtures/__init__.py"
+deterministic = true
+'''
+
+
 _SMOKE_TEST_TEMPLATE = '''\
 """Smoke test: the pack imports without side effects and loads cleanly."""
 
 from __future__ import annotations
 
-from activegraph import Graph, Runtime, clear_registry, clear_tool_registry, get_registry, get_tool_registry
+import logging
+from pathlib import Path
+
+from activegraph import (
+    Graph,
+    Runtime,
+    clear_registry,
+    clear_tool_registry,
+    get_registry,
+    get_tool_registry,
+)
+from activegraph.packs.manifest import (
+    load_manifest,
+    verify_content_hash,
+    verify_surface,
+)
 
 
 def test_import_has_no_global_side_effects():
@@ -307,11 +386,22 @@ def test_import_has_no_global_side_effects():
     )
 
 
-def test_pack_loads_into_fresh_runtime():
+def test_pack_loads_into_fresh_runtime(caplog):
     from {module_name} import pack
-    rt = Runtime(Graph())
-    rt.load_pack(pack)
+    with caplog.at_level(logging.WARNING, logger="activegraph.packs.manifest"):
+        rt = Runtime(Graph())
+        rt.load_pack(pack)
     pack_loaded_events = [e for e in rt.graph.events if e.type == "pack.loaded"]
     assert len(pack_loaded_events) == 1
     assert pack_loaded_events[0].payload["name"] == "{module_name}"
+    assert not [
+        record for record in caplog.records
+        if record.name == "activegraph.packs.manifest"
+        and record.levelno >= logging.WARNING
+    ]
+
+    manifest_path = Path(pack.manifest_path)
+    manifest = load_manifest(manifest_path)
+    verify_surface(manifest, pack)
+    verify_content_hash(manifest, manifest_path.parent)
 '''

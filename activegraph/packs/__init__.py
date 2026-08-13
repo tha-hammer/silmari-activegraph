@@ -6,9 +6,9 @@ exposes:
 
 - The `Pack` dataclass (frozen, equality by (name, version)).
 - Pack-aware decorators: `@behavior`, `@llm_behavior`,
-  `@relation_behavior`, `@tool`. Identical signatures to the
-  decorators in `activegraph.*` except they DO NOT register
-  globally — a pack module is safe to import without a runtime.
+  `@relation_behavior`, `@tool`. They share construction semantics
+  with `activegraph.*` but attach pack metadata instead of registering
+  globally; pack `@tool` additionally exposes `export_globally`.
 - `ObjectType`, `RelationType`, `PackPolicy`, `PackPrompt` —
   the value objects that go into a `Pack`.
 - `EmptySettings` — Pydantic placeholder for packs with no
@@ -38,6 +38,7 @@ import hashlib
 import re
 import sys
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
@@ -60,9 +61,13 @@ from activegraph.behaviors.base import (
     Behavior,
     LLMBehavior,
     RelationBehavior,
+    ToolRef,
     _llm_behavior_fn_placeholder,
 )
+from activegraph.behaviors import _factory as behavior_factory
 from activegraph.tools.base import Tool
+from activegraph.tools import _factory as tool_factory
+from activegraph.packs.validation import validate_pack_name, validate_pack_version
 
 
 # ---------------------------------------------------------------- exceptions
@@ -147,12 +152,14 @@ class PackNotFoundError(RegistrationError, LookupError):
 
 
 class PackValidationError(RegistrationError, PackError):
-    """A `Pack(...)` constructor argument failed validation.
+    """A Pack declaration failed validation.
 
-    Raised at construction time, not at load time. Covers things like
-    duplicate behavior names, an invalid pack name, an unhashable
-    settings_schema, etc. Multi-inherits RegistrationError (v1.0 PR-E)
-    and PackError (v0.9 base).
+    Raised by ``Pack(...)`` and defensively by ``Runtime.load_pack()``
+    when mutable declarations changed after construction. Covers things
+    like duplicate behavior names, an invalid pack name, an unhashable
+    settings schema, or a behavior referencing a pack-local Tool that is
+    not the same object declared by that Pack. Multi-inherits
+    RegistrationError (v1.0 PR-E) and PackError (v0.9 base).
     """
 
     _doc_slug = "pack-validation-error"
@@ -433,8 +440,15 @@ class RelationType:
 class PackPolicy:
     """A policy declared by a pack.
 
-    `requires_approval`: tuple of object type names whose `add_object`
-    is gated until `runtime.approve(...)` is called.
+    ``requires_approval`` lists object types for which this policy supplies
+    pack-owner attribution when behavior code explicitly calls
+    ``Context.propose_object``. It does not intercept ``Graph.add_object``.
+
+    ``auto_apply`` is reserved compatibility metadata. List input is
+    normalized to a tuple, but neither the loader nor Runtime reads it. Its
+    values have no defined object-type, setting, exemption, or automatic grant
+    semantics. Contents deliberately receive no validation beyond the existing
+    sequence normalization.
     """
 
     name: str
@@ -546,9 +560,6 @@ def _load_one_prompt(path: Path) -> PackPrompt:
 # ----------------------------------------------------- the Pack itself
 
 
-_PACK_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
-
-
 @dataclass(frozen=True, eq=False)
 class Pack:
     """A frozen bundle of pack contents.
@@ -558,6 +569,12 @@ class Pack:
     full structural equality would not work and isn't what users
     care about. The identity that matters is "is this the same pack
     name and version" — that's what idempotent loading hinges on.
+
+    ``capabilities`` is the declarative, auditable half of a host-owned
+    gateway integration. ``Pack`` validates entry type, closed risk/action
+    classes, and pair uniqueness; manifest verification checks the declaration
+    two ways. Loading records it but never registers a gateway or resolves a
+    credential.
     """
 
     name: str
@@ -574,12 +591,18 @@ class Pack:
     # (manifest spec Q8). Entries are CapabilityDecl instances from
     # activegraph.packs.manifest. The runtime never registers these —
     # registration stays imperative host wiring — but the declaration
-    # is loader-introspectable: verify_surface two-way checks it
-    # against the manifest, and load_pack records it in the
-    # pack.loaded payload so decision surfaces read a pack's declared
-    # outbound reach from the graph. The gateway-side check ("did the
-    # registering pack declare this?") is downstream's half.
+    # is loader-introspectable: verify_surface two-way checks identity,
+    # risk_class, and action_class against the manifest, and load_pack
+    # records it in the pack.loaded payload so decision surfaces read a
+    # pack's declared outbound reach from the graph. The gateway-side
+    # registration/credential check is downstream's half. Construction
+    # deliberately does not require non-empty provider/capability/
+    # credential_ref strings; it validates entry type, closed classes,
+    # and (provider, capability) uniqueness only.
     capabilities: tuple[Any, ...] = ()
+    # Optional exact manifest locator.  It remains metadata only: Pack
+    # identity and hashing stay exactly (name, version).
+    manifest_path: Path | None = None
 
     def __post_init__(self) -> None:
         # list → tuple conversion (frozen requires object.__setattr__)
@@ -589,12 +612,24 @@ class Pack:
                 object.__setattr__(self, f, tuple(v))
 
         # name shape
-        if not isinstance(self.name, str) or not _PACK_NAME_RE.match(self.name):
-            raise PackValidationError(
-                f"Pack.name must match [a-z][a-z0-9_]*, got {self.name!r}"
-            )
-        if not isinstance(self.version, str) or not self.version:
-            raise PackValidationError(f"Pack.version must be non-empty str, got {self.version!r}")
+        try:
+            validate_pack_name(self.name, field="Pack.name")
+        except ValueError as exc:
+            raise PackValidationError(str(exc)) from exc
+        try:
+            validate_pack_version(self.version, field="Pack.version")
+        except ValueError as exc:
+            raise PackValidationError(str(exc)) from exc
+
+        if self.manifest_path is not None:
+            if not isinstance(self.manifest_path, Path):
+                raise PackValidationError(
+                    f"Pack {self.name!r}: manifest_path must be a pathlib.Path or None"
+                )
+            if not self.manifest_path.is_absolute():
+                raise PackValidationError(
+                    f"Pack {self.name!r}: manifest_path must be absolute"
+                )
 
         # settings_schema shape
         if not (isinstance(self.settings_schema, type) and issubclass(self.settings_schema, BaseModel)):
@@ -634,6 +669,7 @@ class Pack:
                     f"Pack {self.name!r}: tool {t.name!r} was not declared via "
                     f"activegraph.packs.tool (use activegraph.packs.tool, not activegraph.tool)"
                 )
+        _validate_pack_tool_membership(self)
 
         # v1.4: capabilities are CapabilityDecl entries with a valid
         # risk class; (provider, capability) pairs unique within the
@@ -704,14 +740,32 @@ def _check_unique(names: list[str], kind: str, pack_name: str) -> None:
         seen.add(n)
 
 
+def _validate_pack_tool_membership(pack: Pack) -> None:
+    """Reject foreign pack-local Tool objects by identity.
+
+    Pack and behavior containers are intentionally shallow/mutable, so
+    the loader calls this again before touching Runtime state.
+    """
+    declared = tuple(pack.tools)
+    for behavior_obj in pack.behaviors:
+        if not isinstance(behavior_obj, LLMBehavior):
+            continue
+        for ref in behavior_obj.tools:
+            if not isinstance(ref, Tool) or not getattr(ref, "_pack_local", False):
+                continue
+            if any(ref is tool_obj for tool_obj in declared):
+                continue
+            raise PackValidationError(
+                f"Pack {pack.name!r}: LLM behavior {behavior_obj.name!r} "
+                f"references pack-local tool {ref.name!r}, but that Tool "
+                f"is not the same object as a tool declared by the same Pack"
+            )
+
+
 # ----------------------------------------------------- pack-aware decorators
 #
-# Identical signatures to the activegraph.* decorators; the ONLY
-# difference is `_REGISTRY.append(...)` is skipped — packs collect
-# their behaviors explicitly via `Pack(behaviors=[...])`, so global
-# registration would be a bug. Each returned Behavior / Tool object
-# carries `_pack_local = True` so the Pack constructor can verify
-# the right decorator was used (CONTRACT v0.9 #3).
+# Construction semantics are shared with activegraph.* decorators. Packs apply
+# pack-local metadata instead of global registration/live-runtime validation.
 
 
 def behavior(
@@ -726,41 +780,25 @@ def behavior(
     pattern: Optional[str] = None,
     activate_after: Any = None,
 ) -> Callable[[Callable[..., None]], Behavior]:
-    """Pack-aware `@behavior`. Does not register globally."""
+    """Pack-aware `@behavior`. Does not register globally.
 
-    from activegraph.runtime.patterns import parse as _parse_pattern
-    from activegraph.runtime.scheduler import parse_activate_after as _parse_aa
+    ``priority`` is reserved metadata; dispatch remains registration-ordered.
+    """
 
-    compiled_matcher = None
-    if pattern is not None:
-        compiled_matcher = _parse_pattern(pattern).compile()
-    delay_n: Optional[int] = None
-    if activate_after is not None:
-        delay_n = _parse_aa(activate_after)
+    bind = behavior_factory.build_behavior(
+        name=name,
+        on=on,
+        where=where,
+        view=view,
+        creates=creates,
+        budget=budget,
+        priority=priority,
+        pattern=pattern,
+        activate_after=activate_after,
+    )
 
     def wrap(fn: Callable[..., None]) -> Behavior:
-        # v1.3: arity check at decoration time (see activegraph/_signature.py).
-        from activegraph._signature import validate_handler_signature
-
-        validate_handler_signature(
-            fn,
-            expected_params=("event", "graph", "ctx"),
-            decorator="@behavior",
-            allow_annotated_extras=True,
-        )
-        b = Behavior(
-            name=name or fn.__name__,
-            fn=fn,
-            on=list(on or []),
-            where=dict(where) if where else None,
-            view_spec=dict(view) if view else None,
-            creates=list(creates or []),
-            budget=dict(budget) if budget else None,
-            priority=priority,
-            pattern=pattern,
-            pattern_matcher=compiled_matcher,
-            activate_after=delay_n,
-        )
+        b = bind(fn)
         b._pack_local = True  # type: ignore[attr-defined]
         # Attach metadata to the underlying function so packs can inspect
         # without instantiating a runtime.
@@ -781,7 +819,7 @@ def llm_behavior(
     on: Optional[list[str]] = None,
     where: Optional[dict[str, Any]] = None,
     description: str = "",
-    model: str = "claude-sonnet-4-5",
+    model: Optional[str] = None,
     output_schema: Optional[type] = None,
     view: Optional[dict[str, Any]] = None,
     creates: Optional[list[str]] = None,
@@ -795,56 +833,39 @@ def llm_behavior(
     priority: int = 0,
     pattern: Optional[str] = None,
     activate_after: Any = None,
-    tools: Optional[list[Any]] = None,
+    tools: Optional[list[ToolRef]] = None,
     max_tool_turns: int = 6,
 ) -> Callable[[Callable[..., None]], LLMBehavior]:
-    """Pack-aware `@llm_behavior`. Does not register globally."""
+    """Pack-aware `@llm_behavior`. Does not register globally.
 
-    from activegraph.runtime.patterns import parse as _parse_pattern
-    from activegraph.runtime.scheduler import parse_activate_after as _parse_aa
+    ``priority`` is reserved metadata; dispatch remains registration-ordered.
+    """
 
-    compiled_matcher = None
-    if pattern is not None:
-        compiled_matcher = _parse_pattern(pattern).compile()
-    delay_n: Optional[int] = None
-    if activate_after is not None:
-        delay_n = _parse_aa(activate_after)
+    bind = behavior_factory.build_llm_behavior(
+        name=name,
+        on=on,
+        where=where,
+        description=description,
+        model=model,
+        output_schema=output_schema,
+        view=view,
+        creates=creates,
+        budget=budget,
+        deterministic=deterministic,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        timeout_seconds=timeout_seconds,
+        prompt_template=prompt_template,
+        priority=priority,
+        pattern=pattern,
+        activate_after=activate_after,
+        tools=tools,
+        max_tool_turns=max_tool_turns,
+    )
 
     def wrap(fn: Callable[..., None]) -> LLMBehavior:
-        # v1.3: arity check at decoration time (see activegraph/_signature.py).
-        from activegraph._signature import validate_handler_signature
-
-        validate_handler_signature(
-            fn,
-            expected_params=("event", "graph", "ctx", "llm_output"),
-            decorator="@llm_behavior",
-            allow_annotated_extras=True,
-        )
-        b = LLMBehavior(
-            name=name or fn.__name__,
-            fn=_llm_behavior_fn_placeholder,
-            on=list(on or []),
-            where=dict(where) if where else None,
-            view_spec=dict(view) if view else None,
-            creates=list(creates or []),
-            budget=dict(budget) if budget else None,
-            priority=priority,
-            handler=fn,
-            description=description,
-            model=model,
-            output_schema=output_schema,
-            deterministic=deterministic,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            timeout_seconds=timeout_seconds,
-            prompt_template=prompt_template,
-            pattern=pattern,
-            pattern_matcher=compiled_matcher,
-            activate_after=delay_n,
-            tools=list(tools) if tools else [],
-            max_tool_turns=max_tool_turns,
-        )
+        b = bind(fn)
         b._pack_local = True  # type: ignore[attr-defined]
         fn.__pack_meta__ = {  # type: ignore[attr-defined]
             "kind": "llm_behavior",
@@ -871,42 +892,26 @@ def relation_behavior(
     pattern: Optional[str] = None,
     activate_after: Any = None,
 ) -> Callable[[Callable[..., None]], RelationBehavior]:
-    """Pack-aware `@relation_behavior`. Does not register globally."""
+    """Pack-aware `@relation_behavior`. Does not register globally.
 
-    from activegraph.runtime.patterns import parse as _parse_pattern
-    from activegraph.runtime.scheduler import parse_activate_after as _parse_aa
+    ``priority`` is reserved metadata; dispatch remains registration-ordered.
+    """
 
-    compiled_matcher = None
-    if pattern is not None:
-        compiled_matcher = _parse_pattern(pattern).compile()
-    delay_n: Optional[int] = None
-    if activate_after is not None:
-        delay_n = _parse_aa(activate_after)
+    bind = behavior_factory.build_relation_behavior(
+        relation_type,
+        on=on,
+        name=name,
+        where=where,
+        view=view,
+        creates=creates,
+        budget=budget,
+        priority=priority,
+        pattern=pattern,
+        activate_after=activate_after,
+    )
 
     def wrap(fn: Callable[..., None]) -> RelationBehavior:
-        # v1.3: arity check at decoration time (see activegraph/_signature.py).
-        from activegraph._signature import validate_handler_signature
-
-        validate_handler_signature(
-            fn,
-            expected_params=("relation", "event", "graph", "ctx"),
-            decorator="@relation_behavior",
-            allow_annotated_extras=True,
-        )
-        rb = RelationBehavior(
-            name=name or fn.__name__,
-            fn=fn,
-            relation_type=relation_type,
-            on=list(on or []),
-            where=dict(where) if where else None,
-            view_spec=dict(view) if view else None,
-            creates=list(creates or []),
-            budget=dict(budget) if budget else None,
-            priority=priority,
-            pattern=pattern,
-            pattern_matcher=compiled_matcher,
-            activate_after=delay_n,
-        )
+        rb = bind(fn)
         rb._pack_local = True  # type: ignore[attr-defined]
         fn.__pack_meta__ = {  # type: ignore[attr-defined]
             "kind": "relation_behavior",
@@ -924,7 +929,7 @@ def tool(
     description: str = "",
     input_schema: Optional[type] = None,
     output_schema: Optional[type] = None,
-    cost_per_call: Any = "0.0",
+    cost_per_call: Any = Decimal("0"),
     timeout_seconds: float = 30.0,
     deterministic: bool = False,
     export_globally: bool = False,
@@ -935,44 +940,25 @@ def tool(
     name (`{pack}.{name}`) AND the global short name. Default is
     pack-scoped only.
     """
-    from decimal import Decimal
+    bind = tool_factory.build_tool(
+        name=name,
+        description=description,
+        input_schema=input_schema,
+        output_schema=output_schema,
+        cost_per_call=cost_per_call,
+        timeout_seconds=timeout_seconds,
+        deterministic=deterministic,
+    )
 
     def wrap(fn: Callable[..., Any]) -> Tool:
-        # v1.3: arity check at decoration time, plus input_schema
-        # inference from the first parameter's Pydantic annotation when
-        # input_schema= is omitted (see activegraph/_signature.py).
-        from activegraph._signature import (
-            infer_tool_input_schema,
-            validate_handler_signature,
-        )
-
-        validate_handler_signature(
-            fn,
-            expected_params=("args", "ctx"),
-            decorator="@tool",
-            allow_annotated_extras=False,
-        )
-        t = Tool(
-            name=name or fn.__name__,
-            fn=fn,
-            description=description,
-            input_schema=(
-                input_schema
-                if input_schema is not None
-                else infer_tool_input_schema(fn)
-            ),
-            output_schema=output_schema,
-            cost_per_call=Decimal(str(cost_per_call)),
-            timeout_seconds=timeout_seconds,
-            deterministic=deterministic,
-        )
+        t = bind(fn)
         t._pack_local = True  # type: ignore[attr-defined]
         t._export_globally = bool(export_globally)  # type: ignore[attr-defined]
         fn.__pack_meta__ = {  # type: ignore[attr-defined]
             "kind": "tool",
             "name": t.name,
-            "deterministic": deterministic,
-            "export_globally": export_globally,
+            "deterministic": t.deterministic,
+            "export_globally": bool(export_globally),
         }
         return t
 
@@ -1084,15 +1070,15 @@ def load_by_name(name: str) -> Pack:
 
 # ----------------------------------------------------- approval primitives
 #
-# v0.9 ships a minimal approval surface so the diligence pack's
-# memo_approval / risk_approval policies have something to gate on.
+# v0.9 ships a minimal explicit approval surface used by the diligence pack's
+# memo_approval / risk_approval policies for proposal-owner attribution.
 # A pending approval is a value object held in the runtime; user
 # code (or a CLI subcommand) calls runtime.approve(id).
 
 
 @dataclass(frozen=True)
 class PendingApproval:
-    """An object creation that's gated behind a policy approval.
+    """An explicitly proposed object creation awaiting a decision.
 
     The `id` is unique within the runtime instance and is reused as
     the eventual object id once approved. `kind` is "object" in
@@ -1105,7 +1091,7 @@ class PendingApproval:
     object_type: str
     data: dict[str, Any]
     reason: str
-    pack: str  # the pack whose policy gated this
+    pack: str  # pack attributed by the first matching loaded policy, if any
 
 
 __all__ = [

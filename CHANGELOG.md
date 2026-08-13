@@ -15,7 +15,47 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
 
 ## [Unreleased]
 
+- Added the Diligence pack's seventh relation type,
+  `claim --has_contradiction--> contradiction`, with two edges per detected
+  contradiction so either claim reaches its review item at neighborhood depth
+  1. The historical v0.9 six-relation inventory below remains unchanged.
+- Moved canonical migration ownership to `activegraph.store.migration` and
+  added migration-only backend providers, explicit registration, lazy
+  `activegraph.migration_backends` discovery, capability preflight, and typed
+  resolution/cleanup errors. The observability import remains compatible.
+- Added deterministic `Runtime.close()` and context-manager sink ownership.
+  Closing delegates to the existing graph-wide sink lifecycle, preserves
+  ordinary timeout/partial-failure results as `False`, and rejects later
+  Runtime mutations with `RuntimeClosedError` while keeping inspection usable.
+
 ### Added
+
+- **Pack manifests are now shipped and scaffolded.** The bundled Diligence
+  pack and every `activegraph pack new` project include a package-data
+  `manifest.toml`, a real fixture resource, and direct surface/content-hash
+  verification. `Pack.manifest_path` provides an optional absolute, exact
+  locator for relation-only or componentless packs; legacy module discovery
+  remains available when it is omitted.
+
+- **Complete standard metric emission** (CONTRACT v1.11 #7). All 24
+  existing `METRIC_NAMES` now have executable public production paths with
+  unchanged names and tag keys: exact LLM/tool request, cache, response,
+  failure, and malformed-input semantics; every behavior kind; live queue,
+  finite Runtime-owned budget, pattern, sink, and strict-replay observations;
+  and bounded metric-only label fallbacks. Queue depth is local last-writer
+  state, direct Budget mutation is outside immediate freshness, and failed
+  activation/load creates no queue/budget gauge ghosts. Metrics do not change
+  graph event payloads or ordering.
+
+- **Explicit JSON-log payload redaction** (CONTRACT v1.11 #6). The
+  operator schema appends optional `payload` as its seventeenth field.
+  Explicit payloads supplied through `runtime_log_extra(payload=...)`
+  or direct stdlib `extra={"payload": ...}` are detached and redacted
+  exactly once by the JSON formatter installed by `configure_logging`.
+  Invalid inputs or callback results fail closed by omitting only that
+  field. Built-in event, LLM, tool, pack, and behavior-failure logs
+  remain payload-free; human logging, arbitrary operator handlers,
+  event persistence, and sinks are outside this formatter boundary.
 
 - **`ClaudeCodeProvider`** (CONTRACT v1.11 #1). A third `LLMProvider`,
   `activegraph/llm/claude_code.py`, backed by the Claude Agent SDK
@@ -69,6 +109,90 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
   the next behavior invocation is still blocked at the limit. Previously a
   limit of one was consumed before the first turn and the same invocation
   immediately failed as exhausted without calling the provider.
+
+### Changed
+
+- Runtime event scheduling now uses one purpose-specific event policy across
+  live dispatch, pattern-only matching, resume, diff, and strict replay.
+  `embedding.*` request/response records are newly treated like LLM/tool
+  bookkeeping: they persist and remain meaningful replay/diff history, but no
+  longer schedule subscribers or advance the behavior queue tick. Resume also
+  no longer requeues bookkeeping events that live dispatch would suppress.
+- Runtime-backed LLM fixture recording now keys contradictory sampling cases
+  from the behavior's declared `deterministic` flag, so the fixture filename
+  matches `llm.requested.prompt_hash`. Existing fixtures written under the old
+  sampling-inferred name remain readable through canonical-first fallback.
+  Fixture identity metadata is an atomic, opt-in pair; internal mismatches fail
+  before provider or file effects and are never retried as network failures.
+- Anthropic and OpenAI now delegate exception classification and
+  `retry-after` parsing to the same wire-policy owner. Error reasons, payload
+  extras, and the deliberately narrow lowercase numeric-header semantics are
+  unchanged.
+- Global and pack behavior decorators now share side-effect-free two-stage
+  construction. Pack LLM behaviors use provider-aware `model=None` and the
+  same strict schema validation as global decorators. Global LLM decoration
+  and public `register()` validate before appending, so failed live-runtime
+  validation leaves no transient registry residue.
+- Global and pack tools now share canonical construction and validation.
+  Omitted pack tool cost is exactly `Decimal("0")` (rather than the stale
+  `Decimal("0.0")` representation), and pack timeout/determinism values now
+  normalize to the same exact types as global tools. Pack export aliases still
+  point to the loader clone without touching the module-global registry.
+- **Type, taxonomy, and evaluation-semantics compatibility repairs.** Six
+  public boundaries now fail or report with their intended types:
+  - Missing graph objects and patches raise structured operation-specific
+    framework leaves. Object/apply misses retain `KeyError` routing and reject
+    misses retain `AttributeError` routing, but `str(error)` changes from the
+    old quoted/raw built-in text to the structured framework format and
+    `args` becomes `(str(error),)`. Catch `ObjectNotFoundError` or the shared
+    `PatchNotFoundError` for stable framework semantics.
+  - `Graph.objects(where=...)`, its `Graph.query(...)` alias, and
+    `View.objects(where=...)` share one object root. Ordinary data keys remain
+    bare-name shorthand. Bare `id`, `type`, `version`, `data`, and
+    `provenance` are canonical metadata; colliding domain values use
+    `data.id`, `data.type`, `data.version`, or nested `data.data.*` paths.
+  - Every store-opening CLI path maps exact `SchemaVersionMismatch` to exit 4
+    with one stderr rendering. `migrate` preflights the source before the
+    destination; a compatible source plus fresh destination eagerly creates
+    current schema metadata but no run/event rows. This is not a cross-version
+    reader; that broader design remains separate.
+  - Mutable `LLMBehavior.tools` declarations resolve once per registry pass to
+    canonical Tool objects, with owner-aware short-name precedence. Loaded
+    pack-local refs now introspect as canonical Tools; compare `.name`, not
+    identity across reloads. Returned unique short calls are canonicalized
+    before cache/events/messages/hashes/replay; missing or ambiguous aliases
+    fail as `UnknownToolError` before successful persistence.
+  - `Runtime.status()` reports process-local `running` while any public drain
+    is active, including nested drains, then resumes exact log-derived
+    `stopped` / `idle` / `exhausted` state. `activegraph inspect` remains a
+    dormant persisted-log view, not a cross-process liveness probe.
+  - `SandboxStartupError` is now both `ConfigurationError` and `RuntimeError`
+    with its own docs slug. Its exact legacy one-line `str`/`args` is retained
+    under a narrow compatibility waiver; structured rendering is deferred to
+    the separately tracked next-major follow-up.
+- **Manifest checks are visible and fixture paths are strict.** Explicit
+  missing/unreadable paths and unexpected locator/checker failures now emit
+  one structured WARNING per Pack identity while the 1.x load still proceeds.
+  Manifest fixture entrypoints must resolve to an existing regular file inside
+  the pack without absolute paths, traversal, or symlinks.
+- **Sandbox trial wire schema v2 now requires artifact pins.** New
+  `PackSource` values require an exact lowercase `sha256:` bundle hash, and
+  `TrialSpecification` emits schema v2. Pinned schema-v1 JSON remains accepted
+  as migration input and reserializes as v2; missing, empty, or malformed v1
+  pins now fail before a fork or import. Callers that previously relied on an
+  empty pin must compute the candidate and every extra pack's bundle hash and
+  reserialize the specification.
+- **Pack names now have one 1–64 character identity rule.** `Pack` and
+  `manifest.toml` accept the same lowercase snake-case boundary; scaffolding
+  keeps its existing strip/lowercase behavior but caps the normalized kebab
+  distribution slug at 64 characters. This is an intentional 1.x constructor
+  narrowing: third-party names longer than 64 characters must choose a shorter
+  stable identity before upgrading.
+- **Pack versions now require PEP 440 at construction and manifest parse.**
+  Valid strings retain their exact spelling and identity; surrounding
+  whitespace, non-strings, and labels such as `nightly` now fail early. This is
+  an intentional 1.x narrowing. Migrate free-form labels to a valid version
+  such as `0+nightly`; the framework does not normalize them automatically.
 
 ## [1.10.0] — 2026-07-12
 

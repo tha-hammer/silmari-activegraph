@@ -6,7 +6,7 @@ This will take about 20 seconds. No API key required.
   provider:   RecordedDiligenceProvider (fixture-backed)
 
 [trace.flags]             prompt_normalized=true (103 llm requests)
-[pack.loaded]             diligence v0.1.0 (8 object_types, 6 relation_types, 7 behaviors, 3 tools, 2 policies, 4 prompts)
+[pack.loaded]             diligence v0.1.0 (8 object_types, 7 relation_types, 7 behaviors, 3 tools, 2 policies, 4 prompts)
 [goal.created]            user: "Diligence: Northwind Robotics"
 [behavior.started]        diligence.company_planner
 [object.created]          company#1
@@ -428,34 +428,36 @@ This will take about 20 seconds. No API key required.
 [pattern.matched]         evt_420  diligence.contradiction_detector  matches=1
 [behavior.started]        diligence.contradiction_detector
 [object.created]          contradiction#62 (open)
-[behavior.completed]      diligence.contradiction_detector
+[relation.created]        claim#50 --has_contradiction--> contradiction#62
+[relation.created]        claim#43 --has_contradiction--> contradiction#62
+[behavior.completed]      diligence.contradiction_detector (1 object, 2 relations)
 [behavior.started]        diligence.risk_identifier  (matched object.created: claim#52)
-[llm.requested]           evt_425  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~4870 budget_remaining=$4.829
-[llm.responded]           evt_426  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_427  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~4918 budget_remaining=$4.829
+[llm.responded]           evt_428  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [behavior.completed]      diligence.risk_identifier
 [behavior.started]        diligence.evidence_linker  (matched object.created: evidence#53)
 [behavior.completed]      diligence.evidence_linker
 [behavior.started]        diligence.risk_identifier  (matched object.created: claim#55)
-[llm.requested]           evt_431  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~4867 budget_remaining=$4.828
-[llm.responded]           evt_432  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_433  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~4918 budget_remaining=$4.828
+[llm.responded]           evt_434  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [behavior.completed]      diligence.risk_identifier
 [behavior.started]        diligence.evidence_linker  (matched object.created: evidence#56)
 [behavior.completed]      diligence.evidence_linker
 [behavior.started]        diligence.risk_identifier  (matched object.created: claim#57)
-[llm.requested]           evt_437  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~4872 budget_remaining=$4.827
-[llm.responded]           evt_438  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_439  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~4921 budget_remaining=$4.827
+[llm.responded]           evt_440  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [behavior.completed]      diligence.risk_identifier
 [behavior.started]        diligence.evidence_linker  (matched object.created: evidence#58)
 [behavior.completed]      diligence.evidence_linker
 [behavior.started]        diligence.risk_identifier  (matched object.created: claim#59)
-[llm.requested]           evt_443  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~4841 budget_remaining=$4.826
-[llm.responded]           evt_444  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_445  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~4888 budget_remaining=$4.826
+[llm.responded]           evt_446  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [behavior.completed]      diligence.risk_identifier
 [behavior.started]        diligence.evidence_linker  (matched object.created: evidence#60)
 [behavior.completed]      diligence.evidence_linker
 [behavior.started]        diligence.memo_synthesizer  (matched object.created: risk#61)
-[llm.requested]           evt_449  diligence.memo_synthesizer  model=claude-sonnet-4-5 tokens_in~5040 budget_remaining=$4.825
-[llm.responded]           evt_450  diligence.memo_synthesizer  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_451  diligence.memo_synthesizer  model=claude-sonnet-4-5 tokens_in~5090 budget_remaining=$4.825
+[llm.responded]           evt_452  diligence.memo_synthesizer  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [object.created]          memo#63
 [behavior.completed]      diligence.memo_synthesizer
 [runtime.idle]            queue empty, budget remaining
@@ -464,8 +466,8 @@ This will take about 20 seconds. No API key required.
 [object.created]          company#64
 [behavior.completed]      diligence.company_planner
 [behavior.started]        diligence.question_generator  (matched object.created: company#64)
-[llm.requested]           evt_459  diligence.question_generator  model=claude-sonnet-4-5 tokens_in~5067 budget_remaining=$4.824
-[llm.responded]           evt_460  diligence.question_generator  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_461  diligence.question_generator  model=claude-sonnet-4-5 tokens_in~5118 budget_remaining=$4.824
+[llm.responded]           evt_462  diligence.question_generator  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [object.created]          question#65 "What is the lead program's regulatory status?" (open)
 [object.created]          question#66 "What is the cash runway?" (open)
 [object.created]          question#67 "What did the FDA pre-IND meeting reveal?" (open)
@@ -476,16 +478,16 @@ This will take about 20 seconds. No API key required.
 [object.created]          question#72 "What is the manufacturing strategy?" (open)
 [behavior.completed]      diligence.question_generator (8 objects, 0 relations)
 [behavior.started]        diligence.document_researcher  (matched object.created: question#65)
-[llm.requested]           evt_471  diligence.document_researcher  model=claude-sonnet-4-5 tokens_in~5814 budget_remaining=$4.823
-[llm.responded]           evt_472  diligence.document_researcher  tokens_in=100 tokens_out=15 cost=$0.001 latency=0.3s
-[tool.requested]          evt_473  diligence.document_researcher  tool=diligence.fetch_company_docs args_hash=6419f36b
-[tool.responded]          evt_474  diligence.document_researcher  tool=diligence.fetch_company_docs latency=0.0s cost=$0.005
-[llm.requested]           evt_475  diligence.document_researcher  model=claude-sonnet-4-5 turn=1 tokens_in~5951 budget_remaining=$4.817
-[llm.responded]           evt_476  diligence.document_researcher  tokens_in=120 tokens_out=20 cost=$0.001 latency=0.3s
-[tool.requested]          evt_477  diligence.document_researcher  tool=diligence.summarize_document args_hash=5d6ebf6a
-[tool.responded]          evt_478  diligence.document_researcher  tool=diligence.summarize_document latency=0.0s cost=$0.002
-[llm.requested]           evt_479  diligence.document_researcher  model=claude-sonnet-4-5 turn=2 tokens_in~5996 budget_remaining=$4.814
-[llm.responded]           evt_480  diligence.document_researcher  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_473  diligence.document_researcher  model=claude-sonnet-4-5 tokens_in~5860 budget_remaining=$4.823
+[llm.responded]           evt_474  diligence.document_researcher  tokens_in=100 tokens_out=15 cost=$0.001 latency=0.3s
+[tool.requested]          evt_475  diligence.document_researcher  tool=diligence.fetch_company_docs args_hash=6419f36b
+[tool.responded]          evt_476  diligence.document_researcher  tool=diligence.fetch_company_docs latency=0.0s cost=$0.005
+[llm.requested]           evt_477  diligence.document_researcher  model=claude-sonnet-4-5 turn=1 tokens_in~5998 budget_remaining=$4.817
+[llm.responded]           evt_478  diligence.document_researcher  tokens_in=120 tokens_out=20 cost=$0.001 latency=0.3s
+[tool.requested]          evt_479  diligence.document_researcher  tool=diligence.summarize_document args_hash=5d6ebf6a
+[tool.responded]          evt_480  diligence.document_researcher  tool=diligence.summarize_document latency=0.0s cost=$0.002
+[llm.requested]           evt_481  diligence.document_researcher  model=claude-sonnet-4-5 turn=2 tokens_in~6042 budget_remaining=$4.814
+[llm.responded]           evt_482  diligence.document_researcher  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [object.created]          document#73 "Preclinical"
 [object.created]          claim#74 "PCB-101 is targeted for IND filing in H2 of next year." (open)
 [relation.created]        claim#74 --addresses--> question#65
@@ -495,16 +497,16 @@ This will take about 20 seconds. No API key required.
 [patch.applied]           question#65 status: open -> answered
 [behavior.completed]      diligence.document_researcher (3 objects, 3 relations)
 [behavior.started]        diligence.document_researcher  (matched object.created: question#66)
-[llm.requested]           evt_490  diligence.document_researcher  model=claude-sonnet-4-5 tokens_in~6000 budget_remaining=$4.813
-[llm.responded]           evt_491  diligence.document_researcher  tokens_in=100 tokens_out=15 cost=$0.001 latency=0.3s
-[tool.requested]          evt_492  diligence.document_researcher  tool=diligence.fetch_company_docs args_hash=6419f36b
-[tool.responded]          evt_493  diligence.document_researcher  tool=diligence.fetch_company_docs latency=0.0s cost=$0.005
-[llm.requested]           evt_494  diligence.document_researcher  model=claude-sonnet-4-5 turn=1 tokens_in~6138 budget_remaining=$4.807
-[llm.responded]           evt_495  diligence.document_researcher  tokens_in=120 tokens_out=20 cost=$0.001 latency=0.3s
-[tool.requested]          evt_496  diligence.document_researcher  tool=diligence.summarize_document args_hash=5d6ebf6a
-[tool.responded]          evt_497  diligence.document_researcher  tool=diligence.summarize_document latency=0.0s cost=$0.002
-[llm.requested]           evt_498  diligence.document_researcher  model=claude-sonnet-4-5 turn=2 tokens_in~6182 budget_remaining=$4.804
-[llm.responded]           evt_499  diligence.document_researcher  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_492  diligence.document_researcher  model=claude-sonnet-4-5 tokens_in~6026 budget_remaining=$4.813
+[llm.responded]           evt_493  diligence.document_researcher  tokens_in=100 tokens_out=15 cost=$0.001 latency=0.3s
+[tool.requested]          evt_494  diligence.document_researcher  tool=diligence.fetch_company_docs args_hash=6419f36b
+[tool.responded]          evt_495  diligence.document_researcher  tool=diligence.fetch_company_docs latency=0.0s cost=$0.005
+[llm.requested]           evt_496  diligence.document_researcher  model=claude-sonnet-4-5 turn=1 tokens_in~6164 budget_remaining=$4.807
+[llm.responded]           evt_497  diligence.document_researcher  tokens_in=120 tokens_out=20 cost=$0.001 latency=0.3s
+[tool.requested]          evt_498  diligence.document_researcher  tool=diligence.summarize_document args_hash=5d6ebf6a
+[tool.responded]          evt_499  diligence.document_researcher  tool=diligence.summarize_document latency=0.0s cost=$0.002
+[llm.requested]           evt_500  diligence.document_researcher  model=claude-sonnet-4-5 turn=2 tokens_in~6208 budget_remaining=$4.804
+[llm.responded]           evt_501  diligence.document_researcher  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [object.created]          document#76 "Runway"
 [object.created]          claim#77 "Pinecone Bio's cash runway extends through Q2 of next year at current burn; a financing round is likely required to reach IND filing." (open)
 [relation.created]        claim#77 --addresses--> question#66
@@ -514,16 +516,16 @@ This will take about 20 seconds. No API key required.
 [patch.applied]           question#66 status: open -> answered
 [behavior.completed]      diligence.document_researcher (3 objects, 3 relations)
 [behavior.started]        diligence.document_researcher  (matched object.created: question#67)
-[llm.requested]           evt_509  diligence.document_researcher  model=claude-sonnet-4-5 tokens_in~6215 budget_remaining=$4.803
-[llm.responded]           evt_510  diligence.document_researcher  tokens_in=100 tokens_out=15 cost=$0.001 latency=0.3s
-[tool.requested]          evt_511  diligence.document_researcher  tool=diligence.fetch_company_docs args_hash=6419f36b
-[tool.responded]          evt_512  diligence.document_researcher  tool=diligence.fetch_company_docs latency=0.0s cost=$0.005
-[llm.requested]           evt_513  diligence.document_researcher  model=claude-sonnet-4-5 turn=1 tokens_in~6353 budget_remaining=$4.798
-[llm.responded]           evt_514  diligence.document_researcher  tokens_in=120 tokens_out=20 cost=$0.001 latency=0.3s
-[tool.requested]          evt_515  diligence.document_researcher  tool=diligence.summarize_document args_hash=5d6ebf6a
-[tool.responded]          evt_516  diligence.document_researcher  tool=diligence.summarize_document latency=0.0s cost=$0.002
-[llm.requested]           evt_517  diligence.document_researcher  model=claude-sonnet-4-5 turn=2 tokens_in~6397 budget_remaining=$4.795
-[llm.responded]           evt_518  diligence.document_researcher  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_511  diligence.document_researcher  model=claude-sonnet-4-5 tokens_in~6241 budget_remaining=$4.803
+[llm.responded]           evt_512  diligence.document_researcher  tokens_in=100 tokens_out=15 cost=$0.001 latency=0.3s
+[tool.requested]          evt_513  diligence.document_researcher  tool=diligence.fetch_company_docs args_hash=6419f36b
+[tool.responded]          evt_514  diligence.document_researcher  tool=diligence.fetch_company_docs latency=0.0s cost=$0.005
+[llm.requested]           evt_515  diligence.document_researcher  model=claude-sonnet-4-5 turn=1 tokens_in~6379 budget_remaining=$4.798
+[llm.responded]           evt_516  diligence.document_researcher  tokens_in=120 tokens_out=20 cost=$0.001 latency=0.3s
+[tool.requested]          evt_517  diligence.document_researcher  tool=diligence.summarize_document args_hash=5d6ebf6a
+[tool.responded]          evt_518  diligence.document_researcher  tool=diligence.summarize_document latency=0.0s cost=$0.002
+[llm.requested]           evt_519  diligence.document_researcher  model=claude-sonnet-4-5 turn=2 tokens_in~6423 budget_remaining=$4.795
+[llm.responded]           evt_520  diligence.document_researcher  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [object.created]          document#79 "Fda Meeting"
 [object.created]          claim#80 "FDA pre-IND correspondence flagged Pinecone's manufacturing controls as requiring resolution before IND filing." (open)
 [relation.created]        claim#80 --addresses--> question#67
@@ -533,16 +535,16 @@ This will take about 20 seconds. No API key required.
 [patch.applied]           question#67 status: open -> answered
 [behavior.completed]      diligence.document_researcher (3 objects, 3 relations)
 [behavior.started]        diligence.document_researcher  (matched object.created: question#68)
-[llm.requested]           evt_528  diligence.document_researcher  model=claude-sonnet-4-5 tokens_in~6418 budget_remaining=$4.794
-[llm.responded]           evt_529  diligence.document_researcher  tokens_in=100 tokens_out=15 cost=$0.001 latency=0.3s
-[tool.requested]          evt_530  diligence.document_researcher  tool=diligence.fetch_company_docs args_hash=6419f36b
-[tool.responded]          evt_531  diligence.document_researcher  tool=diligence.fetch_company_docs latency=0.0s cost=$0.005
-[llm.requested]           evt_532  diligence.document_researcher  model=claude-sonnet-4-5 turn=1 tokens_in~6556 budget_remaining=$4.788
-[llm.responded]           evt_533  diligence.document_researcher  tokens_in=120 tokens_out=20 cost=$0.001 latency=0.3s
-[tool.requested]          evt_534  diligence.document_researcher  tool=diligence.summarize_document args_hash=5d6ebf6a
-[tool.responded]          evt_535  diligence.document_researcher  tool=diligence.summarize_document latency=0.0s cost=$0.002
-[llm.requested]           evt_536  diligence.document_researcher  model=claude-sonnet-4-5 turn=2 tokens_in~6600 budget_remaining=$4.785
-[llm.responded]           evt_537  diligence.document_researcher  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_530  diligence.document_researcher  model=claude-sonnet-4-5 tokens_in~6444 budget_remaining=$4.794
+[llm.responded]           evt_531  diligence.document_researcher  tokens_in=100 tokens_out=15 cost=$0.001 latency=0.3s
+[tool.requested]          evt_532  diligence.document_researcher  tool=diligence.fetch_company_docs args_hash=6419f36b
+[tool.responded]          evt_533  diligence.document_researcher  tool=diligence.fetch_company_docs latency=0.0s cost=$0.005
+[llm.requested]           evt_534  diligence.document_researcher  model=claude-sonnet-4-5 turn=1 tokens_in~6581 budget_remaining=$4.788
+[llm.responded]           evt_535  diligence.document_researcher  tokens_in=120 tokens_out=20 cost=$0.001 latency=0.3s
+[tool.requested]          evt_536  diligence.document_researcher  tool=diligence.summarize_document args_hash=5d6ebf6a
+[tool.responded]          evt_537  diligence.document_researcher  tool=diligence.summarize_document latency=0.0s cost=$0.002
+[llm.requested]           evt_538  diligence.document_researcher  model=claude-sonnet-4-5 turn=2 tokens_in~6626 budget_remaining=$4.785
+[llm.responded]           evt_539  diligence.document_researcher  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [object.created]          claim#82 "Pinecone Bio: no specific finding for this question in the fixtures." (open)
 [relation.created]        claim#82 --addresses--> question#68
 [relation.created]        claim#82 --derived_from--> document#73
@@ -551,16 +553,16 @@ This will take about 20 seconds. No API key required.
 [patch.applied]           question#68 status: open -> answered
 [behavior.completed]      diligence.document_researcher (2 objects, 3 relations)
 [behavior.started]        diligence.document_researcher  (matched object.created: question#69)
-[llm.requested]           evt_546  diligence.document_researcher  model=claude-sonnet-4-5 tokens_in~6525 budget_remaining=$4.784
-[llm.responded]           evt_547  diligence.document_researcher  tokens_in=100 tokens_out=15 cost=$0.001 latency=0.3s
-[tool.requested]          evt_548  diligence.document_researcher  tool=diligence.fetch_company_docs args_hash=6419f36b
-[tool.responded]          evt_549  diligence.document_researcher  tool=diligence.fetch_company_docs latency=0.0s cost=$0.005
-[llm.requested]           evt_550  diligence.document_researcher  model=claude-sonnet-4-5 turn=1 tokens_in~6663 budget_remaining=$4.778
-[llm.responded]           evt_551  diligence.document_researcher  tokens_in=120 tokens_out=20 cost=$0.001 latency=0.3s
-[tool.requested]          evt_552  diligence.document_researcher  tool=diligence.summarize_document args_hash=5d6ebf6a
-[tool.responded]          evt_553  diligence.document_researcher  tool=diligence.summarize_document latency=0.0s cost=$0.002
-[llm.requested]           evt_554  diligence.document_researcher  model=claude-sonnet-4-5 turn=2 tokens_in~6707 budget_remaining=$4.775
-[llm.responded]           evt_555  diligence.document_researcher  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_548  diligence.document_researcher  model=claude-sonnet-4-5 tokens_in~6551 budget_remaining=$4.784
+[llm.responded]           evt_549  diligence.document_researcher  tokens_in=100 tokens_out=15 cost=$0.001 latency=0.3s
+[tool.requested]          evt_550  diligence.document_researcher  tool=diligence.fetch_company_docs args_hash=6419f36b
+[tool.responded]          evt_551  diligence.document_researcher  tool=diligence.fetch_company_docs latency=0.0s cost=$0.005
+[llm.requested]           evt_552  diligence.document_researcher  model=claude-sonnet-4-5 turn=1 tokens_in~6688 budget_remaining=$4.778
+[llm.responded]           evt_553  diligence.document_researcher  tokens_in=120 tokens_out=20 cost=$0.001 latency=0.3s
+[tool.requested]          evt_554  diligence.document_researcher  tool=diligence.summarize_document args_hash=5d6ebf6a
+[tool.responded]          evt_555  diligence.document_researcher  tool=diligence.summarize_document latency=0.0s cost=$0.002
+[llm.requested]           evt_556  diligence.document_researcher  model=claude-sonnet-4-5 turn=2 tokens_in~6733 budget_remaining=$4.775
+[llm.responded]           evt_557  diligence.document_researcher  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [object.created]          claim#84 "Pinecone Bio: no specific finding for this question in the fixtures." (open)
 [relation.created]        claim#84 --addresses--> question#69
 [relation.created]        claim#84 --derived_from--> document#73
@@ -569,16 +571,16 @@ This will take about 20 seconds. No API key required.
 [patch.applied]           question#69 status: open -> answered
 [behavior.completed]      diligence.document_researcher (2 objects, 3 relations)
 [behavior.started]        diligence.document_researcher  (matched object.created: question#70)
-[llm.requested]           evt_564  diligence.document_researcher  model=claude-sonnet-4-5 tokens_in~6636 budget_remaining=$4.774
-[llm.responded]           evt_565  diligence.document_researcher  tokens_in=100 tokens_out=15 cost=$0.001 latency=0.3s
-[tool.requested]          evt_566  diligence.document_researcher  tool=diligence.fetch_company_docs args_hash=6419f36b
-[tool.responded]          evt_567  diligence.document_researcher  tool=diligence.fetch_company_docs latency=0.0s cost=$0.005
-[llm.requested]           evt_568  diligence.document_researcher  model=claude-sonnet-4-5 turn=1 tokens_in~6774 budget_remaining=$4.769
-[llm.responded]           evt_569  diligence.document_researcher  tokens_in=120 tokens_out=20 cost=$0.001 latency=0.3s
-[tool.requested]          evt_570  diligence.document_researcher  tool=diligence.summarize_document args_hash=5d6ebf6a
-[tool.responded]          evt_571  diligence.document_researcher  tool=diligence.summarize_document latency=0.0s cost=$0.002
-[llm.requested]           evt_572  diligence.document_researcher  model=claude-sonnet-4-5 turn=2 tokens_in~6818 budget_remaining=$4.766
-[llm.responded]           evt_573  diligence.document_researcher  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_566  diligence.document_researcher  model=claude-sonnet-4-5 tokens_in~6662 budget_remaining=$4.774
+[llm.responded]           evt_567  diligence.document_researcher  tokens_in=100 tokens_out=15 cost=$0.001 latency=0.3s
+[tool.requested]          evt_568  diligence.document_researcher  tool=diligence.fetch_company_docs args_hash=6419f36b
+[tool.responded]          evt_569  diligence.document_researcher  tool=diligence.fetch_company_docs latency=0.0s cost=$0.005
+[llm.requested]           evt_570  diligence.document_researcher  model=claude-sonnet-4-5 turn=1 tokens_in~6800 budget_remaining=$4.769
+[llm.responded]           evt_571  diligence.document_researcher  tokens_in=120 tokens_out=20 cost=$0.001 latency=0.3s
+[tool.requested]          evt_572  diligence.document_researcher  tool=diligence.summarize_document args_hash=5d6ebf6a
+[tool.responded]          evt_573  diligence.document_researcher  tool=diligence.summarize_document latency=0.0s cost=$0.002
+[llm.requested]           evt_574  diligence.document_researcher  model=claude-sonnet-4-5 turn=2 tokens_in~6844 budget_remaining=$4.766
+[llm.responded]           evt_575  diligence.document_researcher  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [object.created]          claim#86 "Pinecone Bio: no specific finding for this question in the fixtures." (open)
 [relation.created]        claim#86 --addresses--> question#70
 [relation.created]        claim#86 --derived_from--> document#73
@@ -587,16 +589,16 @@ This will take about 20 seconds. No API key required.
 [patch.applied]           question#70 status: open -> answered
 [behavior.completed]      diligence.document_researcher (2 objects, 3 relations)
 [behavior.started]        diligence.document_researcher  (matched object.created: question#71)
-[llm.requested]           evt_582  diligence.document_researcher  model=claude-sonnet-4-5 tokens_in~6751 budget_remaining=$4.765
-[llm.responded]           evt_583  diligence.document_researcher  tokens_in=100 tokens_out=15 cost=$0.001 latency=0.3s
-[tool.requested]          evt_584  diligence.document_researcher  tool=diligence.fetch_company_docs args_hash=6419f36b
-[tool.responded]          evt_585  diligence.document_researcher  tool=diligence.fetch_company_docs latency=0.0s cost=$0.005
-[llm.requested]           evt_586  diligence.document_researcher  model=claude-sonnet-4-5 turn=1 tokens_in~6889 budget_remaining=$4.759
-[llm.responded]           evt_587  diligence.document_researcher  tokens_in=120 tokens_out=20 cost=$0.001 latency=0.3s
-[tool.requested]          evt_588  diligence.document_researcher  tool=diligence.summarize_document args_hash=5d6ebf6a
-[tool.responded]          evt_589  diligence.document_researcher  tool=diligence.summarize_document latency=0.0s cost=$0.002
-[llm.requested]           evt_590  diligence.document_researcher  model=claude-sonnet-4-5 turn=2 tokens_in~6933 budget_remaining=$4.756
-[llm.responded]           evt_591  diligence.document_researcher  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_584  diligence.document_researcher  model=claude-sonnet-4-5 tokens_in~6777 budget_remaining=$4.765
+[llm.responded]           evt_585  diligence.document_researcher  tokens_in=100 tokens_out=15 cost=$0.001 latency=0.3s
+[tool.requested]          evt_586  diligence.document_researcher  tool=diligence.fetch_company_docs args_hash=6419f36b
+[tool.responded]          evt_587  diligence.document_researcher  tool=diligence.fetch_company_docs latency=0.0s cost=$0.005
+[llm.requested]           evt_588  diligence.document_researcher  model=claude-sonnet-4-5 turn=1 tokens_in~6915 budget_remaining=$4.759
+[llm.responded]           evt_589  diligence.document_researcher  tokens_in=120 tokens_out=20 cost=$0.001 latency=0.3s
+[tool.requested]          evt_590  diligence.document_researcher  tool=diligence.summarize_document args_hash=5d6ebf6a
+[tool.responded]          evt_591  diligence.document_researcher  tool=diligence.summarize_document latency=0.0s cost=$0.002
+[llm.requested]           evt_592  diligence.document_researcher  model=claude-sonnet-4-5 turn=2 tokens_in~6959 budget_remaining=$4.756
+[llm.responded]           evt_593  diligence.document_researcher  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [object.created]          claim#88 "Pinecone Bio: no specific finding for this question in the fixtures." (open)
 [relation.created]        claim#88 --addresses--> question#71
 [relation.created]        claim#88 --derived_from--> document#73
@@ -605,16 +607,16 @@ This will take about 20 seconds. No API key required.
 [patch.applied]           question#71 status: open -> answered
 [behavior.completed]      diligence.document_researcher (2 objects, 3 relations)
 [behavior.started]        diligence.document_researcher  (matched object.created: question#72)
-[llm.requested]           evt_600  diligence.document_researcher  model=claude-sonnet-4-5 tokens_in~6859 budget_remaining=$4.755
-[llm.responded]           evt_601  diligence.document_researcher  tokens_in=100 tokens_out=15 cost=$0.001 latency=0.3s
-[tool.requested]          evt_602  diligence.document_researcher  tool=diligence.fetch_company_docs args_hash=6419f36b
-[tool.responded]          evt_603  diligence.document_researcher  tool=diligence.fetch_company_docs latency=0.0s cost=$0.005
-[llm.requested]           evt_604  diligence.document_researcher  model=claude-sonnet-4-5 turn=1 tokens_in~6997 budget_remaining=$4.749
-[llm.responded]           evt_605  diligence.document_researcher  tokens_in=120 tokens_out=20 cost=$0.001 latency=0.3s
-[tool.requested]          evt_606  diligence.document_researcher  tool=diligence.summarize_document args_hash=5d6ebf6a
-[tool.responded]          evt_607  diligence.document_researcher  tool=diligence.summarize_document latency=0.0s cost=$0.002
-[llm.requested]           evt_608  diligence.document_researcher  model=claude-sonnet-4-5 turn=2 tokens_in~7041 budget_remaining=$4.746
-[llm.responded]           evt_609  diligence.document_researcher  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_602  diligence.document_researcher  model=claude-sonnet-4-5 tokens_in~6885 budget_remaining=$4.755
+[llm.responded]           evt_603  diligence.document_researcher  tokens_in=100 tokens_out=15 cost=$0.001 latency=0.3s
+[tool.requested]          evt_604  diligence.document_researcher  tool=diligence.fetch_company_docs args_hash=6419f36b
+[tool.responded]          evt_605  diligence.document_researcher  tool=diligence.fetch_company_docs latency=0.0s cost=$0.005
+[llm.requested]           evt_606  diligence.document_researcher  model=claude-sonnet-4-5 turn=1 tokens_in~7023 budget_remaining=$4.749
+[llm.responded]           evt_607  diligence.document_researcher  tokens_in=120 tokens_out=20 cost=$0.001 latency=0.3s
+[tool.requested]          evt_608  diligence.document_researcher  tool=diligence.summarize_document args_hash=5d6ebf6a
+[tool.responded]          evt_609  diligence.document_researcher  tool=diligence.summarize_document latency=0.0s cost=$0.002
+[llm.requested]           evt_610  diligence.document_researcher  model=claude-sonnet-4-5 turn=2 tokens_in~7067 budget_remaining=$4.746
+[llm.responded]           evt_611  diligence.document_researcher  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [object.created]          claim#90 "Pinecone Bio: no specific finding for this question in the fixtures." (open)
 [relation.created]        claim#90 --addresses--> question#72
 [relation.created]        claim#90 --derived_from--> document#73
@@ -623,57 +625,57 @@ This will take about 20 seconds. No API key required.
 [patch.applied]           question#72 status: open -> answered
 [behavior.completed]      diligence.document_researcher (2 objects, 3 relations)
 [behavior.started]        diligence.risk_identifier  (matched object.created: claim#74)
-[llm.requested]           evt_618  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~6790 budget_remaining=$4.745
-[llm.responded]           evt_619  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_620  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~6816 budget_remaining=$4.745
+[llm.responded]           evt_621  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [object.created]          risk#92 "customer concentration"
 [behavior.completed]      diligence.risk_identifier
 [behavior.started]        diligence.evidence_linker  (matched object.created: evidence#75)
 [behavior.completed]      diligence.evidence_linker
 [behavior.started]        diligence.risk_identifier  (matched object.created: claim#77)
-[llm.requested]           evt_625  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~6882 budget_remaining=$4.744
-[llm.responded]           evt_626  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_627  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~6908 budget_remaining=$4.744
+[llm.responded]           evt_628  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [behavior.completed]      diligence.risk_identifier
 [behavior.started]        diligence.evidence_linker  (matched object.created: evidence#78)
 [behavior.completed]      diligence.evidence_linker
 [behavior.started]        diligence.risk_identifier  (matched object.created: claim#80)
-[llm.requested]           evt_631  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~6843 budget_remaining=$4.743
-[llm.responded]           evt_632  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_633  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~6869 budget_remaining=$4.743
+[llm.responded]           evt_634  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [behavior.completed]      diligence.risk_identifier
 [behavior.started]        diligence.evidence_linker  (matched object.created: evidence#81)
 [behavior.completed]      diligence.evidence_linker
 [behavior.started]        diligence.risk_identifier  (matched object.created: claim#82)
-[llm.requested]           evt_637  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~6835 budget_remaining=$4.742
-[llm.responded]           evt_638  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_639  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~6861 budget_remaining=$4.742
+[llm.responded]           evt_640  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [behavior.completed]      diligence.risk_identifier
 [behavior.started]        diligence.evidence_linker  (matched object.created: evidence#83)
 [behavior.completed]      diligence.evidence_linker
 [behavior.started]        diligence.risk_identifier  (matched object.created: claim#84)
-[llm.requested]           evt_643  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~6836 budget_remaining=$4.741
-[llm.responded]           evt_644  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_645  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~6862 budget_remaining=$4.741
+[llm.responded]           evt_646  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [behavior.completed]      diligence.risk_identifier
 [behavior.started]        diligence.evidence_linker  (matched object.created: evidence#85)
 [behavior.completed]      diligence.evidence_linker
 [behavior.started]        diligence.risk_identifier  (matched object.created: claim#86)
-[llm.requested]           evt_649  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~6803 budget_remaining=$4.740
-[llm.responded]           evt_650  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_651  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~6828 budget_remaining=$4.740
+[llm.responded]           evt_652  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [behavior.completed]      diligence.risk_identifier
 [behavior.started]        diligence.evidence_linker  (matched object.created: evidence#87)
 [behavior.completed]      diligence.evidence_linker
 [behavior.started]        diligence.risk_identifier  (matched object.created: claim#88)
-[llm.requested]           evt_655  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~6806 budget_remaining=$4.739
-[llm.responded]           evt_656  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_657  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~6831 budget_remaining=$4.739
+[llm.responded]           evt_658  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [behavior.completed]      diligence.risk_identifier
 [behavior.started]        diligence.evidence_linker  (matched object.created: evidence#89)
 [behavior.completed]      diligence.evidence_linker
 [behavior.started]        diligence.risk_identifier  (matched object.created: claim#90)
-[llm.requested]           evt_661  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~6807 budget_remaining=$4.738
-[llm.responded]           evt_662  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_663  diligence.risk_identifier  model=claude-sonnet-4-5 tokens_in~6832 budget_remaining=$4.738
+[llm.responded]           evt_664  diligence.risk_identifier  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [behavior.completed]      diligence.risk_identifier
 [behavior.started]        diligence.evidence_linker  (matched object.created: evidence#91)
 [behavior.completed]      diligence.evidence_linker
 [behavior.started]        diligence.memo_synthesizer  (matched object.created: risk#92)
-[llm.requested]           evt_667  diligence.memo_synthesizer  model=claude-sonnet-4-5 tokens_in~6949 budget_remaining=$4.737
-[llm.responded]           evt_668  diligence.memo_synthesizer  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
+[llm.requested]           evt_669  diligence.memo_synthesizer  model=claude-sonnet-4-5 tokens_in~6975 budget_remaining=$4.737
+[llm.responded]           evt_670  diligence.memo_synthesizer  tokens_in=110 tokens_out=22 cost=$0.001 latency=0.4s
 [object.created]          memo#93
 [behavior.completed]      diligence.memo_synthesizer
 [runtime.idle]            queue empty, budget remaining

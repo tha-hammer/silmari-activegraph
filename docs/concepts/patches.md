@@ -53,6 +53,18 @@ The events sit in the log alongside everything else. Downstream
 behaviors can subscribe to them, the trace renders them, and
 replay reconstructs the full proposal-and-decision sequence.
 
+Both transition methods require a patch that exists in this graph. A missing
+id raises the operation-specific
+[`ApplyPatchNotFoundError`](../reference/errors/apply-patch-not-found-error.md)
+or
+[`RejectPatchNotFoundError`](../reference/errors/reject-patch-not-found-error.md).
+Both share [`PatchNotFoundError`](../reference/errors/patch-not-found-error.md)
+for new code; their separate `KeyError` and `AttributeError` bases preserve
+the branch selected by existing ordered handlers. A direct
+`graph.patch_object(...)` with a missing target similarly raises
+[`ObjectNotFoundError`](../reference/errors/object-not-found-error.md), which
+retains `KeyError` compatibility.
+
 ## Optimistic concurrency on object versions
 
 Every object carries a version that increments on each mutation.
@@ -128,3 +140,7 @@ principle.
   event but patch-lifecycle misuse is an exception.
 - [`invalid-patch-lifecycle-state`](../reference/errors/invalid-patch-lifecycle-state.md)
   — the exception for misuse of the patch primitive.
+- [`patch-not-found-error`](../reference/errors/patch-not-found-error.md)
+  — the stable shared catch for unknown patch ids.
+- [`object-not-found-error`](../reference/errors/object-not-found-error.md)
+  — the typed direct-mutation target miss.

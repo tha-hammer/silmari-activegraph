@@ -308,8 +308,8 @@ def _fmt_runtime_idle(_: Event) -> str:
 
 def _fmt_pack_loaded(e: Event) -> str:
     """CONTRACT v0.9 #25:
-    `[pack.loaded]    diligence v0.1.0 (8 object_types, 6 relation_types,
-                     7 behaviors, 3 tools, 2 policies, 5 prompts)`
+    `[pack.loaded]    diligence v0.1.0 (8 object_types, 7 relation_types,
+                     7 behaviors, 3 tools, 2 policies, 4 prompts)`
 
     The pack.loaded event payload carries the pack name, version, and
     the full structural inventory. The trace line summarizes counts;

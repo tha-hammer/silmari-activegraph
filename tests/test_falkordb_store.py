@@ -97,6 +97,24 @@ def test_graph_runs_on_falkordb_backend():
         store.close()
 
 
+def test_reopening_existing_graph_accepts_only_duplicate_index_errors():
+    from activegraph.store.falkordb import FalkorDBGraphStore
+
+    owner = FalkorDBGraphStore(graph_name="ag_index_reopen")
+    owner.clear()
+    borrowed = None
+    try:
+        borrowed = FalkorDBGraphStore(graph=owner._g)
+        assert borrowed.all_objects() == []
+        borrowed.close()
+        assert owner.all_objects() == []
+    finally:
+        if borrowed is not None:
+            borrowed.close()
+        owner.clear()
+        owner.close()
+
+
 # --- native-edge layout checks -------------------------------------------
 #
 # The conformance suite pins observable behaviour; these pin the *physical*
@@ -441,6 +459,107 @@ def test_relation_behavior_matching_parity_falkordb_vs_inmemory():
             id="evt_2", type="claim.touched", payload={"object": {"id": ids_mem["e"]}}
         )
         assert matched_ids(reg, event2, g_fdb) == matched_ids(reg, event2, g_mem)
+    finally:
+        store.clear()
+        store.close()
+
+
+def test_scheduled_relation_runtime_uses_current_falkordb_relations():
+    from collections import Counter
+
+    from activegraph import Event, Graph, Runtime, relation_behavior
+    from activegraph.store.falkordb import FalkorDBGraphStore
+
+    fired: list[tuple[str, str]] = []
+
+    @relation_behavior(
+        name="scheduled_falkor_relation",
+        relation_type="depends_on",
+        on=["task.completed"],
+        activate_after=4,
+    )
+    def scheduled_falkor_relation(relation, event, graph, ctx):
+        fired.append((relation.id, event.id))
+        graph.add_object(
+            "scheduled_marker",
+            {"relation_id": relation.id, "event_id": event.id},
+        )
+
+    store = FalkorDBGraphStore(graph_name="ag_scheduled_relation_runtime")
+    store.clear()
+    try:
+        graph = Graph(graph_store=store)
+        source = graph.add_object("task", {})
+        target_a = graph.add_object("task", {})
+        target_b = graph.add_object("task", {})
+        unrelated_source = graph.add_object("task", {})
+        unrelated_target = graph.add_object("task", {})
+        relation_a = graph.add_relation(source.id, target_a.id, "depends_on")
+        runtime = Runtime(graph, behaviors=[scheduled_falkor_relation])
+        trigger = Event(
+            id=graph.ids.event(),
+            type="task.completed",
+            payload={"task_id": source.id},
+            actor="test",
+            timestamp=graph.clock.now(),
+        )
+        graph.emit(trigger)
+
+        paused = runtime.run_quantum(max_queue_events=1, max_seconds=1.0)
+        assert paused.delayed_depth == 1
+
+        relation_b = graph.add_relation(source.id, target_b.id, "depends_on")
+        relation_c = graph.add_relation(
+            unrelated_source.id,
+            unrelated_target.id,
+            "depends_on",
+        )
+        graph.remove_relation(relation_a.id)
+        graph.emit(
+            Event(
+                id=graph.ids.event(),
+                type="scheduler.advance",
+                payload={},
+                actor="test",
+                timestamp=graph.clock.now(),
+            )
+        )
+        runtime.run_until_idle()
+
+        assert Counter(fired) == Counter({(relation_b.id, trigger.id): 1})
+        assert all(relation_id != relation_c.id for relation_id, _ in fired)
+        markers = [
+            obj for obj in graph.all_objects() if obj.type == "scheduled_marker"
+        ]
+        assert [marker.data for marker in markers] == [
+            {"relation_id": relation_b.id, "event_id": trigger.id}
+        ]
+
+        scheduled = [
+            event
+            for event in graph.events
+            if event.type == "behavior.scheduled"
+            and event.payload["behavior"] == "scheduled_falkor_relation"
+            and event.payload["event_id"] == trigger.id
+        ]
+        started = [
+            event
+            for event in graph.events
+            if event.type == "relation_behavior.started"
+            and event.payload["behavior"] == "scheduled_falkor_relation"
+            and event.payload["event_id"] == trigger.id
+        ]
+        completed = [
+            event
+            for event in graph.events
+            if event.type == "behavior.completed"
+            and event.payload["behavior"] == "scheduled_falkor_relation"
+            and event.payload["event_id"] == trigger.id
+        ]
+        assert len(scheduled) == len(started) == len(completed) == 1
+        assert started[0].payload["relation_id"] == relation_b.id
+        assert graph.events.index(scheduled[0]) < graph.events.index(started[0])
+        assert graph.events.index(started[0]) < graph.events.index(completed[0])
     finally:
         store.clear()
         store.close()

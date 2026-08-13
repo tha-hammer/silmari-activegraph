@@ -23,6 +23,7 @@ import pytest
 from activegraph import (
     BehaviorFailure,
     Graph,
+    ObjectNotFoundError,
     Runtime,
     behavior,
 )
@@ -70,6 +71,74 @@ def test_behavior_failure_emits_warning_log(captured_json_log):
     # execution-error page.
     assert rec["doc_url"].endswith("/errors/execution-error")
     assert "behavior failed: boom" in rec["message"]
+    failed_event = next(e for e in rt.graph.events if e.type == "behavior.failed")
+    assert "ValueError: kaboom" in failed_event.payload["traceback"]
+    assert "payload" not in rec
+    assert "traceback" not in rec
+
+
+def test_object_lookup_failure_preserves_event_error_log_and_metric_shapes(
+    captured_json_log,
+):
+    class RecordingMetrics:
+        def __init__(self):
+            self.counters = []
+
+        def counter(self, name, tags, value=1.0):
+            self.counters.append((name, dict(tags), value))
+
+        def histogram(self, name, tags, value):
+            pass
+
+        def gauge(self, name, tags, value):
+            pass
+
+    @behavior(name="missing_target", on=["goal.created"])
+    def _missing_target(event, graph, ctx):
+        graph.patch_object("task#404", {"status": "closed"})
+
+    metrics = RecordingMetrics()
+    rt = Runtime(Graph(), metrics=metrics)
+    rt.run_goal("trigger")
+
+    expected_message = str(ObjectNotFoundError(object_id="task#404"))
+    failures = [e for e in rt.graph.events if e.type == "behavior.failed"]
+    assert len(failures) == 1
+    payload = failures[0].payload
+    assert payload["exception_type"] == "ObjectNotFoundError"
+    assert payload["message"] == expected_message
+    assert "reason" not in payload
+
+    assert len(rt.errors) == 1
+    assert rt.errors[0].exception_type == "ObjectNotFoundError"
+    assert rt.errors[0].message == expected_message
+    assert rt.errors[0].reason is None
+
+    records = [
+        record
+        for record in _lines(captured_json_log)
+        if record.get("behavior") == "missing_target"
+        and record.get("level") == "WARNING"
+    ]
+    assert len(records) == 1
+    record = records[0]
+    assert record["reason"] == "exception.ObjectNotFoundError"
+    assert record["error_type"] == "ObjectNotFoundError"
+    assert record["error_message"] == expected_message
+    assert record["doc_url"].endswith("/errors/execution-error")
+
+    # CONTRACT v1.11 #7: the metric's reason tag is deliberately closed —
+    # arbitrary exception class names bound to "exception.other" so
+    # cardinality stays fixed. The log line and graph-event payload above
+    # retain the exact "exception.ObjectNotFoundError" diagnostic.
+    assert (
+        "activegraph_behaviors_failed_total",
+        {
+            "behavior": "missing_target",
+            "reason": "exception.other",
+        },
+        1.0,
+    ) in metrics.counters
 
 
 def test_behavior_failure_doc_url_uses_reason_prefix(captured_json_log):

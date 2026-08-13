@@ -20,10 +20,12 @@ psycopg 3.x is required (>=3.1,<4). Install with
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any, Iterator, Optional
 
 from activegraph.core.event import Event
 from activegraph.store.base import RunRecord
+from activegraph.store.errors import _duplicate_event_error
 
 
 SCHEMA_VERSION = "1"
@@ -158,6 +160,15 @@ class _ConnectionSource:
                 self._owned_conn.close()
             except Exception:
                 pass
+            self._owned_conn = None
+            self._conn = None
+
+    def close_strict(self) -> None:
+        """Close an owned URL connection without suppressing driver errors."""
+
+        conn = self._owned_conn
+        if conn is not None:
+            conn.close()
             self._owned_conn = None
             self._conn = None
 
@@ -313,6 +324,109 @@ _RUN_COLUMNS = (
 )
 
 
+class PostgresMigrationBackend:
+    """One URL-owned Postgres migration session."""
+
+    def __init__(self, url: str) -> None:
+        self._source: _ConnectionSource | None = _ConnectionSource(url)
+        _ensure_schema(self._source)
+
+    def _connection_source(self) -> _ConnectionSource:
+        if self._source is None:
+            raise RuntimeError("Postgres migration backend is closed")
+        return self._source
+
+    def list_runs(self) -> list[RunRecord]:
+        with self._connection_source().cursor() as cursor:
+            cursor.execute(f"SELECT {_RUN_COLUMNS} FROM runs ORDER BY created_at")
+            rows = cursor.fetchall()
+        return [_row_to_run(row) for row in rows]
+
+    def iter_run(self, run_id: str) -> Iterator[Any]:
+        from activegraph.store.errors import CorruptedEventPayloadError
+        from activegraph.store.migration import CorruptMigrationEvent
+
+        with self._connection_source().cursor() as cursor:
+            cursor.execute(
+                f"SELECT {_EVENT_COLUMNS} FROM events "
+                "WHERE run_id = %s ORDER BY seq",
+                (run_id,),
+            )
+            for row in cursor:
+                try:
+                    yield _row_to_event(row)
+                except CorruptedEventPayloadError as exc:
+                    yield CorruptMigrationEvent(str(row[0]), exc)
+
+    def write_run_transactionally(
+        self, record: RunRecord, events: Sequence[Event]
+    ) -> int:
+        with self._connection_source().transaction() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    INSERT INTO runs ({_RUN_COLUMNS})
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (run_id) DO NOTHING
+                    """,
+                    (
+                        record.run_id,
+                        record.parent_run_id,
+                        record.forked_at_event_id,
+                        record.label,
+                        record.created_at,
+                        record.goal,
+                        record.frame_id,
+                    ),
+                )
+                inserted = 0
+                for event in events:
+                    cursor.execute(
+                        f"""
+                        INSERT INTO events ({_EVENT_COLUMNS}, run_id)
+                        VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s)
+                        ON CONFLICT (id, run_id) DO NOTHING
+                        """,
+                        (
+                            event.id,
+                            event.type,
+                            event.actor,
+                            json.dumps(event.payload),
+                            event.frame_id,
+                            event.caused_by,
+                            event.timestamp,
+                            record.run_id,
+                        ),
+                    )
+                    if cursor.rowcount > 0:
+                        inserted += 1
+                return inserted
+
+    def close(self) -> None:
+        source = self._source
+        if source is not None:
+            source.close_strict()
+            self._source = None
+
+
+class PostgresMigrationBackendProvider:
+    """Migration provider for ``postgres`` and ``postgresql`` URLs."""
+
+    schemes = ("postgres", "postgresql")
+    capabilities = frozenset({"read", "write"})
+
+    def validate_url(self, url: str) -> None:
+        from activegraph.store.url import parse_store_url
+
+        parsed = parse_store_url(url)
+        if parsed.scheme != "postgres":
+            raise ValueError("Postgres migration provider requires postgres URL")
+
+    def open(self, url: str) -> PostgresMigrationBackend:
+        self.validate_url(url)
+        return PostgresMigrationBackend(url)
+
+
 class PostgresEventStore:
     """Per-run view onto a Postgres-backed event log. CONTRACT v0.8 #1."""
 
@@ -324,12 +438,12 @@ class PostgresEventStore:
     # ---------- EventStore protocol ----------
 
     def append(self, event: Event) -> None:
-        psycopg = self._source._psycopg
         with self._source.cursor() as cur:
             cur.execute(
                 f"""
                 INSERT INTO events ({_EVENT_COLUMNS}, run_id)
                 VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s)
+                ON CONFLICT(id, run_id) DO NOTHING
                 """,
                 (
                     event.id,
@@ -342,6 +456,10 @@ class PostgresEventStore:
                     self.run_id,
                 ),
             )
+            if cur.rowcount == 0:
+                raise _duplicate_event_error(
+                    event_id=event.id, run_id=self.run_id, backend="postgres"
+                )
 
     def iter_events(
         self,

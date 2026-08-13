@@ -37,6 +37,7 @@ sharing state:
 ```python
 @pytest.fixture
 def fresh_store():
+    # The same rule applies to any EventStore implementation.
     return InMemoryEventStore(run_id="run_test")
 ```
 
@@ -52,8 +53,8 @@ The error message names the offending event id and the run:
 DuplicateEventError: duplicate event id: evt_001
 
 What failed:
-  An event with id 'evt_001' already exists in this in-memory store.
-  Appends are id-unique.
+  An event with id 'evt_001' already exists in run 'run_test'.
+  Appends require unique (event id, run id) pairs.
 ```
 
 From code:
@@ -64,6 +65,7 @@ try:
 except DuplicateEventError as e:
     print(e.context["event_id"])
     print(e.context["run_id"])
+    print(e.context["backend"])
 ```
 
 If the collision is in a test, check whether the test's setup tears
@@ -78,8 +80,9 @@ that constructs the same id.
 At `store.append()` only. Iteration, lookup, and read operations
 can't produce duplicates — they're append-side only.
 
-The check is a constant-time lookup against the store's id index,
-so it adds no measurable cost to a clean append.
+Every shipped EventStore reports this same public error. Backend-specific
+encoding, connection, permission, and operational failures keep their native
+exception types.
 
 ## Why the framework refuses to continue
 

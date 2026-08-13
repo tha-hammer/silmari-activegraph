@@ -53,6 +53,7 @@ pack = Pack(
     behaviors=[insight_extractor],
     prompts=load_prompts_from_dir(Path(__file__).parent / "prompts"),
     settings_schema=MyPackSettings,
+    manifest_path=Path(__file__).resolve().with_name("manifest.toml"),
 )
 ```
 
@@ -78,16 +79,18 @@ authors are expected to follow.
 
 ---
 
-## 1. A pack is a Python package, not a manifest
+## 1. A pack is Python code with a declarative manifest
 
-There is no `pack.yaml`. There is no `manifest.json`. There is a
-Python module that exports a single `pack` symbol of type `Pack`.
+The executable surface is a Python module that exports one `pack`
+symbol of type `Pack`. A colocated `manifest.toml` is its static,
+content-hashed declaration for review, CI, sandboxing, and loader checks; it
+does not replace or execute the Python logic.
 
 Why: packs need to express real logic (behaviors, prompts, policies)
-and Python is the right language for that. A declarative manifest
-would shove logic into prose comments or jinja templates, which is
-how every "configuration as data" framework eventually grows a
-half-broken DSL. Python is the DSL.
+and Python is the right language for that. The manifest declares the
+schema-supported surface and artifact integrity, while Python remains the DSL.
+The current manifest surface covers object/relation types, behaviors, tools,
+settings, and capabilities. Policies and prompts are intentionally omitted.
 
 Convention: a pack package has the layout
 
@@ -96,6 +99,7 @@ my_pack/
   pyproject.toml
   my_pack/
     __init__.py         # exports `pack`
+    manifest.toml       # declarative surface + content hash
     object_types.py     # Pydantic schemas + ObjectType list
     relation_types.py   # RelationType list (optional)
     behaviors.py        # @behavior / @llm_behavior / @relation_behavior
@@ -117,7 +121,13 @@ my_pack/
 ```
 
 The scaffolding command (`activegraph pack new <name>`) generates
-this layout.
+this layout, including package-data rules for the manifest and prompts.
+
+Use an explicit absolute `manifest_path` for generated, relation-only, or
+componentless packs. If it is omitted, the loader retains compatibility
+discovery through behavior/tool functions, the settings class, and object
+schemas. A declared path is exact: a missing or unreadable file does not fall
+back to a nearby manifest.
 
 ---
 
@@ -166,6 +176,8 @@ class Pack:
     policies: tuple[PackPolicy, ...] = ()
     prompts: tuple[PackPrompt, ...] = ()
     settings_schema: type = EmptySettings
+    capabilities: tuple[CapabilityDecl, ...] = ()
+    manifest_path: Path | None = None
 ```
 
 **Frozen**: mutation after construction raises. This forces packs to
@@ -181,18 +193,22 @@ List arguments are converted to tuples in `__post_init__` for
 convenience.
 
 `Pack.__post_init__` validates:
-  - `name` is a non-empty lowercase ASCII identifier (matches
-    `^[a-z][a-z0-9_]*$`)
-  - `version` is non-empty
+  - `name` is a 1–64 character lowercase ASCII identifier (matches
+    `^[a-z][a-z0-9_]{0,63}$`)
+  - `version` is a non-whitespace-padded PEP 440 string; its exact spelling is
+    preserved as part of Pack identity
   - object types have unique names within the pack
   - relation types have unique names within the pack
   - behavior names are unique within the pack
   - tool names are unique within the pack
   - prompts have unique names within the pack
   - `settings_schema` is a Pydantic `BaseModel` subclass
+  - `manifest_path`, when present, is an absolute `pathlib.Path`
 
-Validation failures raise `PackValidationError` at construction —
-not at load.
+Validation failures normally raise `PackValidationError` at
+construction. Because an `LLMBehavior.tools` list remains mutable for
+authoring, `Runtime.load_pack()` defensively revalidates pack-local Tool
+membership before changing any runtime, graph, or event state.
 
 ---
 
@@ -282,10 +298,14 @@ rt.get_behavior("claim_extractor")           # works when unambiguous
 rt.get_behavior("diligence.claim_extractor") # always works
 ```
 
-Same rule for tools (`diligence.fetch_company_docs`). LLM behaviors
-with `tools=["fetch_company_docs"]` resolve the short name through
-the same rule — short forms work when only one pack declares the
-tool.
+Same public lookup rule for tools (`diligence.fetch_company_docs`). An
+LLM behavior's declaration is resolved with behavior ownership in mind:
+a dotted name is exact; a pack behavior tries its own `pack.short`, then
+an exact global declaration, then a unique tool from another pack; a
+global behavior tries the exact global declaration before a unique pack
+tool. Use a dotted declaration whenever multiple cross-pack tools share
+a short name. This declaration precedence deliberately does not change
+the pack-first short-name behavior of `Runtime.get_tool()`.
 
 Why this asymmetry: the canonical form is what shows up in
 operational artifacts where ambiguity is dangerous (a trace, a
@@ -319,6 +339,28 @@ def public_helper(args, ctx):
 intended for infrastructure packs that explicitly provide tools for
 other packs to use. The default is scoped so that pack tools cannot
 silently collide with each other or with user-defined tools.
+
+### Authoring references and runtime bindings
+
+`@llm_behavior(tools=[...])` accepts Tool objects and name strings, in
+any combination. The list remains mutable: edits made between public
+runtime drains take effect on the next drain, and declaration order and
+duplicates are preserved because they contribute to prompt identity.
+
+At each drain the runtime resolves that flexible authoring list once to
+canonical Tool objects. A pack-local object reference must be the same
+object listed in that Pack's `tools`; borrowing a Tool object created by
+another pack is a `PackValidationError`. The loaded behavior exposes the
+canonical runtime copies, so code inspecting it should compare
+`tool.name`, not Tool object identity across disable/reload cycles.
+
+Provider definitions, authorization, dispatch, cache entries, events,
+assistant/tool messages, and replay all use canonical names. If a custom
+provider returns an undotted call name, the runtime copies the response
+and rewrites it only when that suffix identifies one distinct declared
+canonical Tool. A missing or ambiguous returned name fails as
+`UnknownToolError` before it can enter the successful-response cache or
+event stream.
 
 ---
 
@@ -499,17 +541,88 @@ policies = [
 ]
 ```
 
-Loaded policies modify how `graph.add_object` behaves: objects of
-the listed types are emitted as `object.proposed` (not
-`object.created`) and require `rt.approve(id)` before becoming
-visible in the projected graph.
+`requires_approval` supplies pack-owner attribution when behavior code
+explicitly calls `ctx.propose_object` for a listed type. The call emits
+`approval.proposed`; `rt.approve(id)` later materializes the object and
+emits `object.created`.
+
+Loaded policies do not modify `graph.add_object`. A direct add is immediate,
+emits `object.created`, and creates no pending approval. The behavior author
+chooses the operator-review path by calling `Context.propose_object`.
 
 Policy names are pack-scoped via the same prefixing rule:
 `diligence.memo_approval`.
 
-`DiligenceSettings.auto_approve_memos: bool = True` (default true so
-the demo flows without manual intervention) lets the pack flip the
-gating off. Set to `False` to see the approval flow.
+If a pack setting selects between immediate and reviewed operation, behavior
+code must branch on that setting and call the appropriate API. The runtime
+does not turn `requires_approval` into an automatic interception or grant.
+
+`PackPolicy.auto_apply` is reserved compatibility metadata and currently has
+no runtime effect. List input is normalized to a tuple, but the loader and
+runtime do not read it. Its values have no defined object-type, setting,
+exemption, or automatic grant semantics. Do not use the field to configure,
+bypass, or automatically decide an approval workflow.
+
+---
+
+## 9.1. Capability declarations and host-owned wiring
+
+A pack can declare outbound gateway capabilities in both Python and its
+manifest:
+
+```python
+from activegraph.packs.manifest import CapabilityDecl
+
+pack = Pack(
+    ...,
+    capabilities=(
+        CapabilityDecl(
+            provider="search",
+            capability="query",
+            risk_class="medium",
+            action_class="R2",
+            credential_ref="search/default",
+        ),
+    ),
+)
+```
+
+```toml
+[surface]
+consumes = ["search.query"]
+
+[[surface.capabilities]]
+provider = "search"
+capability = "query"
+risk_class = "medium"
+action_class = "R2"
+credential_ref = "search/default"
+```
+
+These declarations are verified and audited, not imperatively wired:
+
+- `Pack(...)` requires `CapabilityDecl` entries, closed
+  `risk_class`/`action_class` values, and unique `(provider, capability)`
+  pairs. It does not require non-empty provider, capability, or credential
+  strings.
+- `verify_surface` compares capabilities in both directions by
+  `(provider, capability)` and requires exact `risk_class` and `action_class`
+  agreement. It does not compare `credential_ref`.
+- Normal `Runtime.load_pack` performs that check for a discoverable manifest
+  as a warning tier: a mismatch emits `reason="pack.manifest_invalid"`, but the
+  pack remains loaded and dispatchable before 2.0.
+- Sandbox materialization applies the same capability comparison strictly,
+  after bundle verification and import but before `Runtime.load_pack`; a
+  mismatch fails materialization.
+- A successful load records capabilities in the `pack.loaded` audit payload.
+  ActiveGraph does not create a gateway registry or resolve credentials from
+  the declaration. Host code owns registration, credential resolution, and
+  the gateway-side check that a registration was declared.
+
+Manifest `consumes` is different. It is parsed and normalized to a tuple, but
+it is host-owned wiring metadata and is excluded from `verify_surface` in both
+normal and sandbox paths. A `consumes`-only difference neither warns nor fails
+materialization, and it never registers a runtime capability.
 
 ---
 
@@ -587,6 +700,19 @@ types, behavior names, tool names, or policy names raises
 identifier. **Conflict detection runs before any state mutation** —
 a failed `load_pack` leaves the runtime unchanged.
 
+After a successful load, the advisory manifest tier parses and cross-checks a
+discoverable manifest. It never blocks a 1.x load: validation failures use the
+structured reason `pack.manifest_invalid`; explicit missing/unreadable paths
+and unexpected locator/checker failures use `pack.manifest_check_failed`.
+They log once per `(name, version)` at WARNING. A legacy pack with no locator
+and no discoverable manifest remains silent. Runtime checks do not recompute
+artifact hashes; CI and sandbox materialization do. `content_hash` excludes the
+manifest itself, while an externally pinned bundle hash includes it.
+
+`[fixtures].entrypoint` is a resource path relative to the manifest. It must
+stay inside the pack, contain no `..` or symlink component, and name an
+existing regular file. It is not automatically executed as a sandbox scenario.
+
 ### Disabling a pack (v1.4)
 
 `runtime.disable_pack(name)` deregisters a loaded pack **now**: its
@@ -651,10 +777,13 @@ python -c "import my_pack; print(my_pack.pack)"
 The scaffolding command produces a package that:
   - declares `activegraph` as a dependency
   - registers itself under the `activegraph.packs` entry point
-  - has empty stubs for object types, behaviors, tools, settings
+  - has example stubs for object types, behaviors, tools, and settings
+  - ships a verified `manifest.toml` and deterministic fixture resource
+  - records the manifest and prompts as wheel package data
   - has a `tests/test_pack_loads.py` smoke test that imports the
     pack, asserts no global registry side effects, loads it into a
-    fresh runtime, and asserts the `pack.loaded` event appears
+    fresh runtime without manifest warnings, verifies the manifest surface and
+    content hash, and asserts the `pack.loaded` event appears
 
 The package name (directory and Python package) is the
 kebab-to-snake transformation of the pack name: `pack new
@@ -671,15 +800,17 @@ calling `load_by_name`.
 
 ## 15. Trust model and packs as code
 
-**Packs are not sandboxed.** A pack is a Python package. Installing
+**Packs are not sandboxed during ordinary in-process loading.** A pack is a Python package. Installing
 a pack is equivalent to installing any Python package: it can read
 your files, make network calls, exec arbitrary code in your process.
 Trust at install time, not at runtime.
 
 The runtime does not enforce any pack-specific privilege
-restrictions. There is no allowlist, no capability system, no
-syscall filter. If you don't trust a pack's source, don't install
-it. This is the same model as `pip` and as Python itself.
+restrictions. Capability declarations are verified and audited metadata, not
+an allowlist or gateway registration system, and there is no syscall filter.
+If you don't trust a pack's source, don't install it. This is the same model
+as `pip` and as Python itself. The separate fork-trial sandbox is an explicit
+evaluation workflow, not a restriction placed on normal `load_pack`.
 
 This decision is locked. See CONTRACT v0.9 #12.
 

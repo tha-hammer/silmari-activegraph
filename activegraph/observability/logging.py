@@ -14,6 +14,8 @@ field names keep working across framework versions.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from copy import deepcopy
 import json
 import logging
 import sys
@@ -45,6 +47,9 @@ LOG_FIELDS: tuple[str, ...] = (
     # for the failure reason's documentation page. Operators tail
     # logs and click through to the reason's doc-page from the URL.
     "doc_url",
+    # v1.11: optional caller-supplied payload. The configured JSON
+    # formatter detaches and redacts it at the final output boundary.
+    "payload",
 )
 
 # Reserved attributes on every LogRecord (stdlib internals). Any
@@ -66,8 +71,9 @@ _payload_redactor_state: dict[str, Optional[Callable[[dict[str, Any]], dict[str,
 
 
 def set_payload_redactor(fn: Optional[Callable[[dict[str, Any]], dict[str, Any]]]) -> None:
-    """Install a redactor that runs on any payload before it enters a log
-    record's ``extra`` dict. Idempotent. Pass None to remove.
+    """Install the configured JSON formatter's payload redactor.
+
+    Idempotent. Pass None to remove.
     """
     _payload_redactor_state["fn"] = fn
 
@@ -99,8 +105,13 @@ class JsonLineFormatter(logging.Formatter):
         # Pluck extras: any record attribute not in the reserved set is
         # treated as a documented field. We only emit fields documented
         # in LOG_FIELDS so the schema is stable.
+        payload = getattr(record, "payload", _MISSING)
+        if payload is not _MISSING and payload is not None:
+            prepared_payload = _prepare_log_payload(payload)
+            if prepared_payload is not _MISSING:
+                out["payload"] = prepared_payload
         for k in LOG_FIELDS:
-            if k in out:
+            if k == "payload" or k in out:
                 continue
             v = getattr(record, k, _MISSING)
             if v is _MISSING or v is None:
@@ -122,6 +133,32 @@ class _MISSING_T:  # sentinel
 
 
 _MISSING = _MISSING_T()
+
+
+def _prepare_log_payload(payload: object) -> dict[str, Any] | _MISSING_T:
+    """Detach, redact, and validate one explicit JSON log payload."""
+    if not isinstance(payload, Mapping):
+        return _MISSING
+
+    try:
+        detached = deepcopy(dict(payload))
+    except Exception:
+        return _MISSING
+
+    try:
+        redacted = redact_payload(detached)
+    except Exception:
+        return _MISSING
+
+    if type(redacted) is not dict:
+        return _MISSING
+
+    try:
+        json.dumps(redacted, separators=(",", ":"), ensure_ascii=False)
+    except Exception:
+        return _MISSING
+
+    return redacted
 
 
 def _iso_utc(ts: float) -> str:
@@ -183,8 +220,8 @@ def configure_logging(
         json_output: True for the documented JSON-line format; False for
             the stdlib default (one human-readable line).
         stream: where to write. Defaults to stderr (the logging default).
-        payload_redactor: optional callable(dict) -> dict applied to any
-            payload before it's added to a log record's extra fields.
+        payload_redactor: optional callable(dict) -> dict applied by the
+            configured JSON formatter to an explicit payload extra.
     """
     set_payload_redactor(payload_redactor)
     logger = logging.getLogger(LOGGER_ROOT)

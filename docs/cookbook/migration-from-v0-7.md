@@ -36,11 +36,21 @@ own. Mismatched schemas raise
 [`schema-version-mismatch`](../reference/errors/schema-version-mismatch.md)
 at open time.
 
-To migrate runs forward:
+First use an activegraph build that can read the source schema. From
+that compatible environment, copy the runs to a fresh destination:
 
 ```bash
 activegraph migrate --from sqlite:///old.db --to sqlite:///new.db
 ```
+
+The migration command checks the source schema first and the
+destination schema second. The current build exits 4 before touching
+the destination if it cannot read `old.db`; it does not translate an
+otherwise incompatible source schema. Use the source build and any
+required staged or version-specific migration path before upgrading
+the resulting store. A compatible source plus a fresh destination
+eagerly creates only the destination schema and metadata before run
+migration begins.
 
 The migration is transaction-per-run, idempotent, one-directional
 (CONTRACT v0.8 #5). Each run migrates in a single transaction; a

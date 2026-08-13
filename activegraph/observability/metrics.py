@@ -21,6 +21,129 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 
+# ---- bounded labels derived from open event payloads ---------------------
+
+# These are metric-only values. Event payloads and diagnostic logs keep their
+# original model/tool/reason strings; only metric tags pass through this closed
+# normalization boundary.
+METRIC_UNKNOWN_MODEL = "unknown_model"
+METRIC_UNKNOWN_TOOL = "unknown_tool"
+METRIC_UNKNOWN_REASON = "unknown_reason"
+METRIC_LLM_OTHER_REASON = "llm.other"
+METRIC_TOOL_OTHER_REASON = "tool.other"
+METRIC_BUDGET_OTHER_REASON = "budget.other"
+METRIC_EXCEPTION_OTHER_REASON = "exception.other"
+METRIC_OTHER_REASON = "other"
+
+LLM_METRIC_REASONS = frozenset(
+    {
+        "llm.parse_error",
+        "llm.schema_violation",
+        "llm.fixture_missing",
+        "llm.rate_limited",
+        "llm.network_error",
+        "llm.auth_error",
+        "llm.request_error",
+    }
+)
+
+TOOL_METRIC_REASONS = frozenset(
+    {
+        "tool.timeout",
+        "tool.network_error",
+        "tool.invalid_input",
+        "tool.invalid_output",
+        "tool.execution_error",
+        "tool.unknown_tool",
+        "tool.fixture_missing",
+        "tool.max_turns_exhausted",
+        "tool.unrecorded_external_io",
+        "budget.tool_calls_exhausted",
+        "budget.cost_exhausted",
+    }
+)
+
+REPLAY_METRIC_REASONS = frozenset(
+    {
+        "prompt_hash_mismatch",
+        "embedding_hash_mismatch",
+        "type_mismatch",
+        "length_mismatch",
+    }
+)
+
+BEHAVIOR_METRIC_REASONS = frozenset(
+    {
+        *LLM_METRIC_REASONS,
+        *TOOL_METRIC_REASONS,
+        "llm.prompt_assembly_error",
+        "budget.exhausted",
+        "budget.events_exhausted",
+        "budget.behavior_calls_exhausted",
+        "budget.llm_calls_exhausted",
+        "budget.tool_calls_exhausted",
+        "budget.patches_exhausted",
+        "budget.depth_exhausted",
+        "budget.seconds_exhausted",
+        "budget.cost_exhausted",
+    }
+)
+
+
+def normalize_metric_model(value: object) -> str:
+    """Return an event model string or the stable metric-only fallback."""
+
+    return value if isinstance(value, str) else METRIC_UNKNOWN_MODEL
+
+
+def normalize_metric_tool(value: object) -> str:
+    """Return an event tool string or the stable metric-only fallback."""
+
+    return value if isinstance(value, str) else METRIC_UNKNOWN_TOOL
+
+
+def normalize_llm_metric_reason(value: object) -> str:
+    """Bound an open LLM event reason to the documented metric labels."""
+
+    if not isinstance(value, str):
+        return METRIC_UNKNOWN_REASON
+    return value if value in LLM_METRIC_REASONS else METRIC_LLM_OTHER_REASON
+
+
+def normalize_tool_metric_reason(value: object) -> str:
+    """Bound an open tool event reason to the documented metric labels."""
+
+    if not isinstance(value, str):
+        return METRIC_UNKNOWN_REASON
+    return value if value in TOOL_METRIC_REASONS else METRIC_TOOL_OTHER_REASON
+
+
+def normalize_behavior_metric_reason(value: object) -> str:
+    """Bound behavior failure reasons without changing diagnostic payloads."""
+
+    if not isinstance(value, str):
+        return METRIC_UNKNOWN_REASON
+    if value in BEHAVIOR_METRIC_REASONS:
+        return value
+    if value.startswith("llm."):
+        return METRIC_LLM_OTHER_REASON
+    if value.startswith("tool."):
+        return METRIC_TOOL_OTHER_REASON
+    if value.startswith("budget."):
+        return METRIC_BUDGET_OTHER_REASON
+    if value.startswith("exception."):
+        return METRIC_EXCEPTION_OTHER_REASON
+    return METRIC_OTHER_REASON
+
+
+def normalize_replay_metric_reason(value: object) -> str:
+    """Bound strict replay divergence kinds to the closed public set."""
+
+    if not isinstance(value, str):
+        return METRIC_UNKNOWN_REASON
+    return value if value in REPLAY_METRIC_REASONS else METRIC_OTHER_REASON
+
+
 # ---- the protocol --------------------------------------------------------
 
 
@@ -117,25 +240,25 @@ METRIC_NAMES: tuple[MetricSpec, ...] = (
         "activegraph_llm_failed_total",
         "counter",
         ("model", "reason"),
-        "LLM calls that failed before producing a usable response.",
+        "LLM responses whose error field is a mapping, by bounded reason.",
     ),
     MetricSpec(
         "activegraph_llm_tokens_in",
         "histogram",
         ("model",),
-        "Input tokens reported by the provider per llm.responded.",
+        "Nonnegative input tokens on successful llm.responded events.",
     ),
     MetricSpec(
         "activegraph_llm_tokens_out",
         "histogram",
         ("model",),
-        "Output tokens reported by the provider per llm.responded.",
+        "Nonnegative output tokens on successful llm.responded events.",
     ),
     MetricSpec(
         "activegraph_llm_cost_usd",
         "histogram",
         ("model",),
-        "Per-call cost in USD as reported by the provider.",
+        "Valid successful response cost; logical cache hits record zero.",
     ),
     MetricSpec(
         "activegraph_tools_calls_total",
@@ -153,19 +276,19 @@ METRIC_NAMES: tuple[MetricSpec, ...] = (
         "activegraph_tools_failed_total",
         "counter",
         ("tool", "reason"),
-        "Tool calls that failed.",
+        "Tool responses whose error field is a mapping, by bounded reason.",
     ),
     MetricSpec(
         "activegraph_tools_duration_seconds",
         "histogram",
         ("tool",),
-        "Wall-clock duration of a tool invocation.",
+        "Response latency; cache hits and explicit early errors record zero.",
     ),
     MetricSpec(
         "activegraph_queue_depth",
         "gauge",
         (),
-        "Current depth of the runtime's event queue.",
+        "Most recently publishing runtime's local main-queue depth.",
     ),
     MetricSpec(
         "activegraph_sink_queue_depth",
@@ -183,7 +306,7 @@ METRIC_NAMES: tuple[MetricSpec, ...] = (
         "activegraph_sink_events_dropped_total",
         "counter",
         ("sink", "reason"),
-        "Sink deliveries rejected or evicted under declared policy.",
+        "Sink deliveries refused, rejected, or evicted under declared policy.",
     ),
     MetricSpec(
         "activegraph_sink_errors_total",
@@ -195,31 +318,31 @@ METRIC_NAMES: tuple[MetricSpec, ...] = (
         "activegraph_budget_cost_remaining_usd",
         "gauge",
         ("run_id",),
-        "Remaining cost budget for an active run, USD.",
+        "Finite cost remaining after successful Runtime-owned observations.",
     ),
     MetricSpec(
         "activegraph_budget_events_remaining",
         "gauge",
         ("run_id",),
-        "Remaining event budget for an active run.",
+        "Finite event capacity after successful Runtime-owned observations.",
     ),
     MetricSpec(
         "activegraph_patterns_evaluated_total",
         "counter",
         (),
-        "Pattern evaluations across all behaviors.",
+        "Every actual matcher call, including empty and raised evaluations.",
     ),
     MetricSpec(
         "activegraph_patterns_evaluation_duration_seconds",
         "histogram",
         (),
-        "Per-evaluation duration of a pattern subscription.",
+        "Duration of every actual pattern matcher call.",
     ),
     MetricSpec(
         "activegraph_replay_divergence_detected_total",
         "counter",
         ("reason",),
-        "Replay-strict re-runs that diverged from the recorded log.",
+        "Each escaping strict replay divergence, by bounded exception kind.",
     ),
 )
 

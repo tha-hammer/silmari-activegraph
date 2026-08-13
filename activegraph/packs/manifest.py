@@ -27,10 +27,12 @@ Entry points:
     object, per the spec's identity mapping. Since ``Pack`` grew a
     declarative ``capabilities`` field (spec Q8), declared
     ``capabilities`` ARE checked here too — two-way by
-    ``(provider, capability)`` with ``risk_class`` agreement (a
-    relabeled risk class is exactly the swap the decision surface must
-    catch). Only ``consumes`` stays out of scope, being imperative
-    gateway wiring the loader cannot observe.
+    ``(provider, capability)`` with exact ``risk_class`` and
+    ``action_class`` agreement (a relabel is exactly the swap the
+    decision surface must catch). ``credential_ref`` is recorded but
+    not compared. Only ``consumes`` stays out of scope: it parses to a
+    tuple as host-owned wiring metadata and is excluded from both the
+    normal loader and strict sandbox surface comparison.
   * :func:`compute_content_hash` / :func:`verify_content_hash` — the
     spec §4 canonical byte stream over the pack directory EXCLUDING
     ``manifest.toml``, byte-exact, with this implementation's
@@ -56,15 +58,9 @@ from pathlib import Path
 from typing import Any
 
 from activegraph.errors import PackError
+from activegraph.packs.validation import validate_pack_name, validate_pack_version
 
 
-_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
-# PEP 440 core grammar (syntactic check only; semantic range
-# resolution is load-time enforcement, not this cycle).
-_VERSION_RE = re.compile(
-    r"^v?\d+(\.\d+)*((a|b|rc)\d+)?(\.post\d+)?(\.dev\d+)?"
-    r"(\+[a-z0-9]+(\.[a-z0-9]+)*)?$"
-)
 _SPECIFIER_RE = re.compile(
     r"^\s*(~=|==|!=|<=|>=|<|>|===)\s*[\w.*+!-]+\s*(,\s*(~=|==|!=|<=|>=|<|>|===)\s*[\w.*+!-]+\s*)*$"
 )
@@ -75,6 +71,56 @@ _RISK_CLASSES = frozenset({"low", "medium", "high", "critical"})
 _ACTION_CLASSES = frozenset({"R0", "R1", "R2", "R3", "R4"})
 _AUTHORED_BY = frozenset({"human", "agent"})
 _HASH_PREFIX = "sha256:"
+
+
+def _validate_fixture_entrypoint(
+    manifest_path: Path, raw_entrypoint: Any, violations: list[str]
+) -> str:
+    """Validate a fixture resource without following pack-local symlinks."""
+    field_name = "fixtures.entrypoint"
+    if not isinstance(raw_entrypoint, str):
+        violations.append(f"{field_name} must be a string")
+        return ""
+    if not raw_entrypoint:
+        violations.append(f"{field_name} must be nonempty")
+        return ""
+
+    relative = Path(raw_entrypoint)
+    if relative.is_absolute():
+        violations.append(f"{field_name} must be a relative pack path")
+        return raw_entrypoint
+    if ".." in relative.parts:
+        violations.append(f"{field_name} must not contain '..' traversal")
+        return raw_entrypoint
+
+    root = manifest_path.parent.resolve()
+    candidate = root / relative
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            violations.append(
+                f"{field_name} must not traverse a symlink: {raw_entrypoint!r}"
+            )
+            return raw_entrypoint
+
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        violations.append(
+            f"{field_name} resolves outside the pack root: {raw_entrypoint!r}"
+        )
+        return raw_entrypoint
+    if not candidate.exists():
+        violations.append(
+            f"{field_name} target does not exist: {raw_entrypoint!r}"
+        )
+    elif not candidate.is_file():
+        violations.append(
+            f"{field_name} target must be a regular file: {raw_entrypoint!r}"
+        )
+    return raw_entrypoint
 
 
 class PackManifestError(PackError, ValueError):
@@ -124,7 +170,7 @@ class PackManifestError(PackError, ValueError):
 @dataclass(frozen=True)
 class CapabilityDecl:
     """One ``[[surface.capabilities]]`` entry: a gateway capability
-    this pack's host wiring registers, with its risk class.
+    this pack declares for its host wiring to register.
 
     ``action_class`` (CONTRACT v1.9 #1, ADR 0016) is the OPTIONAL
     canonical consequence class — ``R0|R1|R2|R3|R4`` — that drives the
@@ -132,7 +178,9 @@ class CapabilityDecl:
     ineligible for the new path's automation (it fails closed to
     approval). ``risk_class`` stays the required legacy/operational
     label; the two fields are separate policy dimensions and neither is
-    ever inferred from the other.
+    ever inferred from the other. The declaration is verified and
+    recorded; ActiveGraph does not register the gateway or resolve
+    ``credential_ref``.
     """
 
     provider: str
@@ -146,9 +194,10 @@ class CapabilityDecl:
 class PackManifest:
     """A parsed, schema-valid ``manifest.toml``. PROVISIONAL shape.
 
-    Field names mirror the spec's tables; ``raw`` preserves the full
-    parsed TOML for consumers that need keys this dataclass doesn't
-    surface yet.
+    Field names mirror the spec's tables; list-shaped ``consumes`` is
+    normalized to a tuple but remains host-owned metadata excluded from
+    ``verify_surface``. ``raw`` preserves the full parsed TOML for consumers
+    that need keys this dataclass doesn't surface yet.
     """
 
     name: str
@@ -179,10 +228,10 @@ def load_manifest(path: str | Path) -> PackManifest:
 
     ``path`` is the manifest file or the pack root containing it.
     Raises :class:`PackManifestError` carrying EVERY violation found;
-    returns the parsed :class:`PackManifest` when clean. Version and
-    range fields are checked syntactically (PEP 440 shape); semantic
-    range resolution against a running runtime is load-time
-    enforcement and deliberately not part of this cycle.
+    returns the parsed :class:`PackManifest` when clean. Pack versions
+    use the complete PEP 440 grammar; dependency ranges are checked
+    syntactically, while semantic resolution against a running runtime
+    is load-time enforcement and deliberately not part of this cycle.
     """
     p = Path(path)
     if p.is_dir():
@@ -221,14 +270,18 @@ def load_manifest(path: str | Path) -> PackManifest:
     surface = table("surface")
     fixtures = table("fixtures")
 
-    name = str(pack.get("name", ""))
-    if not _NAME_RE.match(name):
-        violations.append(
-            f"pack.name {name!r} must match ^[a-z][a-z0-9_]{{1,63}}$"
-        )
-    version = str(pack.get("version", ""))
-    if not _VERSION_RE.match(version):
-        violations.append(f"pack.version {version!r} is not PEP 440")
+    raw_name = pack.get("name", "")
+    try:
+        name = validate_pack_name(raw_name, field="pack.name")
+    except ValueError as exc:
+        violations.append(str(exc))
+        name = raw_name if isinstance(raw_name, str) else ""
+    raw_version = pack.get("version", "")
+    try:
+        version = validate_pack_version(raw_version, field="pack.version")
+    except ValueError as exc:
+        violations.append(str(exc))
+        version = raw_version if isinstance(raw_version, str) else ""
     description = str(pack.get("description", ""))
     if not description:
         violations.append("pack.description must be nonempty")
@@ -345,9 +398,9 @@ def load_manifest(path: str | Path) -> PackManifest:
         violations.append("surface.consumes must be a list of strings")
         consumes_v = []
 
-    fixtures_entrypoint = str(fixtures.get("entrypoint", ""))
-    if not fixtures_entrypoint:
-        violations.append("fixtures.entrypoint must be nonempty")
+    fixtures_entrypoint = _validate_fixture_entrypoint(
+        p, fixtures.get("entrypoint", ""), violations
+    )
     fixtures_deterministic = fixtures.get("deterministic")
     if not isinstance(fixtures_deterministic, bool):
         violations.append("fixtures.deterministic must be a boolean")
@@ -393,10 +446,11 @@ def verify_surface(manifest: PackManifest, pack: Any) -> None:
     ``capabilities`` ARE verified here (spec Q8, runtime half): since
     ``Pack`` carries a declarative ``capabilities`` field, this runs
     the same two-way check keyed by ``(provider, capability)`` and
-    additionally requires ``risk_class`` agreement on any pair
-    declared on both sides. Only ``consumes`` stays out of scope —
-    it is imperative gateway wiring invisible at ``load_pack`` time,
-    left to static CI / evolution gates.
+    additionally requires exact ``risk_class`` and ``action_class``
+    agreement on any pair declared on both sides. ``credential_ref`` is
+    recorded but not compared. Only ``consumes`` stays out of scope: normal
+    loading and strict sandbox materialization both parse it but exclude it
+    from surface verification because gateway wiring remains host-owned.
     """
     violations: list[str] = []
 

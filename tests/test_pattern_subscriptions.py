@@ -14,12 +14,84 @@ from __future__ import annotations
 import pytest
 
 from activegraph import (
+    Event,
     Graph,
     Runtime,
     UnsupportedPatternError,
     behavior,
     clear_registry,
 )
+from activegraph.runtime.registry import Registry
+
+
+class _PatternRecordingMetrics:
+    def __init__(self) -> None:
+        self.counters: list[tuple[str, dict, float]] = []
+        self.histograms: list[tuple[str, dict, float]] = []
+
+    def counter(self, name, tags, value=1.0):
+        self.counters.append((name, dict(tags), value))
+
+    def histogram(self, name, tags, value):
+        self.histograms.append((name, dict(tags), value))
+
+    def gauge(self, name, tags, value):
+        return None
+
+    def pattern_counts(self) -> list[float]:
+        return [
+            value
+            for name, tags, value in self.counters
+            if name == "activegraph_patterns_evaluated_total" and tags == {}
+        ]
+
+    def pattern_durations(self) -> list[float]:
+        return [
+            value
+            for name, tags, value in self.histograms
+            if name == "activegraph_patterns_evaluation_duration_seconds"
+            and tags == {}
+        ]
+
+
+@pytest.mark.parametrize(
+    ("event_type", "eligible"),
+    [
+        ("behavior.started", False),
+        ("relation_behavior.completed", False),
+        ("runtime.idle", False),
+        ("llm.requested", False),
+        ("tool.responded", False),
+        ("pattern.matched", False),
+        ("approval.proposed", False),
+        ("embedding.requested", False),
+        ("dev.override", False),
+        ("authority.decision", False),
+        ("context.read", False),
+        ("context.foo", True),
+        ("pack.loaded", True),
+        ("goal.created", True),
+        ("object.created", True),
+        ("custom.event", True),
+        ("runtimeish.event", True),
+    ],
+)
+def test_pattern_only_registry_policy_is_complete(
+    event_type: str, eligible: bool
+) -> None:
+    """Registry enforces pattern-only eligibility without Runtime masking it."""
+
+    clear_registry()
+
+    @behavior(name="auditor", pattern="(c:claim)")
+    def auditor(event, graph, ctx):
+        pass
+
+    graph = Graph()
+    graph.add_object("claim", {"text": "present"})
+    event = Event(id="evt_policy", type=event_type)
+
+    assert bool(Registry([auditor]).match(event, graph)) is eligible
 
 
 def test_pattern_and_event_type_both_required():
@@ -130,3 +202,222 @@ def test_pattern_matched_event_emitted_when_pattern_fires():
     assert len(pm) == 1
     assert pm[0].payload["behavior"] == "critic"
     assert pm[0].payload["matches_count"] == 1
+
+
+def test_pattern_observer_counts_empty_and_raised_evaluations_without_masking():
+    observed: list[float] = []
+
+    @behavior(name="observed", on=["pattern.observe"])
+    def observed_behavior(event, graph, ctx):
+        pass
+
+    class EmptyMatcher:
+        def matches(self, event, graph):
+            return []
+
+    observed_behavior.pattern_matcher = EmptyMatcher()
+    registry = Registry([observed_behavior], pattern_observer=observed.append)
+    graph = Graph()
+    event = Event(
+        id=graph.ids.event(),
+        type="pattern.observe",
+        payload={},
+        actor="test",
+        timestamp=graph.clock.now(),
+    )
+    assert registry.match(event, graph) == []
+    assert len(observed) == 1
+    assert observed[0] >= 0
+
+    class RaisingMatcher:
+        def matches(self, event, graph):
+            raise LookupError("matcher wins")
+
+    observed_behavior.pattern_matcher = RaisingMatcher()
+    with pytest.raises(LookupError, match="matcher wins"):
+        registry.match(event, graph)
+    assert len(observed) == 2
+
+
+def test_pattern_observer_is_not_called_for_gates_or_missing_matcher():
+    observed: list[float] = []
+
+    @behavior(name="gated", on=["expected"])
+    def gated(event, graph, ctx):
+        pass
+
+    class Matcher:
+        def matches(self, event, graph):
+            return []
+
+    gated.pattern_matcher = Matcher()
+    @behavior(name="plain", on=["actual"])
+    def plain(event, graph, ctx):
+        pass
+
+    registry = Registry([gated, plain], pattern_observer=observed.append)
+    graph = Graph()
+    event = Event(
+        id=graph.ids.event(),
+        type="actual",
+        payload={},
+        actor="test",
+        timestamp=graph.clock.now(),
+    )
+    registry.match(event, graph)
+    assert observed == []
+
+
+def test_pattern_observer_failure_never_changes_matcher_exception_precedence():
+    @behavior(name="both_raise", on=["pattern.raise"])
+    def both_raise(event, graph, ctx):
+        pass
+
+    class RaisingMatcher:
+        def matches(self, event, graph):
+            raise LookupError("matcher failure")
+
+    both_raise.pattern_matcher = RaisingMatcher()
+    registry = Registry(
+        [both_raise],
+        pattern_observer=lambda elapsed: (_ for _ in ()).throw(
+            RuntimeError("observer failure")
+        ),
+    )
+    graph = Graph()
+    event = Event(
+        id=graph.ids.event(),
+        type="pattern.raise",
+        payload={},
+        actor="test",
+        timestamp=graph.clock.now(),
+    )
+    with pytest.raises(LookupError, match="matcher failure"):
+        registry.match(event, graph)
+
+
+def test_runtime_pattern_metrics_count_only_actual_matcher_calls() -> None:
+    class EmptyMatcher:
+        def matches(self, event, graph):
+            return []
+
+    @behavior(name="eligible_empty", on=["audit.observe"])
+    def eligible_empty(event, graph, ctx):
+        pass
+
+    eligible_empty.pattern_matcher = EmptyMatcher()
+    metrics = _PatternRecordingMetrics()
+    graph = Graph()
+    runtime = Runtime(graph, behaviors=[eligible_empty], metrics=metrics)
+    graph.emit(
+        Event(
+            id=graph.ids.event(),
+            type="different.type",
+            payload={},
+            timestamp=graph.clock.now(),
+        )
+    )
+    runtime.run_until_idle()
+    assert metrics.pattern_counts() == []
+    assert metrics.pattern_durations() == []
+
+    graph.emit(
+        Event(
+            id=graph.ids.event(),
+            type="audit.observe",
+            payload={},
+            timestamp=graph.clock.now(),
+        )
+    )
+    runtime.run_until_idle()
+    assert metrics.pattern_counts() == [1.0]
+    assert len(metrics.pattern_durations()) == 1
+    assert metrics.pattern_durations()[0] >= 0.0
+
+
+def test_runtime_pattern_metrics_cover_multiple_and_delayed_recheck() -> None:
+    class MatchMatcher:
+        def matches(self, event, graph):
+            return [object()]
+
+    @behavior(name="first_pattern", on=["audit.multi"])
+    def first_pattern(event, graph, ctx):
+        pass
+
+    @behavior(name="second_pattern", on=["audit.multi"])
+    def second_pattern(event, graph, ctx):
+        pass
+
+    first_pattern.pattern_matcher = MatchMatcher()
+    second_pattern.pattern_matcher = MatchMatcher()
+    metrics = _PatternRecordingMetrics()
+    graph = Graph()
+    runtime = Runtime(
+        graph,
+        behaviors=[first_pattern, second_pattern],
+        metrics=metrics,
+    )
+    graph.emit(
+        Event(
+            id=graph.ids.event(),
+            type="audit.multi",
+            payload={},
+            timestamp=graph.clock.now(),
+        )
+    )
+    runtime.run_until_idle()
+    assert metrics.pattern_counts() == [1.0, 1.0]
+
+    @behavior(name="delayed_pattern", on=["audit.delayed"], activate_after=1)
+    def delayed_pattern(event, graph, ctx):
+        pass
+
+    delayed_pattern.pattern_matcher = MatchMatcher()
+    delayed_metrics = _PatternRecordingMetrics()
+    delayed_graph = Graph()
+    delayed_runtime = Runtime(
+        delayed_graph,
+        behaviors=[delayed_pattern],
+        metrics=delayed_metrics,
+    )
+    for event_type in ("audit.delayed", "advance.tick"):
+        delayed_graph.emit(
+            Event(
+                id=delayed_graph.ids.event(),
+                type=event_type,
+                payload={},
+                timestamp=delayed_graph.clock.now(),
+            )
+        )
+    delayed_runtime.run_until_idle()
+    assert delayed_metrics.pattern_counts() == [1.0, 1.0]
+    assert len(delayed_metrics.pattern_durations()) == 2
+    assert all(value >= 0.0 for value in delayed_metrics.pattern_durations())
+
+
+def test_runtime_pattern_metrics_preserve_matcher_exception() -> None:
+    class RaisingMatcher:
+        def matches(self, event, graph):
+            raise LookupError("runtime matcher failure")
+
+    @behavior(name="raising_pattern", on=["audit.raise"])
+    def raising_pattern(event, graph, ctx):
+        pass
+
+    raising_pattern.pattern_matcher = RaisingMatcher()
+    metrics = _PatternRecordingMetrics()
+    graph = Graph()
+    runtime = Runtime(graph, behaviors=[raising_pattern], metrics=metrics)
+    graph.emit(
+        Event(
+            id=graph.ids.event(),
+            type="audit.raise",
+            payload={},
+            timestamp=graph.clock.now(),
+        )
+    )
+
+    with pytest.raises(LookupError, match="runtime matcher failure"):
+        runtime.run_until_idle()
+    assert metrics.pattern_counts() == [1.0]
+    assert len(metrics.pattern_durations()) == 1

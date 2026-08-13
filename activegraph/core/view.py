@@ -10,7 +10,12 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from activegraph.core.event import Event
-from activegraph.core.graph import Object, Relation, evaluate_where
+from activegraph.core.graph import (
+    Object,
+    Relation,
+    _object_where_root,
+    evaluate_where,
+)
 
 
 class View:
@@ -41,11 +46,20 @@ class View:
         type: Optional[str] = None,
         where: Optional[dict[str, Any]] = None,
     ) -> list[Object]:
+        """Return scoped objects using the same filters as ``Graph.objects``.
+
+        Ordinary data fields are available as bare-name shorthand in
+        ``where``. Framework ``id``, ``type``, ``version``, ``data``, and
+        ``provenance`` remain authoritative; address colliding domain values
+        below ``data`` (for example, ``data.id``).
+        """
         out = self._objects
         if type is not None:
             out = [o for o in out if o.type == type]
         if where:
-            out = [o for o in out if evaluate_where(where, _object_root(o))]
+            out = [
+                o for o in out if evaluate_where(where, _object_where_root(o))
+            ]
         return list(out)
 
     def relations(self, type: Optional[str] = None) -> list[Relation]:
@@ -59,13 +73,3 @@ class View:
         if type is not None:
             out = [e for e in out if e.type == type]
         return list(out)
-
-
-def _object_root(o: Object) -> dict[str, Any]:
-    return {
-        "id": o.id,
-        "type": o.type,
-        "data": o.data,
-        "version": o.version,
-        "provenance": o.provenance,
-    }

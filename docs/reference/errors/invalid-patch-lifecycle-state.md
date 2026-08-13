@@ -20,7 +20,7 @@ Check the patch's status before applying:
 
 ```python
 patch = graph.get_patch(patch_id)
-if patch.status == "proposed":
+if patch is not None and patch.status == "proposed":
     graph.apply_patch(patch_id)
 else:
     # Already applied, rejected, or in another terminal state.
@@ -80,9 +80,9 @@ audit trail shows when and why the patch left `'proposed'`.
 ## When does this fire
 
 At `graph.apply_patch(patch_id)`, after the patch is fetched and
-its current status is read. The check is the second thing
-`apply_patch` does (after the patch-exists check that raises
-`KeyError` if the id is unknown), so misuse is caught early.
+its current status is read. The check follows the patch-exists check,
+which raises [`ApplyPatchNotFoundError`](apply-patch-not-found-error.md)
+if the id is unknown, so misuse is caught early.
 
 The error never fires from `propose_patch`, `reject_patch`, or
 `get_patch` — those are read-only or transition-initiating, not
@@ -111,6 +111,10 @@ principle.
 - [`runtime-context-required-error`](runtime-context-required-error.md)
   — the sibling ExecutionError for "the caller is using the
   primitive outside its intended context."
+- [`patch-not-found-error`](patch-not-found-error.md) — the shared catch
+  for missing apply/reject patch ids. The apply leaf remains a `KeyError`;
+  the reject leaf remains an `AttributeError`, preserving operation-specific
+  legacy handlers.
 - [`failure-model`](../../concepts/failure-model.md) — why patch
   lifecycle violations are exceptions, not events.
 

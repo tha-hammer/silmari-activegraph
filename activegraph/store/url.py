@@ -90,8 +90,10 @@ def parse_store_url(url: str) -> StoreURL:
     Accepts the ``sqlite:///path`` and ``postgres://...`` families and
     returns a :class:`StoreURL` with the normalised scheme, the raw
     URL, and the filesystem path for SQLite forms. The single entry
-    point for URL validation — ``open_store`` and the CLI both route
-    through here, so a malformed URL fails identically everywhere.
+    point for ordinary store URL validation — ``open_store`` and ordinary CLI
+    store commands route through here. Administrative migration resolves its
+    separate provider registry first so third-party migration-only schemes do
+    not broaden the runtime store dispatcher.
     """
     if not url or not isinstance(url, str):
         raise _invalid_url(

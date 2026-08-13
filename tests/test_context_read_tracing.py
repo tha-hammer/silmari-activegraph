@@ -31,6 +31,7 @@ from activegraph.core.ids import IDGen
 from activegraph.runtime.context_reads import CONTEXT_READ_ID_CAP
 
 from tests._llm_helpers import ScriptedProvider
+from tests._object_query_helpers import collision_graph
 
 
 def _fresh_graph(run_id: str = "run_CTXREAD") -> Graph:
@@ -78,6 +79,25 @@ def test_one_event_per_execution_regardless_of_read_count():
     assert payload["object_ids"] == ["doc#1", "doc#2"]
     assert payload["count"] == 2
     assert "truncated" not in payload
+
+
+def test_filtered_traced_view_records_only_canonical_where_matches():
+    g, colliding_id, _ = collision_graph()
+
+    def reader(event, graph, ctx):
+        assert [
+            obj.id for obj in ctx.view.objects(where={"id": colliding_id})
+        ] == [colliding_id]
+
+    rt = Runtime(
+        g,
+        behaviors=[Behavior(name="reader", fn=reader, on=["goal.created"])],
+        trace_context_reads=True,
+    )
+    rt.run_goal("go")
+
+    (read,) = _context_reads(g)
+    assert read.payload["object_ids"] == [colliding_id]
 
 
 def test_one_event_per_execution_two_behaviors_two_events():

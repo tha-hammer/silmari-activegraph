@@ -4,13 +4,24 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 
 import pytest
 from click.testing import CliRunner
 from pydantic import BaseModel
 
-from activegraph import Graph, Runtime, behavior, clear_registry
+from activegraph import (
+    CorruptMigrationEvent,
+    CorruptedEventPayloadError,
+    Event,
+    Graph,
+    RunRecord,
+    Runtime,
+    behavior,
+    clear_registry,
+    register_migration_backend,
+)
 from activegraph.cli.main import (
     EXIT_CODES,
     EXIT_CORRUPTION,
@@ -19,6 +30,9 @@ from activegraph.cli.main import (
     EXIT_NOT_FOUND,
     EXIT_OK,
     EXIT_USAGE_ERROR,
+    _list_runs_or_die,
+    _most_recent_run_id_or_die,
+    _open_store_or_die,
     cli,
 )
 from activegraph.packs import Pack, PackSettingsMissingError
@@ -35,7 +49,33 @@ def _seed_run(path: str) -> str:
     rt = Runtime(g, persist_to=path)
     rt.run_goal("test")
     rt.save_state()
-    return rt.run_id
+    run_id = rt.run_id
+    assert rt.graph.store is not None
+    rt.graph.store.close()
+    return run_id
+
+
+def _mismatched_sqlite(path: str) -> tuple[str, str, str]:
+    """Create a real run, close its store, then alter only schema metadata."""
+    run_id = _seed_run(path)
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT id FROM events WHERE run_id = ? ORDER BY seq LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        assert row is not None
+        event_id = str(row[0])
+        conn.execute(
+            "UPDATE meta SET value = 'future' WHERE key = 'schema_version'"
+        )
+    return f"sqlite:///{path}", run_id, event_id
+
+
+def _assert_schema_mismatch_exit(result) -> None:
+    assert result.exit_code == EXIT_CORRUPTION, result.output
+    assert result.output.count("SchemaVersionMismatch:") == 1
+    assert "schema_version" in result.output
+    assert "Traceback" not in result.output
 
 
 def _seed_memo_run(path: str) -> str:
@@ -62,6 +102,63 @@ def _seed_memo_run(path: str) -> str:
 class _CliSettings(BaseModel):
     n: int = 1
     enabled: bool = True
+
+
+class _FakeMigrationBackend:
+    def __init__(self, provider, endpoint: str) -> None:
+        self.provider = provider
+        self.endpoint = endpoint
+        self.closed = False
+
+    def list_runs(self):
+        return [record for record, _ in self.provider.data[self.endpoint].values()]
+
+    def iter_run(self, run_id):
+        yield from self.provider.data[self.endpoint][run_id][1]
+
+    def write_run_transactionally(self, record, events):
+        if record.run_id == self.provider.fail_run:
+            raise RuntimeError("configured fake transaction failure")
+        endpoint_data = self.provider.data[self.endpoint]
+        prior = endpoint_data.get(record.run_id)
+        existing = list(prior[1]) if prior is not None else []
+        existing_ids = {event.id for event in existing if isinstance(event, Event)}
+        added = [event for event in events if event.id not in existing_ids]
+        endpoint_data[record.run_id] = (record, existing + added)
+        return len(added)
+
+    def close(self):
+        if not self.closed:
+            self.closed = True
+            self.provider.closes[self.endpoint] = self.provider.closes.get(
+                self.endpoint, 0
+            ) + 1
+
+
+class _FakeMigrationProvider:
+    schemes = ("fake-migrate",)
+    capabilities = frozenset({"read", "write"})
+
+    def __init__(self) -> None:
+        self.data = {"src": {}, "dst": {}}
+        self.closes = {}
+        self.fail_run = None
+
+    def validate_url(self, url: str) -> None:
+        assert url.startswith("fake-migrate://")
+
+    def open(self, url: str):
+        return _FakeMigrationBackend(self, url.split("://", 1)[1])
+
+
+def _migration_event(event_id: str, n: int) -> Event:
+    return Event(
+        id=event_id,
+        type="test.event",
+        payload={"n": n},
+        actor="test",
+        timestamp=f"2026-01-01T00:00:0{n}+00:00",
+    )
 
 
 @pytest.fixture
@@ -92,6 +189,119 @@ class TestExitCodes:
         assert EXIT_CODES["divergence"] == 5
 
 
+class TestSchemaVersionMismatchExit:
+    @pytest.mark.parametrize(
+        "helper,args",
+        [
+            (_open_store_or_die, ("{url}", "{run_id}")),
+            (_most_recent_run_id_or_die, ("{url}",)),
+            (_list_runs_or_die, ("{url}",)),
+        ],
+        ids=("open-store", "most-recent-run", "list-runs"),
+    )
+    def test_private_store_helpers_map_exact_typed_mismatch_once(
+        self, temp_db, capsys, helper, args
+    ):
+        url, run_id, _ = _mismatched_sqlite(temp_db)
+        rendered_args = tuple(
+            value.format(url=url, run_id=run_id) for value in args
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            helper(*rendered_args)
+
+        assert excinfo.value.code == EXIT_CORRUPTION
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err.count("SchemaVersionMismatch:") == 1
+        assert "schema_version" in captured.err
+        assert "Traceback" not in captured.err
+
+    def test_open_store_preserves_legacy_schema_runtime_error_mapping(
+        self, monkeypatch, capsys
+    ):
+        import activegraph.store
+
+        def legacy_open_store(url, run_id):
+            raise RuntimeError("custom backend schema_version mismatch")
+
+        monkeypatch.setattr(activegraph.store, "open_store", legacy_open_store)
+
+        with pytest.raises(SystemExit) as excinfo:
+            _open_store_or_die("legacy://store", "run_legacy")
+
+        assert excinfo.value.code == EXIT_CORRUPTION
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == "custom backend schema_version mismatch\n"
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ("inspect", "{url}"),
+            ("inspect", "{url}", "--run-id", "{run_id}"),
+            ("replay", "{url}", "--run-id", "{run_id}"),
+            (
+                "fork",
+                "{url}",
+                "--run-id",
+                "{run_id}",
+                "--at-event",
+                "{event_id}",
+            ),
+            (
+                "fork",
+                "{url}",
+                "--run-id",
+                "{run_id}",
+                "--at-event",
+                "{event_id}",
+                "--set",
+                "demo.n=2",
+            ),
+            (
+                "diff",
+                "{url}",
+                "--run-a",
+                "{run_id}",
+                "--run-b",
+                "{run_id}",
+            ),
+            (
+                "promote",
+                "{url}",
+                "--run-id",
+                "{run_id}",
+                "--from-run",
+                "{run_id}",
+            ),
+            ("export-trace", "{url}", "--run-id", "{run_id}"),
+        ],
+        ids=(
+            "inspect-recent",
+            "inspect-explicit",
+            "replay",
+            "fork",
+            "fork-set-discovery",
+            "diff",
+            "promote-list",
+            "export-trace",
+        ),
+    )
+    def test_mounted_store_boundaries_map_typed_mismatch_once(
+        self, temp_db, runner, argv
+    ):
+        url, run_id, event_id = _mismatched_sqlite(temp_db)
+        rendered = [
+            value.format(url=url, run_id=run_id, event_id=event_id)
+            for value in argv
+        ]
+
+        result = runner.invoke(cli, rendered)
+
+        _assert_schema_mismatch_exit(result)
+
+
 class TestInspect:
     def test_happy_path_text(self, temp_db, runner):
         run_id = _seed_run(temp_db)
@@ -111,6 +321,33 @@ class TestInspect:
         assert "state" in obj
         assert "budget" in obj
         assert "recent_events" in obj
+
+    def test_inspect_is_dormant_observation_not_a_liveness_probe(
+        self, temp_db, runner
+    ):
+        runtime = Runtime(Graph(), persist_to=temp_db, behaviors=[])
+        runtime.graph.add_object("pending", {"work": True})
+        run_id = runtime.run_id
+        assert runtime.status().queue_depth == 1
+        assert runtime.status().state == "stopped"
+        assert runtime.graph.store is not None
+        runtime.graph.store.close()
+
+        result = runner.invoke(
+            cli,
+            [
+                "inspect",
+                f"sqlite:///{temp_db}",
+                "--run-id",
+                run_id,
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == EXIT_OK, result.output
+        snapshot = json.loads(result.output)
+        assert snapshot["queue_depth"] == 1
+        assert snapshot["state"] == "stopped"
 
     def test_not_found_for_missing_store(self, temp_db, runner):
         result = runner.invoke(
@@ -537,6 +774,13 @@ class TestDiff:
 
 
 class TestExportTrace:
+    @staticmethod
+    def _expected_text(path: str, run_id: str) -> str:
+        from activegraph.trace.printer import Trace
+
+        trace = Trace(Runtime.load(f"sqlite:///{path}", run_id=run_id).graph)
+        return "".join(f"{line}\n" for line in trace.lines())
+
     def test_jsonl_format_writes_one_event_per_line(self, temp_db, runner, tmp_path):
         run_id = _seed_run(temp_db)
         out_file = tmp_path / "trace.jsonl"
@@ -557,8 +801,180 @@ class TestExportTrace:
             assert "id" in obj
             assert "type" in obj
 
+    def test_text_output_delegates_to_trace_export(
+        self, temp_db, runner, tmp_path, monkeypatch
+    ):
+        from activegraph.trace.printer import Trace
+
+        run_id = _seed_run(temp_db)
+        out_file = tmp_path / "trace.txt"
+        out_file.write_text("stale content\n")
+        calls: list[str] = []
+        real_export = Trace.export
+
+        def recording_export(trace, path):
+            calls.append(path)
+            return real_export(trace, path)
+
+        monkeypatch.setattr(Trace, "export", recording_export)
+        result = runner.invoke(
+            cli,
+            [
+                "export-trace", f"sqlite:///{temp_db}",
+                "--run-id", run_id,
+                "--format", "text",
+                "-o", str(out_file),
+            ],
+        )
+
+        assert result.exit_code == EXIT_OK, result.output
+        assert calls == [str(out_file)]
+        assert out_file.read_text() == self._expected_text(temp_db, run_id)
+        assert "stale content" not in out_file.read_text()
+
+    def test_text_output_without_path_writes_trace_to_stdout(
+        self, temp_db, runner
+    ):
+        run_id = _seed_run(temp_db)
+        result = runner.invoke(
+            cli,
+            [
+                "export-trace", f"sqlite:///{temp_db}",
+                "--run-id", run_id,
+                "--format", "text",
+            ],
+        )
+
+        assert result.exit_code == EXIT_OK, result.output
+        assert result.output == self._expected_text(temp_db, run_id)
+
+    def test_text_output_preserves_file_open_errors(
+        self, temp_db, runner, tmp_path
+    ):
+        run_id = _seed_run(temp_db)
+        out_file = tmp_path / "missing" / "trace.txt"
+        result = runner.invoke(
+            cli,
+            [
+                "export-trace", f"sqlite:///{temp_db}",
+                "--run-id", run_id,
+                "--format", "text",
+                "-o", str(out_file),
+            ],
+        )
+
+        assert result.exit_code == EXIT_GENERIC_ERROR
+        assert isinstance(result.exception, OSError)
+        assert result.exception.filename == str(out_file)
+
 
 class TestMigrate:
+    def test_registered_third_party_provider_crosses_real_cli_boundary(self, runner):
+        provider = _FakeMigrationProvider()
+        run_a = RunRecord("run_a", None, None, None, "2026-01-01", "a", None)
+        run_b = RunRecord("run_b", None, None, None, "2026-01-02", "b", None)
+        corrupt_error = CorruptedEventPayloadError(
+            "fake corrupt payload",
+            what_failed="The fake provider found one corrupt row.",
+            why="The test fixture deliberately represents corruption.",
+            how_to_fix="Run migration with --skip-corrupted.",
+        )
+        provider.data["src"] = {
+            "run_a": (
+                run_a,
+                [
+                    _migration_event("evt_a1", 1),
+                    CorruptMigrationEvent("evt_bad", corrupt_error),
+                    _migration_event("evt_a2", 2),
+                ],
+            ),
+            "run_b": (run_b, [_migration_event("evt_b1", 3)]),
+        }
+        registration = register_migration_backend(provider)
+        try:
+            result = runner.invoke(
+                cli,
+                [
+                    "migrate",
+                    "--from",
+                    "fake-migrate://src",
+                    "--to",
+                    "fake-migrate://dst",
+                    "--skip-corrupted",
+                    "--json",
+                ],
+            )
+            assert result.exit_code == EXIT_OK, result.output
+            report = json.loads(result.output)
+            assert [run["run_id"] for run in report["runs"]] == ["run_a", "run_b"]
+            assert report["runs"][0]["events_migrated"] == 2
+            assert report["runs"][0]["skipped_events"] == ["evt_bad"]
+            assert report["runs"][1]["events_migrated"] == 1
+            assert provider.closes == {"dst": 1, "src": 1}
+
+            destination = provider.open("fake-migrate://dst")
+            try:
+                assert [event.id for event in destination.iter_run("run_a")] == [
+                    "evt_a1",
+                    "evt_a2",
+                ]
+                assert [event.id for event in destination.iter_run("run_b")] == [
+                    "evt_b1"
+                ]
+            finally:
+                destination.close()
+
+            rerun = runner.invoke(
+                cli,
+                [
+                    "migrate",
+                    "--from",
+                    "fake-migrate://src",
+                    "--to",
+                    "fake-migrate://dst",
+                    "--skip-corrupted",
+                    "--json",
+                ],
+            )
+            assert rerun.exit_code == EXIT_OK, rerun.output
+            assert [run["events_migrated"] for run in json.loads(rerun.output)["runs"]] == [0, 0]
+        finally:
+            registration.unregister()
+
+    def test_third_party_transaction_failure_rolls_back_and_continues(self, runner):
+        provider = _FakeMigrationProvider()
+        run_a = RunRecord("run_a", None, None, None, "2026-01-01", "a", None)
+        run_b = RunRecord("run_b", None, None, None, "2026-01-02", "b", None)
+        provider.data["src"] = {
+            "run_a": (run_a, [_migration_event("evt_a1", 1)]),
+            "run_b": (run_b, [_migration_event("evt_b1", 2)]),
+        }
+        provider.fail_run = "run_a"
+        registration = register_migration_backend(provider)
+        try:
+            result = runner.invoke(
+                cli,
+                [
+                    "migrate",
+                    "--from",
+                    "fake-migrate://src",
+                    "--to",
+                    "fake-migrate://dst",
+                    "--json",
+                ],
+            )
+            assert result.exit_code == EXIT_GENERIC_ERROR
+            reports = {run["run_id"]: run for run in json.loads(result.output)["runs"]}
+            assert reports["run_a"]["status"] == "failed"
+            assert "configured fake transaction failure" in reports["run_a"]["error"]
+            assert reports["run_b"]["status"] == "ok"
+            assert "run_a" not in provider.data["dst"]
+            assert [event.id for event in provider.data["dst"]["run_b"][1]] == [
+                "evt_b1"
+            ]
+        finally:
+            registration.unregister()
+
     def test_sqlite_to_sqlite_happy_path(self, temp_db, runner, tmp_path):
         run_id = _seed_run(temp_db)
         dst = str(tmp_path / "dst.db")
@@ -582,6 +998,88 @@ class TestMigrate:
             cli, ["migrate", "--from", temp_db, "--to", dst]
         )
         assert result.exit_code == EXIT_USAGE_ERROR, result.output
+
+    def test_source_schema_mismatch_fails_before_touching_fresh_destination(
+        self, temp_db, runner, tmp_path
+    ):
+        src_url, _, _ = _mismatched_sqlite(temp_db)
+        dst = tmp_path / "untouched.db"
+
+        result = runner.invoke(
+            cli,
+            ["migrate", "--from", src_url, "--to", f"sqlite:///{dst}"],
+        )
+
+        _assert_schema_mismatch_exit(result)
+        assert not dst.exists()
+        assert not (tmp_path / "untouched.db-wal").exists()
+        assert not (tmp_path / "untouched.db-shm").exists()
+
+    def test_destination_schema_mismatch_fails_before_migration_report(
+        self, temp_db, runner, tmp_path
+    ):
+        _seed_run(temp_db)
+        dst = str(tmp_path / "mismatched-destination.db")
+        dst_url, _, _ = _mismatched_sqlite(dst)
+        with sqlite3.connect(dst) as conn:
+            before = (
+                conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0],
+                conn.execute("SELECT COUNT(*) FROM events").fetchone()[0],
+                conn.execute(
+                    "SELECT value FROM meta WHERE key = 'schema_version'"
+                ).fetchone()[0],
+            )
+
+        result = runner.invoke(
+            cli,
+            [
+                "migrate",
+                "--from",
+                f"sqlite:///{temp_db}",
+                "--to",
+                dst_url,
+            ],
+        )
+
+        _assert_schema_mismatch_exit(result)
+        assert "write failure:" not in result.output
+        assert "summary:" not in result.output
+        with sqlite3.connect(dst) as conn:
+            after = (
+                conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0],
+                conn.execute("SELECT COUNT(*) FROM events").fetchone()[0],
+                conn.execute(
+                    "SELECT value FROM meta WHERE key = 'schema_version'"
+                ).fetchone()[0],
+            )
+        assert after == before
+
+    def test_empty_source_eagerly_initializes_fresh_destination_schema(
+        self, temp_db, runner, tmp_path
+    ):
+        from activegraph.store.sqlite import SCHEMA_VERSION, SQLiteEventStore
+
+        assert SQLiteEventStore.list_runs(temp_db) == []
+        dst = tmp_path / "initialized-destination.db"
+
+        result = runner.invoke(
+            cli,
+            [
+                "migrate",
+                "--from",
+                f"sqlite:///{temp_db}",
+                "--to",
+                f"sqlite:///{dst}",
+            ],
+        )
+
+        assert result.exit_code == EXIT_OK, result.output
+        with sqlite3.connect(dst) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT value FROM meta WHERE key = 'schema_version'"
+            ).fetchone()[0] == SCHEMA_VERSION
 
     def test_skip_corrupted_recovers_partial_run(self, temp_db, runner, tmp_path):
         """v1.0 CLI follow-on: --skip-corrupted lets a migration recover the

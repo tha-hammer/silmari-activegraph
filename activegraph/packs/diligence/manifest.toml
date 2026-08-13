@@ -1,0 +1,36 @@
+[pack]
+name = "diligence"
+version = "0.1.0"
+description = "Investment diligence: claims, evidence, contradictions, risks, memos. The v0.9 reference pack. Four behaviors are LLM-backed; fixtures ship with the pack for reproducible demos."
+license = "Apache-2.0"
+
+[pack.provenance]
+authors = ["Active Graph contributors"]
+authored_by = "human"
+generator = ""
+source_url = "https://github.com/yoheinakajima/activegraph"
+
+[pack.integrity]
+content_hash = "sha256:02912acda38dfde6f18706035f2427f9ca747728b708b2b6bb52830bde06f89e"
+
+[dependencies]
+activegraph = ">=1.10,<2.0"
+python = ">=3.11"
+python-deps = ["pydantic>=2"]
+
+[dependencies.packs]
+
+[dependencies.optional-packs]
+
+[surface]
+object_types = ["company", "document", "question", "claim", "evidence", "contradiction", "risk", "memo"]
+relation_types = ["addresses", "supports", "contradicts", "has_contradiction", "references", "derived_from", "mitigates"]
+behaviors = ["company_planner", "question_generator", "document_researcher", "evidence_linker", "contradiction_detector", "risk_identifier", "memo_synthesizer"]
+tools = ["fetch_company_docs", "search_filings", "summarize_document"]
+settings_schema = "DiligenceSettings"
+capabilities = []
+consumes = []
+
+[fixtures]
+entrypoint = "fixtures/__init__.py"
+deterministic = true

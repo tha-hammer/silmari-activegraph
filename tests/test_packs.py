@@ -19,13 +19,19 @@ Covers:
 from __future__ import annotations
 
 import textwrap
+from dataclasses import fields
+from decimal import Decimal, InvalidOperation
+import importlib
+import inspect
 from pathlib import Path
 
 import pytest
 from pydantic import BaseModel, Field
 
 from activegraph import (
+    FrozenClock,
     Graph,
+    Object,
     Pack,
     PackConflictError,
     PackError,
@@ -38,7 +44,11 @@ from activegraph import (
     ObjectType,
     RelationType,
     Runtime,
+    Tool,
     behavior as user_behavior,
+    llm_behavior as user_llm_behavior,
+    relation_behavior as user_relation_behavior,
+    tool as user_tool,
     clear_registry,
     clear_tool_registry,
     discover,
@@ -46,7 +56,9 @@ from activegraph import (
     get_tool_registry,
     load_by_name,
     load_prompts_from_dir,
+    tool as user_tool,
 )
+from activegraph.llm import LLMResponse
 from activegraph.packs import (
     EmptySettings,
     PackPrompt,
@@ -56,6 +68,7 @@ from activegraph.packs import (
     tool,
 )
 from activegraph.packs.loader import AMBIGUOUS
+from activegraph.core.event import Event
 
 
 # ---------------------------------------------------- Pack dataclass
@@ -89,6 +102,153 @@ def test_pack_basic_construction():
     assert isinstance(p.behaviors, tuple)
 
 
+def test_requires_approval_attributes_only_explicit_proposals():
+    """``requires_approval`` does not intercept ``Graph.add_object``.
+
+    The pack policy supplies owner attribution only when behavior code
+    explicitly chooses ``Context.propose_object``.
+    """
+    proposal_ids: list[str] = []
+
+    @behavior(name="proposer", on=["goal.created"])
+    def proposer(event, graph, ctx):
+        proposal_ids.append(
+            ctx.propose_object(
+                "secret",
+                {"value": "proposed"},
+                reason="operator review",
+            )
+        )
+
+    pack = Pack(
+        name="approval_explicit",
+        version="0.1.0",
+        behaviors=(proposer,),
+        policies=(
+            PackPolicy(
+                name="secret_approval",
+                requires_approval=("secret",),
+            ),
+        ),
+    )
+    rt = _fresh_runtime()
+    rt.load_pack(pack)
+
+    before = list(rt.graph.all_objects())
+    direct = rt.graph.add_object("secret", {"value": "direct"})
+
+    assert isinstance(direct, Object)
+    assert len(rt.graph.all_objects()) == len(before) + 1
+    assert rt.graph.get_object(direct.id).data == {"value": "direct"}
+    assert rt.pending_approvals() == []
+    direct_event = next(
+        event
+        for event in rt.graph.events
+        if event.type == "object.created" and event.payload["id"] == direct.id
+    )
+    assert direct_event.payload["object"]["data"] == {"value": "direct"}
+
+    object_snapshot = [
+        (obj.id, obj.type, obj.data) for obj in rt.graph.all_objects()
+    ]
+    rt.run_goal("propose the reviewed value")
+
+    assert proposal_ids == ["approval_001"]
+    assert [
+        (obj.id, obj.type, obj.data) for obj in rt.graph.all_objects()
+    ] == object_snapshot
+    pending = rt.pending_approvals()
+    assert [approval.id for approval in pending] == proposal_ids
+    assert pending[0].pack == "approval_explicit"
+    assert pending[0].object_type == "secret"
+    assert pending[0].data == {"value": "proposed"}
+    proposed_event = next(
+        event
+        for event in rt.graph.events
+        if event.type == "approval.proposed"
+    )
+    assert proposed_event.payload["approval_id"] == proposal_ids[0]
+    assert proposed_event.payload["pack"] == "approval_explicit"
+
+    assert rt.disable_pack("approval_explicit") is True
+    before_disabled_add = len(rt.graph.all_objects())
+    after_disable = rt.graph.add_object("secret", {"value": "after disable"})
+    assert isinstance(after_disable, Object)
+    assert len(rt.graph.all_objects()) == before_disabled_add + 1
+    assert rt.graph.get_object(after_disable.id).data == {
+        "value": "after disable"
+    }
+    assert [approval.id for approval in rt.pending_approvals()] == proposal_ids
+
+    approved_object_id = rt.approve(proposal_ids[0], approved_by="operator")
+    assert rt.pending_approvals() == []
+    approved = rt.graph.get_object(approved_object_id)
+    assert approved is not None
+    assert approved.type == "secret"
+    assert approved.data == {"value": "proposed"}
+
+
+def test_auto_apply_is_normalized_reserved_metadata_without_runtime_effect():
+    """``auto_apply`` is preserved metadata, not a runtime instruction."""
+
+    tuple_policy = PackPolicy(name="memo_review", auto_apply=("memo",))
+    list_policy = PackPolicy(name="memo_review", auto_apply=["memo"])
+    assert list_policy.auto_apply == tuple_policy.auto_apply == ("memo",)
+
+    def run_workflow(auto_apply):
+        proposal_ids: list[str] = []
+
+        @behavior(name="proposer", on=["goal.created"])
+        def proposer(event, graph, ctx):
+            proposal_ids.append(
+                ctx.propose_object(
+                    "memo",
+                    {"value": "proposed"},
+                    reason="operator review",
+                )
+            )
+
+        policy = PackPolicy(
+            name="memo_review",
+            requires_approval=("memo",),
+            auto_apply=auto_apply,
+        )
+        pack = Pack(
+            name="reserved_auto_apply",
+            version="0.1.0",
+            behaviors=(proposer,),
+            policies=(policy,),
+        )
+        rt = Runtime(
+            Graph(
+                clock=FrozenClock("2026-08-12T00:00:00Z"),
+                run_id="run_reserved_auto_apply",
+            )
+        )
+
+        assert rt.load_pack(pack) is True
+        direct = rt.graph.add_object("memo", {"value": "direct"})
+        rt.run_goal("propose the reviewed memo")
+
+        assert proposal_ids == ["approval_001"]
+        assert policy.auto_apply == tuple(auto_apply)
+        return policy, {
+            "loaded_packs": rt.loaded_packs(),
+            "events": [event.to_dict() for event in rt.graph.events],
+            "direct": direct.to_dict(),
+            "objects": [obj.to_dict() for obj in rt.graph.all_objects()],
+            "proposal_ids": proposal_ids,
+            "pending": rt.pending_approvals(),
+        }
+
+    empty_policy, without_reserved_value = run_workflow(())
+    populated_policy, with_reserved_value = run_workflow(("memo",))
+
+    assert empty_policy.auto_apply == ()
+    assert populated_policy.auto_apply == ("memo",)
+    assert without_reserved_value == with_reserved_value
+
+
 def test_pack_is_frozen():
     @behavior(name="ping", on=["goal.created"])
     def ping(event, graph, ctx):
@@ -117,13 +277,46 @@ def test_pack_equality_by_name_and_version():
     assert hash(p1) != hash(p3)
 
 
-def test_pack_name_validation():
-    with pytest.raises(PackValidationError):
-        Pack(name="UPPER", version="0.1.0", settings_schema=EmptySettings)
-    with pytest.raises(PackValidationError):
-        Pack(name="9_starts_with_digit", version="0.1.0", settings_schema=EmptySettings)
-    with pytest.raises(PackValidationError):
-        Pack(name="", version="0.1.0", settings_schema=EmptySettings)
+@pytest.mark.parametrize("name", ["a", "a" * 64])
+def test_pack_name_accepts_canonical_boundaries(name):
+    assert Pack(name=name, version="0.1.0").name == name
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["", "a" * 65, "UPPER", "9_starts_with_digit", "my-pack", 1, True],
+)
+def test_pack_name_rejects_noncanonical_identity(name):
+    with pytest.raises(PackValidationError, match="Pack.name"):
+        Pack(name=name, version="0.1.0", settings_schema=EmptySettings)
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["0.1", "1.0.0rc1", "1!2.0", "1.0.post1", "1.0.dev2", "1.0+local.1"],
+)
+def test_pack_version_accepts_pep440_without_rewriting(version):
+    assert Pack(name="demo", version=version).version == version
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "",
+        " 1.0",
+        "1.0 ",
+        "nightly",
+        "1..0",
+        "release-1",
+        "1.0+local..1",
+        None,
+        1,
+        True,
+    ],
+)
+def test_pack_version_rejects_non_pep440_values(version):
+    with pytest.raises(PackValidationError, match="Pack.version"):
+        Pack(name="demo", version=version)
 
 
 def test_pack_duplicate_behavior_name_rejected():
@@ -154,6 +347,20 @@ def test_pack_rejects_globally_registered_behavior():
         Pack(name="demo", version="0.1.0", behaviors=[user_ping],
              settings_schema=EmptySettings)
     clear_registry()
+
+
+def test_pack_rejects_globally_registered_tool():
+    @user_tool(name="global-tool")
+    def global_tool(args, ctx):
+        return None
+
+    with pytest.raises(PackValidationError, match="activegraph.packs.tool"):
+        Pack(
+            name="demo",
+            version="0.1.0",
+            tools=[global_tool],
+            settings_schema=EmptySettings,
+        )
 
 
 def test_pack_settings_schema_must_be_basemodel():
@@ -204,6 +411,406 @@ def test_pack_decorators_attach_pack_meta_to_function():
     assert hasattr(x.fn, "__pack_meta__")
     assert x.fn.__pack_meta__["kind"] == "behavior"
     assert x.fn.__pack_meta__["name"] == "x"
+
+
+def _assert_behavior_domain_parity(global_obj, pack_obj) -> None:
+    skipped = {"fn", "handler", "pattern_matcher"}
+    for field in fields(global_obj):
+        if field.name in skipped:
+            continue
+        value = getattr(global_obj, field.name)
+        peer = getattr(pack_obj, field.name)
+        assert value == peer, field.name
+        assert type(value) is type(peer), field.name
+
+    assert global_obj.pattern_matcher.pattern.source == (
+        pack_obj.pattern_matcher.pattern.source
+    )
+    assert global_obj.pattern_matcher.pattern.match == (
+        pack_obj.pattern_matcher.pattern.match
+    )
+    assert global_obj.pattern_matcher.pattern.where == (
+        pack_obj.pattern_matcher.pattern.where
+    )
+    positive = Graph()
+    positive.add_object("claim", {})
+    event = Event(id="evt_match", type="custom.event")
+    assert bool(global_obj.pattern_matcher.matches(event, positive)) is True
+    assert bool(pack_obj.pattern_matcher.matches(event, positive)) is True
+    assert global_obj.pattern_matcher.matches(event, Graph()) == []
+    assert pack_obj.pattern_matcher.matches(event, Graph()) == []
+
+
+def test_global_and_pack_behavior_construction_has_exact_domain_parity():
+    common = dict(
+        name="parity",
+        on=["custom.event"],
+        where={"kind": "x"},
+        view={"objects": ["claim"]},
+        creates=["result"],
+        budget={"max_events": 2},
+        priority=3,
+        pattern="(c:claim)",
+        activate_after=2,
+    )
+
+    def global_plain_fn(event, graph, ctx):
+        pass
+
+    def pack_plain_fn(event, graph, ctx):
+        pass
+
+    global_plain = user_behavior(**common)(global_plain_fn)
+    pack_plain = behavior(**common)(pack_plain_fn)
+    _assert_behavior_domain_parity(global_plain, pack_plain)
+    assert global_plain.fn is global_plain_fn
+    assert pack_plain.fn is pack_plain_fn
+
+    llm_common = common | {
+        "description": "describe",
+        "model": "m",
+        "output_schema": _Widget,
+        "deterministic": True,
+        "max_tokens": 12,
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "timeout_seconds": 2,
+        "prompt_template": "{system}",
+        "tools": ["lookup"],
+        "max_tool_turns": 2,
+    }
+
+    def global_llm_fn(event, graph, ctx, out):
+        pass
+
+    def pack_llm_fn(event, graph, ctx, out):
+        pass
+
+    global_llm = user_llm_behavior(**llm_common)(global_llm_fn)
+    pack_llm = llm_behavior(**llm_common)(pack_llm_fn)
+    _assert_behavior_domain_parity(global_llm, pack_llm)
+    assert global_llm.fn is pack_llm.fn
+    assert global_llm.handler is global_llm_fn
+    assert pack_llm.handler is pack_llm_fn
+
+    relation_common = common | {"relation_type": "supports"}
+
+    def global_relation_fn(relation, event, graph, ctx):
+        pass
+
+    def pack_relation_fn(relation, event, graph, ctx):
+        pass
+
+    global_relation = user_relation_behavior(**relation_common)(global_relation_fn)
+    pack_relation = relation_behavior(**relation_common)(pack_relation_fn)
+    _assert_behavior_domain_parity(global_relation, pack_relation)
+    assert global_relation.fn is global_relation_fn
+    assert pack_relation.fn is pack_relation_fn
+
+
+def test_pack_behavior_metadata_and_loader_clones_preserve_all_fields():
+    @behavior(
+        name="plain",
+        on=["custom.event"],
+        where={"kind": "x"},
+        pattern="(c:claim)",
+        activate_after=2,
+    )
+    def plain(event, graph, ctx):
+        pass
+
+    @llm_behavior(
+        name="llm",
+        on=["custom.event"],
+        where={"kind": "x"},
+        output_schema=_Widget,
+        pattern="(c:claim)",
+        activate_after=2,
+    )
+    def llm(event, graph, ctx, out):
+        pass
+
+    @relation_behavior(
+        "supports",
+        name="relation",
+        on=["custom.event"],
+        pattern="(c:claim)",
+        activate_after=2,
+    )
+    def relation(rel, event, graph, ctx):
+        pass
+
+    assert plain.fn.__pack_meta__ == {
+        "kind": "behavior",
+        "name": "plain",
+        "on": ["custom.event"],
+        "where": {"kind": "x"},
+    }
+    assert llm.handler.__pack_meta__ == {
+        "kind": "llm_behavior",
+        "name": "llm",
+        "on": ["custom.event"],
+        "where": {"kind": "x"},
+        "output_schema": "_Widget",
+    }
+    assert relation.fn.__pack_meta__ == {
+        "kind": "relation_behavior",
+        "name": "relation",
+        "relation_type": "supports",
+    }
+
+    pack = Pack(
+        name="clonepack",
+        version="1.0.0",
+        behaviors=[plain, llm, relation],
+        settings_schema=EmptySettings,
+    )
+    runtime = _fresh_runtime()
+    runtime.load_pack(pack)
+    clones = {clone._short_name: clone for clone in runtime._pack_behaviors}
+
+    for original in (plain, llm, relation):
+        clone = clones[original.name]
+        assert clone.name == f"clonepack.{original.name}"
+        assert clone._pack_owner == "clonepack"
+        assert clone._short_name == original.name
+        assert clone._pack_local is True
+        for field in fields(original):
+            if field.name in {"name", "fn", "handler"}:
+                continue
+            value = getattr(original, field.name)
+            peer = getattr(clone, field.name)
+            assert value == peer, field.name
+            assert type(value) is type(peer), field.name
+
+
+def test_global_and_pack_tool_signatures_match_except_pack_export_policy():
+    global_params = inspect.signature(user_tool).parameters
+    pack_params = inspect.signature(tool).parameters
+    assert tuple(global_params) == tuple(
+        name for name in pack_params if name != "export_globally"
+    )
+    for name, parameter in global_params.items():
+        peer = pack_params[name]
+        assert parameter.kind == peer.kind
+        assert parameter.default == peer.default
+        assert parameter.annotation == peer.annotation
+
+
+@pytest.mark.parametrize("cost", [2, "2.50", Decimal("3.00")])
+def test_global_and_pack_tool_construction_has_exact_type_parity(cost):
+    def global_fn(args: _Widget, ctx):
+        return args
+
+    def pack_fn(args: _Widget, ctx):
+        return args
+
+    kwargs = {
+        "name": "parity-tool",
+        "description": "parity",
+        "cost_per_call": cost,
+        "timeout_seconds": 2,
+        "deterministic": 1,
+    }
+    global_tool = user_tool(**kwargs)(global_fn)
+    pack_tool = tool(**kwargs)(pack_fn)
+
+    for field in fields(global_tool):
+        if field.name == "fn":
+            continue
+        value = getattr(global_tool, field.name)
+        peer = getattr(pack_tool, field.name)
+        assert value == peer, field.name
+        assert type(value) is type(peer), field.name
+    assert global_tool.fn is global_fn
+    assert pack_tool.fn is pack_fn
+    assert global_tool.input_schema is _Widget
+    assert pack_tool.input_schema is _Widget
+    assert type(pack_tool.timeout_seconds) is float
+    assert type(pack_tool.deterministic) is bool
+
+
+def test_omitted_pack_tool_cost_is_exact_canonical_decimal_zero():
+    @user_tool(name="global-zero")
+    def global_zero(args, ctx):
+        return None
+
+    @tool(name="pack-zero")
+    def pack_zero(args, ctx):
+        return None
+
+    for decorated in (global_zero, pack_zero):
+        assert type(decorated.cost_per_call) is Decimal
+        assert str(decorated.cost_per_call) == "0"
+        assert decorated.cost_per_call.as_tuple() == Decimal("0").as_tuple()
+
+
+def test_invalid_tool_cost_precedes_bad_handler_in_both_namespaces():
+    for decorator in (user_tool, tool):
+        with pytest.raises(InvalidOperation):
+            binder = decorator(cost_per_call="not-a-decimal")
+
+            @binder
+            def bad_handler(ctx):
+                pass
+
+
+def test_both_tool_decorators_delegate_and_keep_effect_policy(
+    monkeypatch,
+) -> None:
+    factory = importlib.import_module("activegraph.tools._factory")
+    global_module = importlib.import_module("activegraph.tools.decorators")
+    pack_module = importlib.import_module("activegraph.packs")
+    outer: list[dict] = []
+    bound: list[object] = []
+    appended: list[object] = []
+
+    class SpyRegistry(list):
+        def append(self, value):
+            appended.append(value)
+            super().append(value)
+
+    monkeypatch.setattr(global_module, "_TOOL_REGISTRY", SpyRegistry())
+
+    def builder(**kwargs):
+        outer.append(kwargs)
+
+        def bind(fn):
+            from activegraph.tools.base import Tool
+
+            bound.append(fn)
+            return Tool(name=kwargs.get("name") or fn.__name__, fn=fn)
+
+        return bind
+
+    monkeypatch.setattr(factory, "build_tool", builder)
+
+    def global_fn(args, ctx):
+        return None
+
+    def pack_fn(args, ctx):
+        return None
+
+    global_result = global_module.tool(name="global")(global_fn)
+    pack_result = pack_module.tool(name="pack", export_globally=1)(pack_fn)
+
+    assert global_module.tool_factory is factory
+    assert pack_module.tool_factory is factory
+    assert [call["name"] for call in outer] == ["global", "pack"]
+    assert bound == [global_fn, pack_fn]
+    assert appended == [global_result]
+    assert getattr(pack_result, "_pack_local") is True
+    assert getattr(pack_result, "_export_globally") is True
+    assert pack_fn.__pack_meta__ == {
+        "kind": "tool",
+        "name": "pack",
+        "deterministic": False,
+        "export_globally": True,
+    }
+
+
+def test_pack_tool_export_aliases_share_loader_clone_without_global_append():
+    @tool(name="hidden", export_globally=False)
+    def hidden(args, ctx):
+        return None
+
+    @tool(name="shown", export_globally=True)
+    def shown(args, ctx):
+        return None
+
+    pack = Pack(
+        name="toolpack",
+        version="1.0.0",
+        tools=[hidden, shown],
+        settings_schema=EmptySettings,
+    )
+    assert get_tool_registry() == []
+    runtime = Runtime(Graph(), behaviors=[], tools=[])
+    runtime.load_pack(pack)
+    runtime._ensure_registry()
+
+    hidden_clone = runtime.tool_registry["toolpack.hidden"]
+    shown_clone = runtime.tool_registry["toolpack.shown"]
+    assert "hidden" not in runtime.tool_registry
+    assert runtime.get_tool("hidden") is hidden_clone
+    assert runtime.tool_registry["shown"] is shown_clone
+    assert shown_clone is not shown
+    assert hidden_clone is not hidden
+    assert shown_clone._pack_owner == "toolpack"
+    assert shown_clone._short_name == "shown"
+    assert shown_clone._pack_local is True
+    assert shown_clone._export_globally is True
+    for original, clone in ((hidden, hidden_clone), (shown, shown_clone)):
+        for field in fields(original):
+            if field.name in {"name", "fn"}:
+                continue
+            value = getattr(original, field.name)
+            peer = getattr(clone, field.name)
+            assert value == peer, field.name
+            assert type(value) is type(peer), field.name
+    assert get_tool_registry() == []
+
+
+def test_pack_accepts_all_decorator_products_and_tool_metadata_is_exact():
+    @behavior(name="plain")
+    def plain(event, graph, ctx):
+        pass
+
+    @llm_behavior(name="llm", output_schema=_Widget)
+    def llm(event, graph, ctx, out):
+        pass
+
+    @relation_behavior("edge", name="relation")
+    def relation(rel, event, graph, ctx):
+        pass
+
+    @tool(name="pack-tool", deterministic=1, export_globally=1)
+    def pack_tool(args: _Widget, ctx):
+        return args
+
+    pack = Pack(
+        name="completepack",
+        version="1.0.0",
+        behaviors=[plain, llm, relation],
+        tools=[pack_tool],
+        settings_schema=EmptySettings,
+    )
+
+    assert tuple(pack.behaviors) == (plain, llm, relation)
+    assert tuple(pack.tools) == (pack_tool,)
+    assert pack_tool.fn.__pack_meta__ == {
+        "kind": "tool",
+        "name": "pack-tool",
+        "deterministic": True,
+        "export_globally": True,
+    }
+
+
+def test_exported_pack_tool_collision_is_premutation():
+    @user_tool(name="collision")
+    def global_collision(args, ctx):
+        return None
+
+    @tool(name="collision", export_globally=True)
+    def pack_collision(args, ctx):
+        return None
+
+    pack = Pack(
+        name="toolpack",
+        version="1.0.0",
+        tools=[pack_collision],
+        settings_schema=EmptySettings,
+    )
+    runtime = Runtime(Graph())
+    before_events = runtime.graph.events
+
+    with pytest.raises(PackConflictError):
+        runtime.load_pack(pack)
+
+    assert runtime.loaded_packs() == []
+    assert runtime._pack_tools == []
+    assert runtime.graph.events == before_events
+    assert get_tool_registry() == [global_collision]
 
 
 # ---------------------------------------------------- prompt loading
@@ -287,6 +894,32 @@ def test_pack_prompt_from_body():
 
 def _fresh_runtime():
     return Runtime(Graph())
+
+
+class _FinalProvider:
+    """Capture provider-facing tool definitions and return a final turn."""
+
+    def __init__(self):
+        self.tool_names: list[list[str]] = []
+
+    def complete(self, **kwargs):
+        self.tool_names.append([t["name"] for t in kwargs.get("tools") or []])
+        return LLMResponse(
+            raw_text="done",
+            parsed=None,
+            input_tokens=1,
+            output_tokens=1,
+            cost_usd=Decimal("0"),
+            latency_seconds=0,
+            model=kwargs["model"],
+            finish_reason="end_turn",
+        )
+
+    def estimate_cost(self, **kwargs):
+        return Decimal("0")
+
+    def count_tokens(self, **kwargs):
+        return 1
 
 
 def test_load_pack_emits_pack_loaded_event():
@@ -481,6 +1114,226 @@ def test_behavior_short_name_lookup_ambiguous():
     # Fully qualified always works.
     assert rt.get_behavior("a.ping").name == "a.ping"
     assert rt.get_behavior("b.ping").name == "b.ping"
+
+
+# ---------------------------------------------------- runtime Tool bindings
+
+
+def test_pack_local_tool_objects_share_one_canonical_runtime_identity():
+    @tool(name="lookup")
+    def lookup(args, ctx):
+        return {"ok": True}
+
+    @llm_behavior(name="first", on=["goal.created"], tools=[lookup])
+    def first(event, graph, ctx, out):
+        pass
+
+    @llm_behavior(name="second", on=["never"], tools=[lookup])
+    def second(event, graph, ctx, out):
+        pass
+
+    original_name = lookup.name
+    original_meta = dict(lookup.fn.__pack_meta__)
+    original_first_refs = list(first.tools)
+    pack = Pack(
+        name="identity",
+        version="1.0",
+        behaviors=(first, second),
+        tools=(lookup,),
+    )
+    original_hash = hash(pack)
+
+    provider = _FinalProvider()
+    rt = Runtime(Graph(), llm_provider=provider)
+    rt.load_pack(pack)
+    rt.run_goal("bind")
+
+    canonical = rt.get_tool("identity.lookup")
+    loaded_first = rt.get_behavior("identity.first")
+    loaded_second = rt.get_behavior("identity.second")
+    assert loaded_first.tools == [canonical]
+    assert loaded_second.tools == [canonical]
+    assert loaded_first.tools[0] is canonical
+    assert loaded_second.tools[0] is canonical
+    assert provider.tool_names == [["identity.lookup"]]
+
+    assert first.tools == original_first_refs
+    assert first.tools[0] is lookup
+    assert lookup.name == original_name
+    assert lookup.fn.__pack_meta__ == original_meta
+    assert hash(pack) == original_hash
+    assert pack == Pack(
+        name="identity",
+        version="1.0",
+        behaviors=(first, second),
+        tools=(lookup,),
+    )
+
+
+def test_pack_rejects_foreign_pack_local_tool_by_identity():
+    @tool(name="owned")
+    def owned(args, ctx):
+        return {"ok": True}
+
+    @tool(name="owned")
+    def foreign(args, ctx):
+        return {"ok": True}
+
+    @llm_behavior(name="worker", tools=[foreign])
+    def worker(event, graph, ctx, out):
+        pass
+
+    with pytest.raises(PackValidationError, match="owned.*same Pack"):
+        Pack(
+            name="membership",
+            version="1.0",
+            behaviors=(worker,),
+            tools=(owned,),
+        )
+
+
+def test_load_pack_revalidates_mutated_tool_membership_atomically():
+    @tool(name="owned")
+    def owned(args, ctx):
+        return {"ok": True}
+
+    @tool(name="owned")
+    def foreign(args, ctx):
+        return {"ok": True}
+
+    @llm_behavior(name="worker", tools=[owned])
+    def worker(event, graph, ctx, out):
+        pass
+
+    pack = Pack(
+        name="atomic",
+        version="1.0",
+        behaviors=(worker,),
+        tools=(owned,),
+    )
+    worker.tools[:] = [foreign]
+    rt = Runtime(Graph(), llm_provider=_FinalProvider())
+    rt.load_pack(Pack(name="already_loaded", version="1.0"))
+    state = rt._pack_state
+    state_before = {
+        key: value.copy() if isinstance(value, (dict, list, set)) else value
+        for key, value in vars(state).items()
+    }
+    before = {
+        "pack_state": state,
+        "pack_behaviors": list(rt._pack_behaviors),
+        "pack_tools": list(rt._pack_tools),
+        "registry": rt.registry,
+        "tool_registry": dict(rt.tool_registry),
+        "events": list(rt.graph.events),
+        "ids": dict(vars(rt.graph.ids)),
+    }
+
+    with pytest.raises(PackValidationError, match="owned.*same Pack"):
+        rt.load_pack(pack)
+
+    assert rt._pack_state is before["pack_state"]
+    assert vars(rt._pack_state) == state_before
+    assert rt._pack_behaviors == before["pack_behaviors"]
+    assert rt._pack_tools == before["pack_tools"]
+    assert rt.registry is before["registry"]
+    assert rt.tool_registry == before["tool_registry"]
+    assert rt.graph.events == before["events"]
+    assert vars(rt.graph.ids) == before["ids"]
+
+
+def test_owner_aware_tool_short_precedence_and_public_lookup_unchanged():
+    @user_tool(name="shared")
+    def global_shared(args, ctx):
+        return {"owner": "global"}
+
+    @tool(name="shared")
+    def pack_shared(args, ctx):
+        return {"owner": "pack"}
+
+    @llm_behavior(name="pack_worker", on=["pack.trigger"], tools=["shared"])
+    def pack_worker(event, graph, ctx, out):
+        pass
+
+    pack = Pack(
+        name="owner",
+        version="1.0",
+        behaviors=(pack_worker,),
+        tools=(pack_shared,),
+    )
+
+    @user_behavior(name="seed", on=["goal.created"])
+    def seed(event, graph, ctx):
+        graph.emit("pack.trigger", {})
+
+    from activegraph import llm_behavior as global_llm_behavior
+
+    @global_llm_behavior(name="global_worker", on=["goal.created"], tools=["shared"])
+    def global_worker(event, graph, ctx, out):
+        pass
+
+    provider = _FinalProvider()
+    rt = Runtime(Graph(), llm_provider=provider)
+    rt.load_pack(pack)
+    rt.run_goal("precedence")
+
+    assert provider.tool_names == [["shared"], ["owner.shared"]]
+    assert rt.get_tool("shared") is rt.get_tool("owner.shared")
+    assert rt.get_tool("shared") is not global_shared
+
+
+def test_pack_tool_strings_fall_back_to_unique_cross_pack_and_report_ambiguity():
+    def make_tool_pack(name):
+        @tool(name="lookup")
+        def lookup(args, ctx):
+            return {"pack": name}
+
+        return Pack(name=name, version="1.0", tools=(lookup,))
+
+    @llm_behavior(name="consumer", on=["goal.created"], tools=["lookup"])
+    def consumer(event, graph, ctx, out):
+        pass
+
+    consumer_pack = Pack(name="consumer", version="1.0", behaviors=(consumer,))
+    provider = _FinalProvider()
+    rt = Runtime(Graph(), llm_provider=provider)
+    rt.load_pack(consumer_pack)
+    rt.load_pack(make_tool_pack("provider_a"))
+    rt.run_goal("unique")
+    assert provider.tool_names == [["provider_a.lookup"]]
+
+    rt.load_pack(make_tool_pack("provider_b"))
+    from activegraph import AmbiguousToolError
+
+    with pytest.raises(AmbiguousToolError):
+        rt.run_until_idle()
+
+
+def test_tool_bindings_rebuild_between_drains_preserving_order_and_duplicates():
+    @user_tool(name="first")
+    def first(args, ctx):
+        return {"ok": True}
+
+    @user_tool(name="second")
+    def second(args, ctx):
+        return {"ok": True}
+
+    from activegraph import llm_behavior as global_llm_behavior
+
+    @global_llm_behavior(name="mutable", on=["goal.created"], tools=["first"])
+    def mutable(event, graph, ctx, out):
+        pass
+
+    provider = _FinalProvider()
+    rt = Runtime(Graph(), llm_provider=provider)
+    rt.run_goal("first pass")
+    mutable.tools[:] = ["second", "first", "second"]
+    rt.run_goal("second pass")
+
+    assert provider.tool_names == [
+        ["first"],
+        ["second", "first", "second"],
+    ]
 
 
 # ---------------------------------------------------- runtime execution

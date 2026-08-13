@@ -59,8 +59,14 @@ import json
 import math
 import re
 import random as _random
+import threading
 import time as _time
 import traceback
+from collections.abc import Mapping
+from contextlib import contextmanager
+
+from activegraph.llm import prompt_identity
+from activegraph.runtime.event_policy import classify_event_type
 
 
 def _monotonic() -> float:
@@ -68,12 +74,22 @@ def _monotonic() -> float:
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, Optional, Union, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Iterable,
+    Iterator,
+    NamedTuple,
+    Optional,
+    Union,
+    cast,
+)
 
 from activegraph.behaviors.base import Behavior, LLMBehavior, RelationBehavior
 from activegraph.behaviors.decorators import get_registry
 from activegraph.core.event import Event
-from activegraph.core.graph import Graph, evaluate_where as _evaluate_where
+from activegraph.core.graph import Graph
 from activegraph.core.graph_store import GraphStore
 from activegraph.core.ids import IDGen
 from activegraph.core.view import View
@@ -81,7 +97,11 @@ from activegraph.frame import Frame
 from activegraph.llm.cache import LLMCache
 from activegraph.llm.embedding import EmbeddingProvider
 from activegraph.llm.embedding_cache import EmbeddingCache, hash_embedding_request
-from activegraph.llm.errors import LLMBehaviorError, MissingProviderError
+from activegraph.llm.errors import (
+    LLMBehaviorError,
+    MissingProviderError,
+    PromptIdentityError,
+)
 from activegraph.llm.provider import LLMProvider
 from activegraph.llm.types import LLMMessage, ToolCall
 from activegraph.policy import Policy
@@ -144,13 +164,23 @@ from activegraph.tools.errors import (
 from activegraph.tools.recorded import DirectToolInvoker
 
 from activegraph.observability.logging import get_logger, runtime_log_extra
-from activegraph.observability.metrics import Metrics, NoOpMetrics
+from activegraph.observability.metrics import (
+    Metrics,
+    NoOpMetrics,
+    normalize_behavior_metric_reason,
+    normalize_llm_metric_reason,
+    normalize_metric_model,
+    normalize_metric_tool,
+    normalize_replay_metric_reason,
+    normalize_tool_metric_reason,
+)
 from activegraph.observability.status import (
     BehaviorInfo,
     BudgetSnapshot,
     EventSummary,
     FrameSnapshot,
     RuntimeStatus,
+    RuntimeState,
 )
 
 
@@ -161,6 +191,11 @@ class Context:
     policy: Optional[Policy]
     random: _random.Random
     clock: Any  # Clock-like
+    # Compatibility field populated only for @llm_behavior invocation
+    # contexts. Plain/relation contexts keep None. Recorded generation still
+    # belongs to Runtime's @llm_behavior path; direct provider calls from a
+    # handler are unsupported because they bypass events, cache, budget, and
+    # replay governance.
     llm_provider: Optional[LLMProvider] = None
     # v0.7: pattern bindings for the current invocation. Empty list for
     # behaviors that don't declare a pattern. The handler is fired
@@ -195,15 +230,13 @@ class Context:
         *,
         reason: str = "",
     ) -> str:
-        """Defer creation of an object behind a policy approval.
+        """Explicitly defer object creation for operator approval.
 
-        Returns the proposal id. The object materializes when
-        `runtime.approve(id)` is called. Intended for use by behaviors
-        whose pack policy gates `object_type` writes.
-
-        Convenience: behaviors can just call `graph.add_object` if their
-        pack settings say auto-approval is on; this helper is the
-        explicit path when gating is enabled.
+        This call always creates a pending approval and returns its id. The
+        object materializes only when ``runtime.approve(id)`` is called.
+        Direct ``Graph.add_object`` calls remain immediate regardless of
+        loaded policies. A matching pack policy supplies pack-owner
+        attribution for the proposal; it does not decide whether to defer.
         """
         if self._runtime is None:
             from activegraph.runtime.exec_errors import RuntimeContextRequiredError
@@ -309,6 +342,48 @@ def _doc_url_for_reason(reason: str) -> str:
     return f"{DOCS_BASE_URL}/errors/execution-error"
 
 
+def _metric_nonnegative_number(
+    value: object, *, allow_decimal_string: bool = False
+) -> Optional[float]:
+    """Return one finite nonnegative metric value without broad coercion.
+
+    Runtime event payloads use numeric token/latency fields and decimal strings
+    for costs. Booleans, numeric strings outside the cost field, negative
+    values, and non-finite values are malformed and therefore omitted.
+    """
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        if not allow_decimal_string:
+            return None
+        try:
+            decimal_value = Decimal(value)
+        except (ArithmeticError, TypeError, ValueError):
+            return None
+        if not decimal_value.is_finite() or decimal_value < 0:
+            return None
+        number = float(decimal_value)
+        return number if math.isfinite(number) else None
+    if not isinstance(value, (int, float, Decimal)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
+def _metric_nonnegative_integer(value: object) -> Optional[float]:
+    """Return an exact token-count payload value or omit malformed input."""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return float(value)
+
+
 class Runtime:
     """Drives behaviors over an event-sourced :class:`~activegraph.core.graph.Graph`.
 
@@ -384,6 +459,12 @@ class Runtime:
                     f"sink name {sink_name!r} is already attached to this graph"
                 )
         self.graph = graph
+        # Same-process liveness overlay for status(). This count is guarded
+        # independently from Runtime mutation: the lock makes observation
+        # coherent but does not make concurrent drains safe.
+        self._active_drain_count = 0
+        self._active_drain_lock = threading.Lock()
+        self._closed = False
         self.frame = frame
         self.policy = policy
         self.budget = Budget(budget or {})
@@ -435,6 +516,12 @@ class Runtime:
         # v0.7: tool plumbing
         self._explicit_tools = list(tools) if tools is not None else None
         self.tool_registry: dict[str, Tool] = {}
+        # Rebuilt on every _ensure_registry pass. Keyed by object identity
+        # because Behavior dataclasses are unhashable and names are not the
+        # ownership boundary for an effective registration.
+        self._behavior_tool_bindings: dict[
+            int, tuple[LLMBehavior, tuple[Tool, ...]]
+        ] = {}
         self.replay_tool_cache: bool = replay_tool_cache
         from activegraph.tools.cache import ToolCache as _ToolCache
         self._tool_cache = tool_cache if tool_cache is not None else _ToolCache()
@@ -453,9 +540,13 @@ class Runtime:
         if self.frame is not None and self.frame.id is None:
             self.frame.id = graph.ids.frame()
 
-        # v0.8: observability — metrics defaults to NoOp so the runtime
-        # is fully functional without any metrics backend configured.
-        self.metrics: Metrics = metrics if metrics is not None else NoOpMetrics()
+        # Keep the requested backend dormant until every constructor
+        # validation succeeds. Load/fork also rely on this seam so replay and
+        # queue recovery cannot publish history as fresh observations.
+        requested_metrics: Metrics = (
+            metrics if metrics is not None else NoOpMetrics()
+        )
+        self.metrics: Metrics = NoOpMetrics()
         self._log = get_logger("activegraph.runtime")
 
         self._queue = EventQueue()
@@ -468,7 +559,6 @@ class Runtime:
         # Stash for tool result message between _invoke_tool and the
         # turn-loop caller. Always cleared after consumption.
         self._last_tool_result_message: Optional[LLMMessage] = None
-        graph.add_listener(self._on_event)
         self._idle_emitted = False
 
         # ---- v0.5: persistence wiring ----
@@ -542,12 +632,16 @@ class Runtime:
             _resolve_and_validate_llm_capabilities(source, self.llm_provider, self.budget)
         from activegraph.runtime._live import track_runtime
 
+        graph.add_listener(self._on_event)
+        self.metrics = requested_metrics
         try:
             self._attach_sink_configs(initial_sink_configs)
+            track_runtime(self)
+            self._record_initial_metric_snapshot()
         except Exception:
             graph._remove_listener(self._on_event)  # noqa: SLF001
+            self.metrics = NoOpMetrics()
             raise
-        track_runtime(self)
 
     def _attach_sink_configs(self, configs: Iterable[SinkConfig]) -> None:
         """Attach prevalidated configs atomically from the caller's view."""
@@ -568,7 +662,100 @@ class Runtime:
                 self.graph.remove_sink(attached_sink, timeout=1.0)
             raise
 
+    def _record_queue_depth(self) -> None:
+        """Publish this runtime's current queue depth (last-writer gauge)."""
+
+        depth = len(self._queue)
+        self._max_queue_depth_observed = max(self._max_queue_depth_observed, depth)
+        self.metrics.gauge("activegraph_queue_depth", {}, float(depth))
+
+    def _record_budget_events_remaining(self) -> None:
+        limit = self.budget.limits["max_events"]
+        if math.isfinite(limit):
+            remaining = max(0.0, limit - self.budget.used["max_events"])
+            self.metrics.gauge(
+                "activegraph_budget_events_remaining",
+                {"run_id": self.run_id},
+                float(remaining),
+            )
+
+    def _record_budget_cost_remaining(self) -> None:
+        if self.budget.cost_limit is not None:
+            remaining = max(
+                Decimal("0"), self.budget.cost_limit - self.budget.cost_used
+            )
+            self.metrics.gauge(
+                "activegraph_budget_cost_remaining_usd",
+                {"run_id": self.run_id},
+                float(remaining),
+            )
+
+    def _record_initial_metric_snapshot(self) -> None:
+        self._record_queue_depth()
+        self._record_budget_events_remaining()
+        self._record_budget_cost_remaining()
+
+    def _consume_budget(self, key: str, amount: float = 1.0) -> None:
+        self.budget.consume(key, amount)
+        if key == "max_events":
+            self._record_budget_events_remaining()
+
+    def _add_budget_cost(self, amount: Decimal) -> None:
+        self.budget.add_cost(amount)
+        self._record_budget_cost_remaining()
+
     # ---------- public surface ----------
+
+    def _ensure_open(self, operation: str) -> None:
+        """Reject a state-changing operation after deterministic shutdown."""
+
+        if self._closed:
+            from activegraph.runtime.config_errors import RuntimeClosedError
+
+            raise RuntimeClosedError(operation)
+
+    def close(self, timeout: float | None = 5.0) -> bool:
+        """Close every sink attached to this Runtime's Graph.
+
+        The call delegates to :meth:`close_sinks`, returns ``False`` for an
+        ordinary timeout or partial adapter failure, and is safe to retry for
+        owner-side cleanup. The Runtime is closed to later mutations from the
+        first call onward; read-only inspection remains available. Stores and
+        graph listeners are not closed.
+        """
+
+        self._closed = True
+        closed = self.close_sinks(timeout=timeout)
+        if closed:
+            from activegraph.runtime._live import untrack_runtime
+
+            untrack_runtime(self)
+        return closed
+
+    def __enter__(self) -> "Runtime":
+        """Enter deterministic Runtime sink ownership."""
+
+        self._ensure_open("__enter__")
+        return self
+
+    def __exit__(self, exc_type: Any, exc: BaseException | None, tb: Any) -> None:
+        """Close sinks without suppressing an exception from the user block.
+
+        A normal ``False`` close result is exception-free. If close raises an
+        unexpected exception while a user exception is active, the user
+        exception remains primary and the close exception is attached as its
+        ``__context__``.
+        """
+
+        if exc is None:
+            self.close()
+            return None
+        try:
+            self.close()
+        except BaseException as close_error:
+            close_error.__context__ = None
+            exc.__context__ = close_error
+        return None
 
     @property
     def run_id(self) -> str:
@@ -623,6 +810,7 @@ class Runtime:
         successful delivery, declared drops, and adapter errors.
         """
 
+        self._ensure_open("add_sink")
         return self.graph.add_sink(
             sink,
             name=name,
@@ -639,6 +827,7 @@ class Runtime:
     ) -> bool:
         """Detach, drain, and close one sink within ``timeout``."""
 
+        self._ensure_open("remove_sink")
         return self.graph.remove_sink(sink, timeout=timeout)
 
     def sink_statuses(self) -> tuple[SinkStatus, ...]:
@@ -647,12 +836,23 @@ class Runtime:
         return self.graph.sink_statuses()
 
     def flush_sinks(self, timeout: float | None = 5.0) -> bool:
-        """Flush all attached sinks, applying ``timeout`` to each worker."""
+        """Flush all attached sinks, applying ``timeout`` to each worker.
+
+        Flush is non-detaching: it does not finalize attachment ownership or
+        release a name. If a timed-out close later reaches CLOSED or FAILED,
+        only close/remove reaps closing ownership. A terminal failure remains
+        queryable until explicit removal or name reuse.
+        """
 
         return self.graph.flush_sinks(timeout=timeout)
 
     def close_sinks(self, timeout: float | None = 5.0) -> bool:
-        """Detach and close all sinks, applying ``timeout`` to each worker."""
+        """Detach and close all sinks, applying ``timeout`` to each worker.
+
+        Retry after a timed-out close reaches a terminal state to finalize
+        Graph ownership. A failed retry may return ``False`` while still
+        retaining its queryable failure snapshot and releasing the name.
+        """
 
         return self.graph.close_sinks(timeout=timeout)
 
@@ -672,6 +872,7 @@ class Runtime:
         rejected before emission.
         """
 
+        self._ensure_open("dev_override")
         validate_override_request(
             actor=actor,
             reason=reason,
@@ -775,6 +976,7 @@ class Runtime:
         of classes and gates never moves.
         """
 
+        self._ensure_open("set_authority_ceiling")
         validate_ceiling(ceiling)
         for name, value in (("actor", actor), ("reason", reason)):
             if not isinstance(value, str) or not value.strip():
@@ -825,6 +1027,7 @@ class Runtime:
         :class:`AuthorityDecision` carries the accepted event id.
         """
 
+        self._ensure_open("evaluate_capability_authority")
         decision = evaluate_action_authority(
             capability=capability,
             action_class=action_class,
@@ -863,50 +1066,19 @@ class Runtime:
             "activegraph_events_emitted_total",
             {"event_type": event.type},
         )
+        self._record_llm_tool_event_metrics(event)
         # CONTRACT v1.3 #4: promote applies its delta quiescently —
         # the events persist and project, but never enqueue for
         # behavior matching. The promote.applied marker is emitted
         # BEFORE this flag is raised, so it alone is queue-visible.
         if self._promote_quiescent:
             return
-        # Don't enqueue our own lifecycle events for re-matching.
-        # v0.7 adds `llm.*`, `tool.*`, `pattern.*`, `behavior.scheduled`
-        # to the suppression list — they're internal to the runtime's
-        # bookkeeping. (User behaviors that want to audit LLM/tool
-        # activity can still subscribe via the registry's lookup.)
-        if (
-            event.type.startswith("behavior.")
-            or event.type.startswith("relation_behavior.")
-            or event.type.startswith("runtime.")
-            or event.type.startswith("llm.")
-            or event.type.startswith("tool.")
-            or event.type.startswith("pattern.")
-            # v0.9: approval bookkeeping is internal; CONTRACT v0.9 #13
-            # deliberately keeps `pack.loaded` queue-visible so pack-aware
-            # behaviors can subscribe, but `approval.*` is suppressed.
-            or event.type.startswith("approval.")
-            # v1.8 R3: an override is a trace marker/receipt, not behavior
-            # scheduling input or an ambient developer-mode switch.
-            or event.type.startswith("dev.")
-            # v1.9: authority ceiling changes and decisions are runtime
-            # bookkeeping — they persist, project, export, and replay,
-            # but never schedule behaviors (CONTRACT v1.9 #3).
-            or event.type.startswith("authority.")
-            # v1.10 #1: the batched read-trace marker is runtime
-            # bookkeeping like behavior.* — it persists, projects (as a
-            # no-op), exports through sinks, and replays, but never
-            # schedules behaviors or advances the tick. Exact match, not
-            # a `context.` prefix claim: only this one type is reserved.
-            or event.type == "context.read"
-        ):
+        # Runtime bookkeeping persists, projects, exports, and may remain
+        # replay/diff history, but it never enters behavior scheduling.
+        if not classify_event_type(event.type).schedules_behaviors:
             return
         self._queue.push(event)
-        self._max_queue_depth_observed = max(
-            self._max_queue_depth_observed, len(self._queue)
-        )
-        self.metrics.gauge(
-            "activegraph_queue_depth", {}, float(len(self._queue))
-        )
+        self._record_queue_depth()
         # New activity → we're not idle anymore.
         self._idle_emitted = False
         # INFO: one log line per enqueued event. High-volume; operators
@@ -919,7 +1091,125 @@ class Runtime:
             ),
         )
 
+    def _record_llm_tool_event_metrics(self, event: Event) -> None:
+        """Map Runtime-owned LLM/tool events to the standard metric catalog.
+
+        Graph events remain the source of truth. This observer reads only the
+        four Runtime-owned event types and tolerates malformed public
+        ``Graph.emit`` payloads without changing or rejecting those events.
+        """
+
+        payload: Mapping[str, Any] = (
+            event.payload if isinstance(event.payload, Mapping) else {}
+        )
+        if event.type == "llm.requested":
+            tags = {"model": normalize_metric_model(payload.get("model"))}
+            self.metrics.counter("activegraph_llm_calls_total", tags)
+            if payload.get("cache_hit") is True:
+                self.metrics.counter("activegraph_llm_cache_hits_total", tags)
+            return
+
+        if event.type == "tool.requested":
+            tags = {"tool": normalize_metric_tool(payload.get("tool"))}
+            self.metrics.counter("activegraph_tools_calls_total", tags)
+            if payload.get("cache_hit") is True:
+                self.metrics.counter("activegraph_tools_cache_hits_total", tags)
+            return
+
+        if event.type == "llm.responded":
+            self._record_llm_response_metrics(payload)
+            return
+
+        if event.type == "tool.responded":
+            self._record_tool_response_metrics(payload)
+
+    def _record_llm_response_metrics(self, payload: Mapping[str, Any]) -> None:
+        error = payload.get("error")
+        if error is not None and not isinstance(error, Mapping):
+            return
+
+        tags = {"model": normalize_metric_model(payload.get("model"))}
+        if isinstance(error, Mapping):
+            self.metrics.counter(
+                "activegraph_llm_failed_total",
+                {
+                    **tags,
+                    "reason": normalize_llm_metric_reason(error.get("reason")),
+                },
+            )
+        else:
+            for field, metric_name in (
+                ("input_tokens", "activegraph_llm_tokens_in"),
+                ("output_tokens", "activegraph_llm_tokens_out"),
+            ):
+                value = _metric_nonnegative_integer(payload.get(field))
+                if value is not None:
+                    self.metrics.histogram(metric_name, tags, value)
+            cost = (
+                0.0
+                if payload.get("cache_hit") is True
+                else _metric_nonnegative_number(
+                    payload.get("cost_usd"), allow_decimal_string=True
+                )
+            )
+            if cost is not None:
+                self.metrics.histogram("activegraph_llm_cost_usd", tags, cost)
+
+    def _record_tool_response_metrics(self, payload: Mapping[str, Any]) -> None:
+        error = payload.get("error")
+        if error is not None and not isinstance(error, Mapping):
+            return
+
+        tags = {"tool": normalize_metric_tool(payload.get("tool"))}
+        if isinstance(error, Mapping):
+            self.metrics.counter(
+                "activegraph_tools_failed_total",
+                {
+                    **tags,
+                    "reason": normalize_tool_metric_reason(error.get("reason")),
+                },
+            )
+
+        duration = (
+            0.0
+            if payload.get("cache_hit") is True
+            else _metric_nonnegative_number(payload.get("latency_seconds"))
+        )
+        if duration is not None:
+            self.metrics.histogram(
+                "activegraph_tools_duration_seconds", tags, duration
+            )
+
     # ---------- public entry points ----------
+
+    def _record_pattern_evaluation(self, elapsed_seconds: float) -> None:
+        """Observe one matcher call without changing matcher control flow."""
+
+        try:
+            self.metrics.counter("activegraph_patterns_evaluated_total", {})
+            self.metrics.histogram(
+                "activegraph_patterns_evaluation_duration_seconds",
+                {},
+                elapsed_seconds,
+            )
+        except Exception:
+            # Metrics implementations are specified as non-throwing; keep the
+            # runtime boundary defensive so observation never masks matching.
+            return
+
+    def _record_replay_divergence(
+        self,
+        error: ReplayDivergenceError,
+        *,
+        metrics: Optional[Metrics] = None,
+    ) -> None:
+        """Count one escaping strict divergence with a bounded kind label."""
+
+        target = self.metrics if metrics is None else metrics
+        target.counter(
+            "activegraph_replay_divergence_detected_total",
+            {"reason": normalize_replay_metric_reason(error.kind)},
+        )
 
     def _resolve_structured_output_mode(self, b: LLMBehavior) -> str:
         """Resolve "native" or "prompt" for one behavior. CONTRACT v1.3 #1.
@@ -986,7 +1276,10 @@ class Runtime:
                     self._structured_output_modes[b.name] = (
                         self._resolve_structured_output_mode(b)
                     )
-        self.registry = Registry(source)
+        self.registry = Registry(
+            source,
+            pattern_observer=self._record_pattern_evaluation,
+        )
 
         # v0.7: assemble the tool registry. Explicit tools= override the
         # global @tool registry, mirroring how behaviors= works.
@@ -999,16 +1292,16 @@ class Runtime:
         # be registered under their short name if `export_globally=True`.
         if self._pack_tools:
             tools_source = tools_source + list(self._pack_tools)
-        # LLM behaviors may also bring their own tools via tools=[...] on
-        # the decorator; pull those in too so the name lookup is unified.
+        # LLM behaviors may also bring Tool objects via tools=[...]. Pull
+        # those into the registry by identity; authoring strings remain
+        # references and are resolved after the complete registry exists.
         for b in source:
             if isinstance(b, LLMBehavior):
                 for t in b.tools:
-                    if isinstance(t, Tool) and t not in tools_source:
+                    if isinstance(t, Tool) and not any(
+                        registered is t for registered in tools_source
+                    ):
                         tools_source = list(tools_source) + [t]
-        # CONTRACT v0.7 #2: each LLM behavior with tools= must reference
-        # registered tools by Tool object or by name string. Names are
-        # resolved against the merged registry. Missing → MissingToolError.
         self.tool_registry = {}
         for t in tools_source:
             if not isinstance(t, Tool):
@@ -1023,17 +1316,124 @@ class Runtime:
                 short = getattr(t, "_short_name", None) or t.name.split(".", 1)[-1]
                 if short != t.name:
                     self.tool_registry[short] = t
+        # Resolve exactly once per registry pass. The mutable authoring
+        # lists stay public; every execution consumer reads this immutable
+        # homogeneous tuple until the next public drain rebuilds it.
+        self._behavior_tool_bindings = {}
         for b in source:
-            if not isinstance(b, LLMBehavior):
-                continue
-            for t in b.tools:
-                name = t.name if isinstance(t, Tool) else str(t)
-                if name not in self.tool_registry:
-                    raise MissingToolError(
-                        name,
-                        behavior_name=b.name,
-                        registered=tuple(self.tool_registry.keys()),
-                    )
+            if isinstance(b, LLMBehavior):
+                resolved = tuple(
+                    self._resolve_behavior_tool_ref(b, ref) for ref in b.tools
+                )
+                self._behavior_tool_bindings[id(b)] = (b, resolved)
+
+    def _resolve_behavior_tool_ref(self, b: LLMBehavior, ref: Any) -> Tool:
+        """Resolve one authoring ToolRef with behavior-owner precedence."""
+        if isinstance(ref, Tool):
+            resolved = self.tool_registry.get(ref.name)
+            if resolved is not None:
+                return resolved
+            name = ref.name
+        else:
+            name = str(ref)
+
+        if "." in name:
+            resolved = self.tool_registry.get(name)
+            if resolved is not None:
+                return resolved
+            raise MissingToolError(
+                name,
+                behavior_name=b.name,
+                registered=tuple(self.tool_registry.keys()),
+            )
+
+        owner = getattr(b, "_pack_owner", None)
+        if owner is not None:
+            owned = self.tool_registry.get(f"{owner}.{name}")
+            if owned is not None:
+                return owned
+
+        # An exact undotted Tool.name is a real global declaration. A
+        # pack export alias has key=name but canonical Tool.name=pack.name,
+        # so it deliberately does not satisfy this precedence step.
+        global_tool = self.tool_registry.get(name)
+        if global_tool is not None and global_tool.name == name:
+            return global_tool
+
+        pack_candidates: list[tuple[str, Tool]] = []
+        if self._pack_state is not None:
+            for canonical, pack_owner in self._pack_state.tool_owners.items():
+                if canonical.endswith(f".{name}") and pack_owner != owner:
+                    candidate = self.tool_registry.get(canonical)
+                    if candidate is not None:
+                        pack_candidates.append((pack_owner, candidate))
+        distinct = {
+            candidate.name: (pack_owner, candidate)
+            for pack_owner, candidate in pack_candidates
+        }
+        if len(distinct) == 1:
+            return next(iter(distinct.values()))[1]
+        if len(distinct) > 1:
+            from activegraph.runtime.registration_errors import AmbiguousToolError
+
+            raise AmbiguousToolError(
+                name,
+                packs=tuple(pack_owner for pack_owner, _ in distinct.values()),
+            )
+        raise MissingToolError(
+            name,
+            behavior_name=b.name,
+            registered=tuple(self.tool_registry.keys()),
+        )
+
+    def _bound_tools_for(self, b: LLMBehavior) -> tuple[Tool, ...]:
+        entry = self._behavior_tool_bindings.get(id(b))
+        if entry is None or entry[0] is not b:
+            raise RuntimeError(
+                f"no runtime Tool binding for LLM behavior {b.name!r}; "
+                "_ensure_registry() must run before invocation"
+            )
+        return entry[1]
+
+    def _canonicalize_tool_response(
+        self,
+        b: LLMBehavior,
+        response: Any,
+        bound_tools: tuple[Tool, ...],
+    ) -> Any:
+        """Copy a tool-call response and canonicalize every call name."""
+        calls = getattr(response, "tool_calls", None)
+        if not calls:
+            return response
+        declared_names = tuple(tool.name for tool in bound_tools)
+        exact = set(declared_names)
+        canonical_calls: list[ToolCall] = []
+        for call in calls:
+            canonical_name: Optional[str] = None
+            if call.name in exact:
+                canonical_name = call.name
+            elif "." not in call.name:
+                suffix_matches = {
+                    name for name in exact if name.rsplit(".", 1)[-1] == call.name
+                }
+                if len(suffix_matches) == 1:
+                    canonical_name = next(iter(suffix_matches))
+            if canonical_name is None:
+                raise UnknownToolError(
+                    f"LLM called tool {call.name!r}, which does not resolve "
+                    f"to one distinct tool declared by behavior {b.name!r}",
+                    tool_name=call.name,
+                    behavior_name=b.name,
+                    declared_tools=declared_names,
+                )
+            canonical_calls.append(
+                replace(call, name=canonical_name, args=dict(call.args))
+            )
+        return replace(
+            response,
+            provider_meta=dict(response.provider_meta),
+            tool_calls=canonical_calls,
+        )
 
     def _start_budget(self) -> None:
         """Start live timing or the clock-free strict-replay budget."""
@@ -1041,6 +1441,17 @@ class Runtime:
         self.budget.start(
             read_wall_clock=self._strict_wall_stop_sequence is None
         )
+
+    @contextmanager
+    def _active_drain(self) -> Iterator[None]:
+        """Overlay ``running`` while one public drain is on the stack."""
+        with self._active_drain_lock:
+            self._active_drain_count += 1
+        try:
+            yield
+        finally:
+            with self._active_drain_lock:
+                self._active_drain_count -= 1
 
     def _budget_remaining(self) -> bool:
         """Evaluate limits, reproducing a recorded wall stop when installed."""
@@ -1055,33 +1466,39 @@ class Runtime:
         return True
 
     def run_goal(self, goal: str, *, actor: str = "user") -> None:
-        self._ensure_registry()
-        # Stamp the run row's goal (best-effort; only meaningful with a store).
-        if self.graph.store is not None and hasattr(self.graph.store, "upsert_run"):
-            self.graph.store.upsert_run(
-                created_at=_now_iso(),
-                goal=goal,
+        self._ensure_open("run_goal")
+        with self._active_drain():
+            self._ensure_registry()
+            # Stamp the run row's goal (best-effort; only meaningful with a store).
+            if self.graph.store is not None and hasattr(
+                self.graph.store, "upsert_run"
+            ):
+                self.graph.store.upsert_run(
+                    created_at=_now_iso(),
+                    goal=goal,
+                    frame_id=self.frame.id if self.frame else None,
+                )
+            ev = Event(
+                id=self.graph.ids.event(),
+                type="goal.created",
+                payload={"goal": goal},
+                actor=actor,
                 frame_id=self.frame.id if self.frame else None,
+                caused_by=None,
+                timestamp=self.graph.clock.now(),
             )
-        ev = Event(
-            id=self.graph.ids.event(),
-            type="goal.created",
-            payload={"goal": goal},
-            actor=actor,
-            frame_id=self.frame.id if self.frame else None,
-            caused_by=None,
-            timestamp=self.graph.clock.now(),
-        )
-        self._start_budget()
-        self.graph.emit(ev)
-        self.run_until_idle()
+            self._start_budget()
+            self.graph.emit(ev)
+            self.run_until_idle()
 
     def run_until_idle(self) -> None:
-        self._ensure_registry()
-        if self.budget._start is None:
-            self._start_budget()
-        self._loop(stop=lambda: False)
-        self._emit_idle_or_exhausted()
+        self._ensure_open("run_until_idle")
+        with self._active_drain():
+            self._ensure_registry()
+            if self.budget._start is None:
+                self._start_budget()
+            self._loop(stop=lambda: False)
+            self._emit_idle_or_exhausted()
 
     def run_quantum(
         self,
@@ -1098,6 +1515,7 @@ class Runtime:
         emitted exactly when this quantum actually reaches that state.
         """
 
+        self._ensure_open("run_quantum")
         if isinstance(max_queue_events, bool) or not isinstance(max_queue_events, int):
             raise TypeError("max_queue_events must be an int")
         if max_queue_events < 1:
@@ -1107,38 +1525,43 @@ class Runtime:
         if not math.isfinite(float(max_seconds)) or float(max_seconds) <= 0:
             raise ValueError("max_seconds must be finite and > 0")
 
-        self._ensure_registry()
-        if self.budget._start is None:
-            self._start_budget()
-        started = _monotonic()
-        start_tick = self._tick
-        deadline = started + float(max_seconds)
-        self._loop(
-            stop=lambda: (
-                self._tick - start_tick >= max_queue_events
-                or _monotonic() >= deadline
+        with self._active_drain():
+            self._ensure_registry()
+            if self.budget._start is None:
+                self._start_budget()
+            started = _monotonic()
+            start_tick = self._tick
+            deadline = started + float(max_seconds)
+            self._loop(
+                stop=lambda: (
+                    self._tick - start_tick >= max_queue_events
+                    or _monotonic() >= deadline
+                )
             )
-        )
-        exhausted = not self._budget_remaining()
-        idle = not self._queue and not self._delayed
-        if exhausted or idle:
-            self._emit_idle_or_exhausted()
-        return RunQuantumResult(
-            queue_events_processed=self._tick - start_tick,
-            elapsed_seconds=_monotonic() - started,
-            queue_depth=len(self._queue),
-            max_queue_depth=max(self._max_queue_depth_observed, len(self._queue)),
-            delayed_depth=len(self._delayed),
-            idle=idle,
-            budget_exhausted=exhausted,
-        )
+            exhausted = not self._budget_remaining()
+            idle = not self._queue and not self._delayed
+            if exhausted or idle:
+                self._emit_idle_or_exhausted()
+            return RunQuantumResult(
+                queue_events_processed=self._tick - start_tick,
+                elapsed_seconds=_monotonic() - started,
+                queue_depth=len(self._queue),
+                max_queue_depth=max(
+                    self._max_queue_depth_observed, len(self._queue)
+                ),
+                delayed_depth=len(self._delayed),
+                idle=idle,
+                budget_exhausted=exhausted,
+            )
 
     def run_until(self, predicate: Callable[[Graph], bool]) -> None:
-        self._ensure_registry()
-        if self.budget._start is None:
-            self._start_budget()
-        self._loop(stop=lambda: predicate(self.graph))
-        self._emit_idle_or_exhausted()
+        self._ensure_open("run_until")
+        with self._active_drain():
+            self._ensure_registry()
+            if self.budget._start is None:
+                self._start_budget()
+            self._loop(stop=lambda: predicate(self.graph))
+            self._emit_idle_or_exhausted()
 
     def embed(
         self,
@@ -1156,6 +1579,7 @@ class Runtime:
         through :meth:`Context.embed`, which supplies causal metadata.
         """
 
+        self._ensure_open("embed")
         if not isinstance(texts, list) or any(
             not isinstance(text, str) for text in texts
         ):
@@ -1198,11 +1622,13 @@ class Runtime:
                 else None
             )
             if expected is None or expected != inputs_hash:
-                raise ReplayDivergenceError(
+                error = ReplayDivergenceError(
                     event_id=request.id,
                     expected=f"embedding_hash={expected or '<no recorded request>'}",
                     actual=f"embedding_hash={inputs_hash}",
                 )
+                self._record_replay_divergence(error)
+                raise error
 
         if cached is not None:
             vectors = cached
@@ -1210,11 +1636,13 @@ class Runtime:
             if self.replay_strict:
                 # Strict replay is never allowed to fall through to external
                 # embedding I/O, even if a provider object is configured.
-                raise ReplayDivergenceError(
+                error = ReplayDivergenceError(
                     event_id=request.id,
                     expected=f"embedding_response={inputs_hash}",
                     actual=None,
                 )
+                self._record_replay_divergence(error)
+                raise error
             if provider is None:
                 exc = RuntimeError(
                     "Runtime.embed() requires an embedding_provider= on cache miss"
@@ -1275,7 +1703,8 @@ class Runtime:
             if self._queue:
                 event = self._queue.pop()
                 assert event is not None
-                self.budget.consume("max_events")
+                self._record_queue_depth()
+                self._consume_budget("max_events")
                 self._tick += 1
                 matches = cast(Registry, self.registry).match(event, self.graph)
                 for b, rels, p_matches in matches:
@@ -1325,50 +1754,47 @@ class Runtime:
         )
         self._delayed.push(
             ScheduledEntry(
+                behavior=behavior,
                 behavior_name=behavior.name,
-                behavior_index=cast(Registry, self.registry).index_of(behavior),
                 triggering_event_id=event.id,
                 fire_at_event_count=self._tick + behavior.activate_after,
-                where_recheck_path=None,
                 scheduled_event_id=sched_evt.id,
             )
         )
 
     def _fire_due_delayed(self) -> None:
         due = self._delayed.pop_due(self._tick)
-        for entry in due:
+        for index, entry in enumerate(due):
             if not self._budget_remaining():
-                # Re-push and exit — budget exhausted before all due
-                # entries fired; preserved for next run_until_idle.
-                self._delayed.push(entry)
+                # Restore every entry that has not started. Once an entry's
+                # relation fan-out begins it remains non-resumable, matching
+                # immediate relation dispatch (no cursor/repeat model).
+                self._delayed.restore_due_front(due[index:])
                 break
-            behavior = cast(Registry, self.registry).all()[entry.behavior_index]
+            registry = cast(Registry, self.registry)
+            if not registry.contains_identity(entry.behavior):
+                continue
+            behavior = entry.behavior
+            if behavior.name != entry.behavior_name:
+                continue
             # Re-fetch the triggering event so the handler still sees it.
             ev = self._find_event(entry.triggering_event_id)
             if ev is None:
                 continue
-            # Re-check where= against the LATEST graph state.
-            if behavior.where and not _evaluate_where(behavior.where, ev.payload):
-                # Silently skip per CONTRACT v0.7 #13. The trace already
-                # has the behavior.scheduled event; absence of a
-                # behavior.started is sufficient evidence the where
-                # didn't hold.
+            matched = registry._match_behavior(behavior, ev, self.graph)
+            if matched is None:
                 continue
-            # Re-check pattern as well so a stale pattern hit doesn't
-            # fire after the graph has moved on. We pass empty matches
-            # if there's no pattern.
-            p_matches: list[Any] = []
-            if behavior.pattern_matcher is not None:
-                p_matches = behavior.pattern_matcher.matches(ev, self.graph)
-                if not p_matches:
-                    continue
+            relations, p_matches = matched
+            if p_matches:
+                self._emit_pattern_matched(behavior, ev, p_matches)
             # Dispatch as normal (without re-scheduling — we are AT the
             # fire moment).
             if isinstance(behavior, RelationBehavior):
-                # For relation behaviors we'd need to refetch relations.
-                # Defer this rare combination to a future enhancement.
-                continue
-            if isinstance(behavior, LLMBehavior):
+                for relation in relations:
+                    if not self._budget_remaining():
+                        break
+                    self._invoke_relation(behavior, relation, ev, p_matches)
+            elif isinstance(behavior, LLMBehavior):
                 self._invoke_llm(behavior, ev, p_matches)
             else:
                 self._invoke(behavior, ev, p_matches)
@@ -1394,7 +1820,7 @@ class Runtime:
     # ---------- invocation ----------
 
     def _invoke(self, b: Behavior, event: Event, matches: Optional[list[Any]] = None) -> None:
-        self.budget.consume("max_behavior_calls")
+        self._consume_budget("max_behavior_calls")
         # v1.10 #1: one recorder per execution when tracing is on; None
         # keeps the wrapper and view byte-identical to pre-v1.10.
         recorder = ReadRecorder() if self.trace_context_reads else None
@@ -1447,10 +1873,6 @@ class Runtime:
                 "activegraph_behaviors_duration_seconds",
                 {"behavior": b.name},
                 _monotonic() - _t0,
-            )
-            self.metrics.counter(
-                "activegraph_behaviors_failed_total",
-                {"behavior": b.name, "reason": f"exception.{type(e).__name__}"},
             )
             # v1.0.3 #3: route through _emit_behavior_failed so the
             # WARNING log line and the event emission stay in one
@@ -1509,7 +1931,10 @@ class Runtime:
           behavior.completed
         """
 
-        self.budget.consume("max_behavior_calls")
+        self._consume_budget("max_behavior_calls")
+        self.metrics.counter(
+            "activegraph_behaviors_invoked_total", {"behavior": b.name}
+        )
 
         # v1.10 #1: one recorder per execution when tracing is on.
         # `plain_view` stays unwrapped so recording the prompt's object
@@ -1571,7 +1996,7 @@ class Runtime:
                 plain_view=plain_view,
             )
         finally:
-            self.budget.consume("max_llm_calls")
+            self._consume_budget("max_llm_calls")
         self._emit_context_read(b.name, event.id, started_evt.id, recorder)
 
     def _invoke_llm_body(
@@ -1588,22 +2013,11 @@ class Runtime:
         read-trace commit (v1.10 #1) wraps every one of its returns
         without restructuring the loop's failure exits."""
 
-        # v0.7: resolve tool objects (decorator may have stored names or
-        # objects). Build the provider-facing tool definitions list.
-        tools_for_call: list[Tool] = []
-        for t in b.tools:
-            name = t.name if isinstance(t, Tool) else str(t)
-            tool_obj = self.tool_registry.get(name)
-            if tool_obj is None:
-                self._emit_behavior_failed(
-                    b.name,
-                    event.id,
-                    MissingToolError(name, registered=tuple(self.tool_registry.keys())),
-                    reason="tool.unknown_tool",
-                    extras={"tool": name},
-                )
-                return
-            tools_for_call.append(tool_obj)
+        # _ensure_registry resolves the mutable authoring list once for
+        # this pass. Provider definitions, authorization, and dispatch all
+        # consume the same homogeneous tuple.
+        tools_for_call = self._bound_tools_for(b)
+        tools_by_name = {tool.name: tool for tool in tools_for_call}
         tool_defs = [t.to_definition() for t in tools_for_call] if tools_for_call else None
         tool_request_event_ids: list[str] = []
 
@@ -1788,11 +2202,13 @@ class Runtime:
                         else None
                     )
                     if expected is not None and expected != turn_hash:
-                        raise ReplayDivergenceError(
+                        error = ReplayDivergenceError(
                             event_id=requested_evt.id,
                             expected=f"prompt_hash={expected}",
                             actual=f"prompt_hash={turn_hash}",
                         )
+                        self._record_replay_divergence(error)
+                        raise error
 
                 if cached is not None:
                     turn_response = cached
@@ -1810,6 +2226,14 @@ class Runtime:
                         if so_mode == "native"
                         else {}
                     )
+                    identity_kwargs: dict[str, Any] = {}
+                    if getattr(
+                        self.llm_provider, "accepts_prompt_identity", False
+                    ):
+                        identity_kwargs = {
+                            "prompt_hash": turn_hash,
+                            "deterministic": prompt.deterministic,
+                        }
                     turn_response = cast(LLMProvider, self.llm_provider).complete(
                         system=prompt.system,
                         messages=running_messages,
@@ -1821,7 +2245,13 @@ class Runtime:
                         timeout_seconds=b.timeout_seconds,
                         tools=tool_defs,
                         **native_kwargs,
+                        **identity_kwargs,
                     )
+                except PromptIdentityError:
+                    # This is an internal runtime/fixture identity invariant,
+                    # not a provider outage. Never translate, retry, or emit
+                    # provider-error bookkeeping for it.
+                    raise
                 except LLMBehaviorError as e:
                     latency = _monotonic() - call_t0
                     retryable = _is_transient_llm_reason(e.reason)
@@ -1901,19 +2331,41 @@ class Runtime:
                     )
                     return
                 successful_llm_request_id = requested_evt.id
-                self._llm_cache.record(
-                    turn_hash, turn_response, requesting_event_id=requested_evt.id
-                ) if self._llm_cache is not None else None
-                if self._llm_cache is None:
-                    self._llm_cache = LLMCache()
-                    self._llm_cache.record(
-                        turn_hash, turn_response, requesting_event_id=requested_evt.id
-                    )
-                self.budget.add_cost(turn_response.cost_usd)
                 break
 
             if turn_response is None:
                 return
+
+            # A provider call is billable even when its returned tool name
+            # fails our authorization boundary below. Cache hits are not.
+            if cached is None:
+                self._add_budget_cost(turn_response.cost_usd)
+
+            # A custom/recorded provider may return an authored short name
+            # even though it was offered canonical definitions. Normalize
+            # before any cache, event, message, hash, or dispatch boundary.
+            try:
+                turn_response = self._canonicalize_tool_response(
+                    b, turn_response, tools_for_call
+                )
+            except UnknownToolError as e:
+                self._emit_behavior_failed(
+                    b.name,
+                    event.id,
+                    e,
+                    reason="tool.unknown_tool",
+                    extras={"tool": e.tool_name},
+                )
+                return
+
+            if cached is None:
+                if self._llm_cache is None:
+                    self._llm_cache = LLMCache()
+                self._llm_cache.record(
+                    turn_hash,
+                    turn_response,
+                    requesting_event_id=requested_evt.id,
+                )
 
             # ---- Emit llm.responded ---------------------------------------
             responded_payload = turn_response.to_dict() | {
@@ -1977,16 +2429,11 @@ class Runtime:
                         extras={"tool": call.name},
                     )
                     return
-                # Tool must have been declared by the behavior.
-                if not any(
-                    (isinstance(t, Tool) and t.name == call.name)
-                    or (isinstance(t, str) and t == call.name)
-                    for t in b.tools
-                ):
-                    declared = tuple(
-                        t if isinstance(t, str) else getattr(t, "name", repr(t))
-                        for t in (b.tools or [])
-                    )
+                # Canonicalization above is the authorization boundary;
+                # this lookup is a defensive invariant check before dispatch.
+                tool_obj = tools_by_name.get(call.name)
+                if tool_obj is None:
+                    declared = tuple(t.name for t in tools_for_call)
                     self._emit_behavior_failed(
                         b.name, event.id,
                         UnknownToolError(
@@ -2000,7 +2447,6 @@ class Runtime:
                         extras={"tool": call.name},
                     )
                     return
-                tool_obj = self.tool_registry[call.name]
                 tr_id = self._invoke_tool(
                     behavior=b,
                     event=event,
@@ -2079,6 +2525,7 @@ class Runtime:
         # ---- Invoke developer handler with provenance stamping -----------
         bgraph._llm_request_event_id = successful_llm_request_id  # noqa: SLF001
         bgraph._tool_request_event_ids = list(tool_request_event_ids)  # noqa: SLF001
+        handler_t0 = _monotonic()
         try:
             cast("Callable[..., None]", b.handler)(event, bgraph, ctx, response.parsed)
         except ReplayDivergenceError:
@@ -2092,6 +2539,12 @@ class Runtime:
         except Exception as e:
             self._emit_behavior_failed(b.name, event.id, e)
             return
+        finally:
+            self.metrics.histogram(
+                "activegraph_behaviors_duration_seconds",
+                {"behavior": b.name},
+                _monotonic() - handler_t0,
+            )
 
         self._emit_lifecycle(
             "behavior.completed",
@@ -2127,7 +2580,7 @@ class Runtime:
         import logging
         import uuid
 
-        self.budget.consume("max_tool_calls")
+        self._consume_budget("max_tool_calls")
         args_hash = hash_tool_call(tool_name=tool.name, args=call.args)
 
         # Validate input
@@ -2255,7 +2708,7 @@ class Runtime:
             self._tool_cache.record(
                 args_hash, tool_response, requesting_event_id=req_evt.id
             )
-            self.budget.add_cost(tool_response.cost_usd)
+            self._add_budget_cost(tool_response.cost_usd)
 
         # Validate output (if schema)
         validated_output = tool_response.output
@@ -2506,6 +2959,13 @@ class Runtime:
         # tool.*, ConfigurationError for budget.*, else the generic
         # execution-error page.
         log_reason = reason or f"exception.{type(exc).__name__}"
+        self.metrics.counter(
+            "activegraph_behaviors_failed_total",
+            {
+                "behavior": behavior_name,
+                "reason": normalize_behavior_metric_reason(log_reason),
+            },
+        )
         self._log.warning(
             f"behavior failed: {behavior_name} (reason={log_reason})",
             extra=runtime_log_extra(
@@ -2527,7 +2987,10 @@ class Runtime:
         event: Event,
         matches: Optional[list[Any]] = None,
     ) -> None:
-        self.budget.consume("max_behavior_calls")
+        self._consume_budget("max_behavior_calls")
+        self.metrics.counter(
+            "activegraph_behaviors_invoked_total", {"behavior": b.name}
+        )
         # v1.10 #1: one recorder per execution when tracing is on. The
         # `relation` argument itself is pushed to the behavior, not read
         # by it, so it never enters the read set.
@@ -2565,6 +3028,7 @@ class Runtime:
                 "relation_id": relation.id,
             },
         )
+        handler_t0 = _monotonic()
         try:
             b.run(relation, event, bgraph, ctx)
         except ReplayDivergenceError:
@@ -2577,6 +3041,12 @@ class Runtime:
             # v1.10 #1: a failed frame still commits its read trace.
             self._emit_context_read(b.name, event.id, started_evt.id, recorder)
             return
+        finally:
+            self.metrics.histogram(
+                "activegraph_behaviors_duration_seconds",
+                {"behavior": b.name},
+                _monotonic() - handler_t0,
+            )
 
         self._emit_lifecycle(
             "behavior.completed",
@@ -2599,8 +3069,13 @@ class Runtime:
     def status(self, recent: int = 20) -> RuntimeStatus:
         """Frozen snapshot of the runtime. CONTRACT v0.8 #11.
 
-        Cheap to call. No graph traversal beyond a tail-slice of the
-        event log. Returns immutable data; mutating any field raises.
+        The operation is side-effect-free and in-memory. With N materialized
+        history events and B registered behaviors, current work is
+        ``O(N + B + min(N, recent))``; ``recent`` bounds returned summaries,
+        not history construction. It performs no store I/O or object/relation
+        traversal, and scans backward only to the latest terminal runtime
+        event when no local drain is active. Returns immutable data;
+        mutating any field raises.
 
         ``recent`` controls the length of the ``recent_events`` tail.
         The CLI's ``inspect --tail N`` passes through.
@@ -2645,19 +3120,21 @@ class Runtime:
             exhausted_by=self.budget.exhausted_by(),
         )
 
-        # State derivation: log-based, so a freshly loaded runtime and
-        # the runtime that saved the log agree. Walk back through the
-        # event log for the most recent terminal lifecycle event.
-        # CONTRACT v0.8 #11.
-        state: str = "stopped"
-        for ev in reversed(self.graph.events):
-            t = ev.type
-            if t == "runtime.budget_exhausted":
-                state = "exhausted"
-                break
-            if t == "runtime.idle":
-                state = "idle"
-                break
+        # A process-local active drain temporarily overlays the dormant,
+        # log-derived state. The reference count handles run_goal's nested
+        # run_until_idle call without an inner exit clearing the outer guard.
+        with self._active_drain_lock:
+            active_drain_count = self._active_drain_count
+        state: RuntimeState = "running" if active_drain_count > 0 else "stopped"
+        if active_drain_count == 0:
+            for ev in reversed(self.graph.events):
+                t = ev.type
+                if t == "runtime.budget_exhausted":
+                    state = "exhausted"
+                    break
+                if t == "runtime.idle":
+                    state = "idle"
+                    break
 
         frame_snap: Optional[FrameSnapshot] = None
         if self.frame is not None:
@@ -2698,7 +3175,7 @@ class Runtime:
 
         return RuntimeStatus(
             run_id=self.graph.run_id,
-            state=state,  # type: ignore[arg-type]
+            state=state,
             queue_depth=len(self._queue),
             events_processed=len(events),
             budget=budget_snap,
@@ -2790,6 +3267,7 @@ class Runtime:
         `PackConflictError` for any contributor name collision.
         Pre-mutation: a failed load leaves the runtime exactly as it was.
         """
+        self._ensure_open("load_pack")
         from activegraph.packs.loader import load_pack_into_runtime
         loaded: bool = load_pack_into_runtime(self, pack, settings=settings)
         return loaded
@@ -2829,6 +3307,7 @@ class Runtime:
 
         Returns ``True`` when the pack was live and is now disabled.
         """
+        self._ensure_open("disable_pack")
         from activegraph.packs import PackNotFoundError
         from activegraph.packs.loader import AMBIGUOUS
 
@@ -2898,6 +3377,12 @@ class Runtime:
         )
         state.tool_short_to_canonical = _rebuild_shorts(state.tool_owners)
 
+        owned_behavior_objects = [
+            b
+            for b in self._pack_behaviors
+            if getattr(b, "_pack_owner", None) == name
+        ]
+        self._delayed.cancel_behaviors(owned_behavior_objects)
         self._pack_behaviors = [
             b
             for b in self._pack_behaviors
@@ -3055,7 +3540,8 @@ class Runtime:
         from activegraph.packs.loader import _ensure_pack_state
 
         state = _ensure_pack_state(self)
-        # Find the pack that gates this object type, if any.
+        # Attribute the first matching loaded policy's pack, if any. Policies
+        # do not intercept writes; Context.propose_object chose this path.
         gating = state.gated_object_types.get(object_type, [])
         owner_pack = gating[0].split(".", 1)[0] if gating else ""
         n = state._next_approval_n
@@ -3099,6 +3585,7 @@ class Runtime:
         Raises `LookupError` if `approval_id` is not pending. Emits an
         `approval.granted` event followed by the deferred `object.created`.
         """
+        self._ensure_open("approve")
         from activegraph.runtime.exec_errors import ApprovalNotFoundError
         if self._pack_state is None:
             raise ApprovalNotFoundError(approval_id, pending_count=0)
@@ -3165,6 +3652,7 @@ class Runtime:
           in-memory events to it (CONTRACT v0.5 #5).
         Returns the path the events were written to.
         """
+        self._ensure_open("save_state")
         attached = self.graph.store
         if attached is not None:
             attached_path = getattr(attached, "path", None)
@@ -3307,6 +3795,9 @@ class Runtime:
         Recorded ``context.read`` events replay like any other event
         either way, and strict replay never diverges on them.
         """
+        requested_metrics: Metrics = (
+            metrics if metrics is not None else NoOpMetrics()
+        )
         sink_configs = _normalize_sink_configs(sinks)
         chosen = run_id or _most_recent_run_id(path)
         if chosen is None:
@@ -3355,7 +3846,7 @@ class Runtime:
             replay_tool_cache=replay_tool_cache,
             tool_cache=tcache,
             replay_reinvoke_deterministic=replay_reinvoke_deterministic,
-            metrics=metrics,
+            metrics=NoOpMetrics(),
             sinks=None,
             native_structured_output=native_structured_output,
             embedding_provider=embedding_provider,
@@ -3381,20 +3872,34 @@ class Runtime:
         _rebuild_pending_approvals(rt, events)
 
         if replay_strict:
-            _verify_replay(
-                graph,
-                events,
-                behaviors,
-                frame,
-                policy,
-                budget,
-                seed,
-                llm_provider=llm_provider,
-                embedding_provider=embedding_provider,
-                native_structured_output=native_structured_output,
-            )
+            try:
+                _verify_replay(
+                    graph,
+                    events,
+                    behaviors,
+                    frame,
+                    policy,
+                    budget,
+                    seed,
+                    llm_provider=llm_provider,
+                    embedding_provider=embedding_provider,
+                    native_structured_output=native_structured_output,
+                )
+            except ReplayDivergenceError as error:
+                rt._record_replay_divergence(
+                    error,
+                    metrics=requested_metrics,
+                )
+                raise
 
-        rt._attach_sink_configs(sink_configs)
+        rt.metrics = requested_metrics
+        try:
+            rt._attach_sink_configs(sink_configs)
+            rt._record_initial_metric_snapshot()
+        except Exception:
+            graph._remove_listener(rt._on_event)  # noqa: SLF001
+            rt.metrics = NoOpMetrics()
+            raise
         return rt
 
     def fork(
@@ -3432,6 +3937,10 @@ class Runtime:
         an external graph database. The fork's event log remains the source
         of truth — this only changes where the projection is materialized.
         """
+        self._ensure_open("fork")
+        requested_metrics: Metrics = (
+            metrics if metrics is not None else NoOpMetrics()
+        )
         sink_configs = _normalize_sink_configs(sinks)
         from activegraph.store.sqlite import SQLiteEventStore
 
@@ -3453,9 +3962,10 @@ class Runtime:
                     "store's native primitives (SQLite uses a direct SQL "
                     "copy under a single transaction). Postgres has a "
                     "different transactional shape and an in-memory store "
-                    "has no copy primitive at all. v0.8 deliberately "
-                    "scoped the fork command to SQLite first — the "
-                    "limitation is documented in CONTRACT v0.8 #5."
+                    "has no copy primitive at all. Runtime.fork() remains "
+                    "scoped to SQLite under CONTRACT v0.5 #9; its durable "
+                    "atomicity is clarified by the 2026-08-12 Set 4 "
+                    "amendment #2."
                 ),
                 how_to_fix=(
                     "Migrate the run to a SQLite store first, then fork:\n"
@@ -3556,7 +4066,7 @@ class Runtime:
             replay_tool_cache=replay_tool_cache,
             tool_cache=tcache,
             replay_reinvoke_deterministic=replay_reinvoke_deterministic,
-            metrics=metrics,
+            metrics=NoOpMetrics(),
             sinks=None,
             # CONTRACT v1.3 #1: forks inherit the parent's mode posture
             # so pre-populated caches stay reachable.
@@ -3584,7 +4094,14 @@ class Runtime:
         # v1.4: the fork inherits approvals still pending at the fork
         # point, rebuilt from its copied log.
         _rebuild_pending_approvals(rt, events)
-        rt._attach_sink_configs(sink_configs)
+        rt.metrics = requested_metrics
+        try:
+            rt._attach_sink_configs(sink_configs)
+            rt._record_initial_metric_snapshot()
+        except Exception:
+            fork_graph._remove_listener(rt._on_event)  # noqa: SLF001
+            rt.metrics = NoOpMetrics()
+            raise
         return rt
 
     def diff(self, other: "Runtime") -> Diff:
@@ -3632,6 +4149,7 @@ class Runtime:
         records (:class:`~activegraph.runtime.exec_errors.PromoteLineageError`
         otherwise; promote grandchildren one level at a time).
         """
+        self._ensure_open("promote")
         from activegraph.core.patch import Patch
         from activegraph.runtime.exec_errors import (
             PromoteConflictError,
@@ -3659,8 +4177,9 @@ class Runtime:
                 ),
                 why=(
                     "Lineage (parent_run_id, forked_at_event_id) is "
-                    "recorded durably by fork(), which itself requires a "
-                    "SQLite store (CONTRACT v0.8 #5). Promote trusts the "
+                    "recorded durably by fork(), whose Runtime API remains "
+                    "SQLite-scoped (CONTRACT v0.5 #9 and the 2026-08-12 "
+                    "Set 4 amendment #2). Promote trusts the "
                     "store's records, not the caller's claim, so it has "
                     "the same store requirement (CONTRACT v1.3 #4)."
                 ),
@@ -4018,28 +4537,22 @@ def _hash_turn_prompt(
     tool loop produces a distinct hash; same shape as v0.6's
     prompt.hash() otherwise.
     """
-    import hashlib
-    import json as _json
-
-    payload = {
-        "model": prompt.model,
-        "system": prompt.system,
-        "messages": [m.to_dict() for m in messages],
-        "output_schema_name": prompt.output_schema_name,
-        "output_schema_json": prompt.output_schema_json,
-        "max_tokens": int(prompt.max_tokens),
-        "temperature": float(prompt.temperature),
-        "top_p": float(prompt.top_p),
-        "deterministic": bool(prompt.deterministic),
-        "tools": list(tool_defs) if tool_defs else None,
-    }
-    # CONTRACT v1.3 #1 #7: mode is part of prompt identity; the field is
-    # emitted only when native so every pre-v1.3 hash stays
-    # byte-identical.
-    if getattr(prompt, "structured_output_mode", "prompt") == "native":
-        payload["structured_output_mode"] = "native"
-    canonical = _json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    payload = prompt_identity.build_prompt_identity_payload(
+        model=prompt.model,
+        system=prompt.system,
+        messages=messages,
+        output_schema_name=prompt.output_schema_name,
+        output_schema_json=prompt.output_schema_json,
+        max_tokens=prompt.max_tokens,
+        temperature=prompt.temperature,
+        top_p=prompt.top_p,
+        deterministic=prompt.deterministic,
+        tools=tool_defs,
+        structured_output_mode=getattr(
+            prompt, "structured_output_mode", "prompt"
+        ),
+    )
+    return prompt_identity.hash_prompt_payload(payload)
 
 
 def _maybe_object_id(event: Event) -> Optional[str]:
@@ -4135,7 +4648,9 @@ def _open_sqlite_store(path_or_url: str, run_id: str) -> Any:
 def _requeue_unfired(rt: "Runtime", events: list[Event]) -> None:
     """Push events that haven't yet triggered any behavior back into the queue.
 
-    See CONTRACT v0.5 diff #8 in CONTRACT.md for the rationale.
+    See CONTRACT v0.5 diff #8 and its event-policy amendment in CONTRACT.md
+    for the rationale. Resume considers only event types that could have been
+    scheduled live; it never manufactures queued runtime bookkeeping.
 
     INVARIANT: under the single-threaded, run-to-completion loop
     (CONTRACT #10), an event has either been popped — in which case ALL
@@ -4181,6 +4696,7 @@ def _requeue_unfired(rt: "Runtime", events: list[Event]) -> None:
             drain_idx = i
     suffix = events[drain_idx + 1:]
     if not suffix:
+        rt._record_queue_depth()  # noqa: SLF001 — recovery bookkeeping
         return
     fired_on: set[str] = set()
     for e in suffix:
@@ -4192,7 +4708,7 @@ def _requeue_unfired(rt: "Runtime", events: list[Event]) -> None:
             if eid:
                 fired_on.add(eid)
     for e in suffix:
-        if _is_lifecycle(e):
+        if not classify_event_type(e.type).schedules_behaviors:
             continue
         if e.id in fired_on:
             continue
@@ -4204,6 +4720,7 @@ def _requeue_unfired(rt: "Runtime", events: list[Event]) -> None:
         if (e.actor or "").startswith("promote:"):
             continue
         rt._queue.push(e)  # noqa: SLF001 — internal seam by design
+    rt._record_queue_depth()  # noqa: SLF001 — publish once after recovery batch
     if rt._queue:
         rt._idle_emitted = False
 
@@ -4253,7 +4770,7 @@ def _verify_replay(
         e
         for e in recorded_events
         if e.caused_by is None
-        and not _is_lifecycle(e)
+        and classify_event_type(e.type).included_in_strict_replay
         and not e.type.startswith("embedding.")
         and not _is_promote_block(e)
     ]
@@ -4369,7 +4886,10 @@ def _verify_replay(
             )
             fresh.emit(replay_ev)
             continue
-        if not _is_lifecycle(e) and e.caused_by is not None:
+        if (
+            classify_event_type(e.type).included_in_strict_replay
+            and e.caused_by is not None
+        ):
             derivation_pending = True
     fresh_rt.run_until_idle()
 
@@ -4378,7 +4898,7 @@ def _verify_replay(
     rec_stream = [
         (e.id, e.type)
         for e in recorded_events
-        if not _is_lifecycle(e)
+        if classify_event_type(e.type).included_in_strict_replay
         and e.id not in non_replayable_llm_ids
         and e.id not in direct_embedding_ids
         and not _is_promote_block(e)
@@ -4386,7 +4906,7 @@ def _verify_replay(
     new_stream = [
         (e.id, e.type)
         for e in fresh.events
-        if not _is_lifecycle(e)
+        if classify_event_type(e.type).included_in_strict_replay
         and not _is_promote_block(e)
     ]
     for i, (rec, new) in enumerate(zip(rec_stream, new_stream)):
@@ -4506,18 +5026,6 @@ def _validate_embedding_vectors(
             normalized_vector.append(number)
         normalized.append(normalized_vector)
     return normalized
-
-
-def _is_lifecycle(e: Event) -> bool:
-    return (
-        e.type.startswith("behavior.")
-        or e.type.startswith("relation_behavior.")
-        or e.type.startswith("runtime.")
-        # v1.10 #1: context.read is per-execution bookkeeping. Strict
-        # replay excludes it from the compared streams so a verify pass
-        # (which runs with tracing off) never diverges on trace markers.
-        or e.type == "context.read"
-    )
 
 
 def _materialize_snapshot(graph: Graph, store: Any, snapshot_event: Event) -> None:

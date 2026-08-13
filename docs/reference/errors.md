@@ -1,8 +1,10 @@
 # Errors reference catalog
 
-Every exception the framework raises has a dedicated reference
-page. The error message in the runtime ends with a `More:` link to
-its page; you should rarely need to visit this catalog directly.
+Every exception the framework raises has a dedicated reference page.
+Structured error messages end with a `More:` link to their page. The one
+documented compatibility exception is `SandboxStartupError`: it has its own
+page and framework ancestry, but keeps its legacy one-line rendering until the
+separately reviewed next-major migration tracked by AF-wse.
 
 If you arrived here from an error message, follow the link the
 message printed. If you're browsing — start with
@@ -38,6 +40,11 @@ The seven category bases match the
 - [InvalidStoreURL](errors/invalid-store-url-error.md)
 - [NonSerializableEventError](errors/non-serializable-event-error.md)
 - [SchemaVersionMismatch](errors/schema-version-mismatch.md)
+- [MigrationBackendConflictError](errors/migration-backend-conflict-error.md)
+- [UnsupportedMigrationBackendError](errors/unsupported-migration-backend-error.md)
+- [UnsupportedMigrationCapabilityError](errors/unsupported-migration-capability-error.md)
+- [MigrationBackendLoadError](errors/migration-backend-load-error.md)
+- [MigrationBackendCloseError](errors/migration-backend-close-error.md)
 
 ### ExecutionError
 
@@ -46,17 +53,22 @@ The seven category bases match the
 - [UnknownToolError](errors/unknown-tool-error.md)
 - [ApprovalNotFoundError](errors/approval-not-found-error.md)
 - [ReservedFieldError](errors/reserved-field-error.md)
+- [ObjectNotFoundError](errors/object-not-found-error.md)
+- [PatchNotFoundError](errors/patch-not-found-error.md)
+- [ApplyPatchNotFoundError](errors/apply-patch-not-found-error.md)
+- [RejectPatchNotFoundError](errors/reject-patch-not-found-error.md)
+- [RuntimeContextRequiredError](errors/runtime-context-required-error.md)
+- [InvalidPatchLifecycleState](errors/invalid-patch-lifecycle-state.md)
 
 ### ConfigurationError
 
+- [SandboxStartupError](errors/sandbox-startup-error.md)
 - [MissingProviderError](errors/missing-provider-error.md)
 - [MissingToolError](errors/missing-tool-error.md)
 - [MissingOptionalDependency](errors/missing-optional-dependency.md)
 - [InvalidToolRegistration](errors/invalid-tool-registration.md)
 - [InvalidRuntimeConfiguration](errors/invalid-runtime-configuration.md)
 - [InvalidArgumentType](errors/invalid-argument-type.md)
-- [RuntimeContextRequiredError](errors/runtime-context-required-error.md)
-- [InvalidPatchLifecycleState](errors/invalid-patch-lifecycle-state.md)
 
 ### RegistrationError
 

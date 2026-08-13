@@ -53,6 +53,14 @@ fires when **all** of them hold:
   the triggering event. Integer event count only; wall-clock units
   are refused (see
   [`invalid-activate-after`](../reference/errors/invalid-activate-after.md)).
+  Delayed relation behaviors re-evaluate current relation candidates and
+  pattern bindings at fire time, while `where=` remains a filter over the
+  original event payload. Disabling an owning pack cancels its exact pending
+  wrappers.
+- `priority=` — reserved metadata. It is retained on the behavior but does
+  not influence dispatch. Plain, LLM, relation, global, pack, and delayed
+  behaviors all run in registration order; unequal values and ties obey the
+  same rule.
 
 ## The signature
 
@@ -117,10 +125,25 @@ practical consequences:
   Direct `requests.get` in a behavior body breaks replay
   determinism in a way the framework can't recover from.
 
+`Context.llm_provider` is an invocation-scoped compatibility field: it is
+the configured provider object only while an `@llm_behavior` handler runs,
+and it is `None` in plain and relation handlers. This identity exposure is
+not a supported generation path. Even an LLM handler must not call
+`ctx.llm_provider.complete()` directly, because that bypasses Runtime-owned
+request/response events, cache, budgets, retry classification, tool handling,
+provenance, and replay. Put recorded generation in `@llm_behavior`; use
+`ctx.embed(...)` for governed embeddings.
+
 The framework doesn't enforce determinism with static analysis; the
 discipline is on the developer. The cost of breaking it is a fork
 that produces a different result from its parent — see
 [`replay-divergence-error`](../reference/errors/replay-divergence-error.md).
+
+Registration order is also the dispatch-order contract. Runtime never sorts
+the registry by `priority`, and `Runtime.status().registered_behaviors` reports
+the same order used for matching. Pack behaviors follow the global or explicit
+behaviors already registered with the runtime; delayed entries due on the same
+event-count tick remain FIFO.
 
 ## The failure model
 

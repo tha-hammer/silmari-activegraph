@@ -56,7 +56,13 @@ class EventStore(Protocol):
 
     run_id: str
 
-    def append(self, event: Event) -> None: ...
+    def append(self, event: Event) -> None:
+        """Append one event.
+
+        Raises ``DuplicateEventError`` when ``(event.id, run_id)`` already
+        exists. Other encoding and backend failures retain their native types.
+        """
+        ...
 
     def iter_events(
         self,

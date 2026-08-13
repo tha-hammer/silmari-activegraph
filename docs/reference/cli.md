@@ -24,12 +24,17 @@ documentation (`activegraph inspect --help`). Top-level
 | 1 | `EXIT_GENERIC_ERROR` | An unhandled error occurred, or a per-run report contains failures (`migrate` sets this when any run failed). |
 | 2 | `EXIT_USAGE_ERROR` | Invalid arguments (click's default — bad flags, missing required options, unparseable values). |
 | 3 | `EXIT_NOT_FOUND` | A named resource doesn't exist (store, run, event id, behavior name). |
-| 4 | `EXIT_CORRUPTION` | The store contains data the framework can't decode (caught via [`CorruptedEventPayloadError`](errors/corrupted-event-payload-error.md)). |
+| 4 | `EXIT_CORRUPTION` | The store is incompatible or contains data the framework can't safely decode (caught via [`SchemaVersionMismatch`](errors/schema-version-mismatch.md) or [`CorruptedEventPayloadError`](errors/corrupted-event-payload-error.md)). |
 | 5 | `EXIT_DIVERGENCE` | A strict-mode replay diverged from the recorded log (caught via [`ReplayDivergenceError`](errors/replay-divergence-error.md)). |
 
 This table is the single source of truth. The
 [operating guide](../guides/operating-in-production.md) and
 several error pages reference it.
+
+Every store-opening CLI path maps an exact `SchemaVersionMismatch`
+to exit 4, prints the structured error once on stderr, and suppresses
+the Python traceback. Direct Python callers still receive the typed
+exception.
 
 ## Connection URLs
 
@@ -86,6 +91,13 @@ are mutually exclusive — they're focused queries, not filters on
 the full status. Combining them is a usage error (exit 2).
 
 **JSON shape (default)**: `{run_id, state, queue_depth, events_processed, frame, budget, registered_behaviors, recent_events}`. With a selector, the shape narrows to that selector's payload (one event, one behaviors list, one packs list, one memo list, or one search-results list).
+
+`inspect` reconstructs a new, dormant Runtime from the store. Its state
+is therefore log-derived (`stopped`, `idle`, or `exhausted`), even when
+pending work makes `queue_depth` nonzero. The process-local `running`
+state is observable only by calling `status()` on the same live Runtime
+instance during an active drain; this command is not a cross-process
+liveness probe.
 
 Exits: 0 on success, 3 if the store / run / event id doesn't exist, 2 on bad selector combination.
 
@@ -259,6 +271,26 @@ transaction; a failure mid-run rolls back that run's destination
 state. Writes use `INSERT ... ON CONFLICT DO NOTHING` on
 `(id, run_id)` so re-running after a failure is safe.
 
+Before migration begins, the CLI checks the source schema and then
+the destination schema by listing their runs. An incompatible source
+therefore exits 4 before the destination is opened or created. If the
+source is compatible and the destination is fresh, the destination
+check eagerly creates only the current schema and metadata; it does
+not create run or event rows. An incompatible destination also exits
+4 before any per-run migration report or write.
+
+This is a compatibility preflight, not a cross-version schema reader.
+The installed build must be able to read both stores. Migrating a
+store whose schema differs from this build requires a compatible
+source-side build or a version-specific migration path; that broader
+design is tracked separately.
+
+SQLite and Postgres are built in. Migration-only backends registered through
+the `activegraph.migration_backends` entry-point group use the same command;
+the CLI preflights source `read` and destination `write` capabilities before
+opening either URL. This extension does not make the backend available to
+ordinary `open_store()` runtime operations.
+
 `--skip-corrupted` is the recovery primitive for runs containing
 [`CorruptedEventPayloadError`](errors/corrupted-event-payload-error.md).
 Without the flag, a corrupted event in any run causes that run
@@ -268,7 +300,9 @@ report and the rest of the run migrates.
 
 **JSON shape**: `{source_url, dest_url, runs: [{run_id, status, events_migrated, error?, skipped_events?}]}`. `status` is `"ok"` or `"failed"`.
 
-Exits: 0 if every run's status is `"ok"`; 1 if any run failed; 2 on a bad source/destination URL.
+Exits: 0 if every run's status is `"ok"`; 1 if any run failed; 2 on a
+bad source/destination URL; 4 if either schema preflight reports
+`SchemaVersionMismatch`.
 
 ---
 

@@ -7,17 +7,23 @@ validation reverts to untyped, state stays, memory is not reclaimed
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 from pydantic import BaseModel
 
-from activegraph import Graph, Runtime, clear_registry
+from activegraph import Event, Graph, Runtime, clear_registry
 from activegraph import ToolNotFoundError
 from activegraph.packs import (
     ObjectType,
     Pack,
     PackNotFoundError,
     behavior as pack_behavior,
+    relation_behavior as pack_relation_behavior,
+    llm_behavior as pack_llm_behavior,
+    tool as pack_tool,
 )
+from activegraph.llm import LLMResponse
 
 
 class _NoteSchema(BaseModel):
@@ -131,6 +137,62 @@ def test_reload_reenables():
     assert rt.disable_pack("candidate") is True
 
 
+def test_disable_reload_rebuilds_pack_tool_binding_with_fresh_identity():
+    @pack_tool(name="lookup")
+    def lookup(args, ctx):
+        return {"ok": True}
+
+    @pack_llm_behavior(name="worker", on=["goal.created"], tools=[lookup])
+    def worker(event, graph, ctx, out):
+        pass
+
+    pack = Pack(
+        name="bindings",
+        version="1.0",
+        behaviors=(worker,),
+        tools=(lookup,),
+    )
+
+    class Provider:
+        def __init__(self):
+            self.names = []
+
+        def complete(self, **kwargs):
+            self.names.append([t["name"] for t in kwargs.get("tools") or []])
+            return LLMResponse(
+                raw_text="done",
+                parsed=None,
+                input_tokens=1,
+                output_tokens=1,
+                cost_usd=Decimal("0"),
+                latency_seconds=0,
+                model=kwargs["model"],
+                finish_reason="end_turn",
+            )
+
+        def estimate_cost(self, **kwargs):
+            return Decimal("0")
+
+        def count_tokens(self, **kwargs):
+            return 1
+
+    provider = Provider()
+    rt = Runtime(Graph(), llm_provider=provider)
+    rt.load_pack(pack)
+    rt.run_goal("first")
+    first_tool = rt.get_tool("bindings.lookup")
+    assert rt.get_behavior("bindings.worker").tools[0] is first_tool
+
+    assert rt.disable_pack("bindings") is True
+    assert rt.load_pack(pack) is True
+    rt.run_goal("second")
+    second_tool = rt.get_tool("bindings.lookup")
+
+    assert second_tool is not first_tool
+    assert rt.get_behavior("bindings.worker").tools[0] is second_tool
+    assert provider.names == [["bindings.lookup"], ["bindings.lookup"]]
+
+
 def test_disable_resolves_short_name_ambiguity():
     # Two packs export a behavior with the same short name; disabling
     # one must RESOLVE the ambiguity, not leave a stale sentinel.
@@ -153,3 +215,98 @@ def test_disable_resolves_short_name_ambiguity():
 
     rt.disable_pack("alpha")
     assert rt.get_behavior("worker").name == "beta.worker"
+
+
+def _emit(graph: Graph, event_type: str, payload: dict) -> Event:
+    event = Event(
+        id=graph.ids.event(),
+        type=event_type,
+        payload=payload,
+        actor="test",
+        timestamp=graph.clock.now(),
+    )
+    graph.emit(event)
+    return event
+
+
+def test_disable_cancels_exact_pack_scheduled_relation_and_reload_is_fresh():
+    class _Settings(BaseModel):
+        marker: str
+
+    effects: list[tuple[str, str]] = []
+
+    @pack_relation_behavior(
+        "links",
+        name="delayed",
+        on=["pack.trigger"],
+        activate_after=3,
+    )
+    def delayed(relation, event, graph, ctx, *, settings: _Settings):
+        effects.append((settings.marker, event.id))
+
+    pack = Pack(
+        name="scheduled_pack",
+        version="1.0",
+        behaviors=(delayed,),
+        settings_schema=_Settings,
+    )
+    graph = Graph()
+    left = graph.add_object("node", {})
+    right = graph.add_object("node", {})
+    graph.add_relation(left.id, right.id, "links")
+    runtime = Runtime(graph)
+    runtime.load_pack(pack, settings=_Settings(marker="typed"))
+
+    old_trigger = _emit(graph, "pack.trigger", {"node_id": left.id})
+    scheduled = runtime.run_quantum(max_queue_events=2, max_seconds=1.0)
+    assert scheduled.delayed_depth == 1
+
+    assert runtime.disable_pack("scheduled_pack") is True
+    after_disable = runtime.run_quantum(max_queue_events=1, max_seconds=1.0)
+    assert after_disable.delayed_depth == 0
+    assert effects == []
+
+    assert runtime.load_pack(pack, settings=_Settings(marker="fresh")) is True
+    new_trigger = _emit(graph, "pack.trigger", {"node_id": left.id})
+    for index in range(3):
+        _emit(graph, "pack.advance", {"index": index})
+    runtime.run_until_idle()
+
+    assert effects == [("fresh", new_trigger.id)]
+    assert all(event_id != old_trigger.id for _, event_id in effects)
+
+
+def test_disable_earlier_pack_preserves_later_scheduled_identity():
+    effects: list[str] = []
+
+    def make_pack(name: str) -> Pack:
+        @pack_relation_behavior(
+            "links",
+            name="delayed",
+            on=["packs.trigger"],
+            activate_after=2,
+        )
+        def delayed(relation, event, graph, ctx):
+            effects.append(name)
+
+        return Pack(name=name, version="1.0", behaviors=(delayed,))
+
+    graph = Graph()
+    left = graph.add_object("node", {})
+    right = graph.add_object("node", {})
+    graph.add_relation(left.id, right.id, "links")
+    runtime = Runtime(graph)
+    runtime.load_pack(make_pack("earlier"))
+    runtime.load_pack(make_pack("later"))
+
+    _emit(graph, "packs.trigger", {"node_id": left.id})
+    scheduled = runtime.run_quantum(max_queue_events=3, max_seconds=1.0)
+    assert scheduled.delayed_depth == 2
+
+    assert runtime.disable_pack("earlier") is True
+    after_disable = runtime.run_quantum(max_queue_events=1, max_seconds=1.0)
+    assert after_disable.delayed_depth == 1
+    _emit(graph, "packs.advance", {})
+    runtime.run_until_idle()
+
+    assert effects == ["later"]

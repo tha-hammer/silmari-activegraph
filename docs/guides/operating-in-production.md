@@ -152,6 +152,13 @@ activegraph migrate --from sqlite:///path/to/dev.db \
 
 Migration semantics:
 
+- The CLI preflights the source schema first, then the destination.
+  Either mismatch prints `SchemaVersionMismatch` once and exits 4
+  before a migration report or run write. A source mismatch does not
+  touch a fresh destination.
+- With a compatible source, preflighting a fresh destination eagerly
+  creates only its current schema and metadata. This validates
+  compatibility; it is not a cross-version schema reader.
 - Each run in the source migrates in **a single transaction** against
   the destination. If a run fails partway, that run's destination
   state is unchanged (Postgres rolls back).
@@ -166,6 +173,13 @@ Migration semantics:
   error?}`. The CLI exit code is non-zero iff any run failed.
 - Migration is **not bidirectional**. There is no `sync` mode and no
   rollback. To go back, migrate the other direction.
+
+The canonical library API is `activegraph.store.migration`. SQLite and
+Postgres providers ship with the framework. A third-party backend can join the
+same CLI path through `activegraph.migration_backends` entry points or
+`register_migration_backend()` without changing the central migrator. Source
+`read` and destination `write` capability/URL validation completes before
+either session opens; every opened session is closed destination-first.
 
 When migration is the right tool: you are graduating a run from a
 laptop SQLite file to a shared Postgres database, or moving a
@@ -216,6 +230,8 @@ Fields that don't apply are **omitted**, not nulled:
 | `reason`          | string  | failure log lines (see reason taxonomy)         |
 | `error_type`      | string  | failure log lines                               |
 | `error_message`   | string  | failure log lines                               |
+| `doc_url`         | string  | failure documentation URL                      |
+| `payload`         | object  | explicit caller-supplied JSON payload only     |
 
 The schema is **the operator contract**. Dashboards built against
 these field names will keep working across framework versions.
@@ -242,21 +258,50 @@ of the logging configuration.
 
 ### Payload redaction
 
-LLM behaviors include rendered prompts in DEBUG logs. Tool responses
-include their full payloads. Goals can contain anything the user
-typed. If your environment requires redaction (PII, secrets, customer
-data):
+Built-in ActiveGraph log calls do **not** attach graph events, rendered
+prompts, LLM responses, tool arguments or responses, or goals as log
+`payload`s. When your own integration explicitly adds a payload, the
+JSON handler installed by `configure_logging` can redact it at the final
+formatter boundary:
 
 ```python
+from activegraph.observability import (
+    configure_logging,
+    get_logger,
+    runtime_log_extra,
+)
+
 def redact(payload: dict) -> dict:
     return {k: ("<redacted>" if k == "email" else v) for k, v in payload.items()}
 
 configure_logging(level="INFO", json_output=True, payload_redactor=redact)
+
+log = get_logger("integration")
+data = {"email": "operator@example.com", "result": "ok"}
+log.info("integration result", extra=runtime_log_extra(payload=data))
+# Direct stdlib extras cross the same boundary:
+log.info("integration result", extra={"payload": data})
 ```
 
-The redactor runs on every payload that would otherwise appear in a
-log message. It does not affect the event log itself — the source of
-truth keeps the original. Redaction is a logging concern.
+An explicit payload may be any `Mapping`. The formatter materializes and
+deep-copies it into a detached `dict` before invoking the process-global
+callback exactly once. The callback must return a concrete `dict`; its result
+is validated with the same compact `json.dumps(..., separators=(",", ":"),
+ensure_ascii=False)` settings used for the final line. With no callback, the
+detached mapping is emitted unchanged. Passing `payload_redactor=None` on a
+later `configure_logging` call clears the callback.
+
+Mapping/copy failures, callback exceptions, non-dict callback results, and
+non-JSON results fail closed: the log line is still emitted, but its `payload`
+field is omitted. The original caller-owned mapping is never mutated by the
+formatter or callback.
+
+This promise applies only to the ActiveGraph JSON handler installed by
+`configure_logging(json_output=True)`. Arbitrary operator-installed handlers
+are outside it. The human formatter (`json_output=False`) never interpolates a
+payload or runs the callback. Event persistence and `EventSink` exports are
+separate surfaces and require their own data-handling policy; logging redaction
+does not change the graph event log, durable store, or sink envelope.
 
 ---
 
@@ -278,7 +323,7 @@ from activegraph import (
 )
 
 graph = Graph()
-rt = Runtime(
+with Runtime(
     graph,
     sinks=[
         SinkConfig(
@@ -288,12 +333,10 @@ rt = Runtime(
             overflow_policy=OverflowPolicy.DROP_NEWEST,
         )
     ],
-)
-
-rt.run_goal("build the report")
-assert rt.flush_sinks(timeout=5.0)
-print(rt.sink_statuses())
-rt.close_sinks(timeout=5.0)
+) as rt:
+    rt.run_goal("build the report")
+    assert rt.flush_sinks(timeout=5.0)
+    print(rt.sink_statuses())
 ```
 
 The defaults are capacity 1024 and `drop_newest`. The other declared
@@ -302,6 +345,19 @@ Every overflow is counted in `SinkStatus` and the standard sink metrics.
 `RecordingSink` is the thread-safe in-memory double for application tests.
 Status snapshots include active sinks, timed-out closes that can be retried,
 and terminal close failures retained until their name is reused or removed.
+Flush is non-detaching: it does not finalize attachment ownership or release a
+name. If a timed-out close later reaches CLOSED or FAILED, only close/remove
+reaps closing ownership. A terminal failure remains queryable until explicit
+removal or name reuse. A failed close retry can therefore return `False` while
+still releasing closing ownership and retaining the failure snapshot.
+
+`Runtime.close(timeout=5.0)` is the deterministic ownership boundary for every
+sink attached to its Graph and is called automatically by the Runtime context
+manager. It delegates to `close_sinks`: an ordinary timeout or partial adapter
+failure returns `False`, remains inspectable through `sink_statuses()`, and may
+be explicitly retried. Closing rejects later Runtime mutations with
+`RuntimeClosedError`; read-only inspection remains available. It does not close
+the event store or remove graph listeners.
 
 Normal `Runtime.load`, `fork`, and strict replay never redeliver history
 to live sinks. Passing `sinks=` to those APIs attaches them only after the
@@ -396,6 +452,28 @@ keep working across framework versions.
 
 **Adding a metric is a public API change.** The list is documented and
 test-pinned. New metrics get added in named releases, not silently.
+The executable `MetricProductionCase` matrix drives public Runtime, Graph,
+replay, and attached-sink paths and proves that all 24 names are observed with
+exactly the kind and tag keys declared above.
+
+LLM and tool call counters follow their `*.requested` events, including every
+retry and cache hit; a cache-hit counter requires the literal boolean `True`.
+Request-side LLM labels use the request model, while token, cost, and failure
+observations use the response model. Missing/non-string labels become
+`unknown_model` or `unknown_tool`. A response is a failure only when `error` is
+a mapping, success when it is absent or `None`, and malformed otherwise; a
+malformed response omits only its family-specific observations. Successful
+token counts must be nonnegative integers. Successful cost accepts a finite,
+nonnegative decimal value, with a logical cache hit recorded as zero. Tool
+duration likewise records zero for cache hits and explicit early errors.
+Invalid tool input is already post-request, so it produces a call, failure, and
+zero duration; gates reached before a request remain behavior-only failures.
+
+Metric reasons are deliberately lower-cardinality than event and log
+diagnostics. Documented LLM/tool/budget/replay codes pass through, while open
+values use bounded fallbacks such as `unknown_reason`, `llm.other`,
+`tool.other`, `budget.other`, `exception.other`, or `other`. The original event
+payload and log reason are never rewritten for metrics.
 
 ### Cardinality rule (locked)
 
@@ -414,6 +492,21 @@ own retention policy expires it. Plan collector retention accordingly; use
 The conformance suite enforces this rule against the standard metric
 list. If you implement a custom `Metrics` backend, do the same.
 
+`activegraph_queue_depth` is untagged and represents the most recently
+publishing Runtime's local main queue: **last writer wins; it is never a sum**.
+Each successful activation, live push, successful pop, and recovery batch
+publishes local state, including the final zero after drain. Use an independent
+backend instance/registry per Runtime when independent depths matter.
+
+Budget gauges exist only for finite `max_events` and `max_cost_usd` dimensions.
+They publish after successful construction/load and after Runtime-owned budget
+mutations. Direct calls to the public `Runtime.budget.consume()` or
+`add_cost()`, or replacing `Runtime.budget`, have no immediate metric-freshness
+guarantee. Failed construction or strict load creates no initial queue/budget
+gauge ghosts; a recovered successful load publishes its nonzero queue before a
+later drain publishes zero. The three-method protocol cannot delete gauge
+series, so zero and older run-id series remain subject to backend retention.
+
 ### Tag conventions
 
 Standard tag keys are: `event_type`, `behavior`, `tool`, `model`,
@@ -422,16 +515,24 @@ modeled as a separate counter rather than a tag — see
 `activegraph_llm_cache_hits_total`). If your backend distinguishes
 booleans from strings, you won't have to special-case.
 
-Custom tags beyond the standard set are fine but may explode
-cardinality. The cardinality rule above is your guide.
+Custom tags on your own non-standard metrics are fine but may explode
+cardinality. Standard observations always use exactly the table's tag keys.
+The cardinality rule above is your guide.
 
 ---
 
 ## Runtime introspection
 
-`runtime.status(recent: int = 20)` returns a `RuntimeStatus` — a
-frozen dataclass. Calling it is cheap: no graph traversal, no event
-log scan. It is safe to call from any thread.
+`runtime.status(recent: int = 20)` returns a `RuntimeStatus` — a frozen
+dataclass. The operation is side-effect-free and in-memory. With N materialized
+history events and B registered behaviors, current work is
+`O(N + B + min(N, recent))`; `recent` bounds returned summaries, not history
+construction. It performs no store I/O or object/relation traversal, and
+outside an active drain it scans backward only to the latest terminal
+runtime event. It is safe to call from any thread. A same-process observer
+of the same Runtime instance sees `running` while any public drain is
+active — the small internal lock protects this liveness count only; it does
+not make concurrent Runtime mutation safe.
 
 ```python
 status = rt.status()
@@ -610,24 +711,35 @@ the whole run; the skipped event ids appear in the per-run report's
 `skipped_events`. The resulting destination run is partial — the
 operator is on notice.
 
+The command's source-first schema preflight is intentionally fail-closed.
+For a schema-incompatible source, use a build that can read that source
+and any required staged migration path; this command does not bypass the
+store's version guard.
+
 ---
 
 ## Runbook
 
 ### A run is stuck
 
-Call `runtime.status()` (or `activegraph inspect`). Check `state`:
+Call `runtime.status()` on the live Runtime instance. Check `state`:
 
 - `idle` — the queue is empty, the budget is fine, the run is waiting
   for new input. This is the normal terminal state for a goal-driven
   run. Not stuck.
 - `exhausted` — the run hit a budget limit. The `budget` field shows
   which dimension. Raise the limit or accept the partial result.
-- `running` — the run is actually working. `queue_depth` should be
+- `running` — this same process and Runtime instance currently has a
+  public drain active. `queue_depth` should be
   decreasing. If it's increasing or steady, a behavior is producing
   events faster than the runtime processes them. Check the trace.
 - `stopped` — the runtime is loaded but no `run_until_idle()` call is
   in progress. Call it.
+
+`activegraph inspect` loads a separate Runtime from the persisted log.
+It reports dormant `stopped` / `idle` / `exhausted` state and cannot
+observe another process's non-persisted `running` overlay. Use process
+supervision and metrics for cross-process liveness.
 
 ### A run is over budget
 

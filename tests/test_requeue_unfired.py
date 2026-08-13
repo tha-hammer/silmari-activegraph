@@ -13,9 +13,9 @@ got falsely requeued on `Runtime.load`.
 
 The bug surface is `runtime.status().queue_depth` reading nonzero
 on a freshly loaded cleanly-drained run. The fix: use the last
-`runtime.idle` (or `runtime.budget_exhausted`) lifecycle event as
-the high-water mark; only events emitted after the last drain are
-candidates for requeue.
+`runtime.idle` as the high-water mark; only live-scheduling-eligible
+events emitted after that drain are candidates for requeue.
+`runtime.budget_exhausted` is deliberately not a drain marker.
 
 These tests would have failed under the old `_requeue_unfired` and
 lock the regression vector.
@@ -268,3 +268,106 @@ class TestRequeueUnfiredPreservesCrashRecovery:
         events = [drain, post_drain]
         _requeue_unfired(rt, events)
         assert len(rt._queue) == 1
+
+    def test_post_drain_requeue_matches_live_scheduling_policy(
+        self, tmp_path
+    ):
+        from activegraph.core.event import Event
+
+        clear_registry()
+        path = str(tmp_path / "policy.db")
+        runtime = Runtime(Graph(), behaviors=[], persist_to=path)
+        runtime.run_goal("baseline")
+        event_types = [
+            "behavior.started",
+            "relation_behavior.completed",
+            "runtime.budget_exhausted",
+            "llm.requested",
+            "tool.responded",
+            "pattern.matched",
+            "approval.proposed",
+            "embedding.requested",
+            "dev.override",
+            "authority.decision",
+            "context.read",
+            "context.foo",
+            "pack.loaded",
+            "goal.created",
+            "object.created",
+            "custom.event",
+            "runtimeish.event",
+        ]
+        visible_types = [
+            "context.foo",
+            "pack.loaded",
+            "goal.created",
+            "object.created",
+            "custom.event",
+            "runtimeish.event",
+        ]
+        store = runtime.graph.store
+        assert store is not None
+        for index, event_type in enumerate(event_types):
+            payload = {}
+            if event_type == "object.created":
+                payload = {
+                    "object": {
+                        "id": "probe#1",
+                        "type": "probe",
+                        "data": {},
+                        "version": 1,
+                        "provenance": {},
+                    }
+                }
+            store.append(
+                Event(id=f"evt_policy_{index}", type=event_type, payload=payload)
+            )
+
+        fired: list[str] = []
+
+        @behavior(name="resume-subscriber", on=visible_types)
+        def resume_subscriber(event, graph, ctx):
+            fired.append(event.type)
+
+        loaded = Runtime.load(path, behaviors=[resume_subscriber])
+        assert list(event.type for event in loaded._queue._q) == visible_types
+
+        loaded.run_until_idle()
+
+        assert fired == visible_types
+        assert len(loaded._queue) == 0
+
+    def test_budget_fired_on_and_promote_resume_invariants(self, tmp_path):
+        from activegraph.core.event import Event
+
+        clear_registry()
+        path = str(tmp_path / "resume-invariants.db")
+        runtime = Runtime(Graph(), behaviors=[], persist_to=path)
+        runtime.run_goal("baseline")
+        store = runtime.graph.store
+        assert store is not None
+        suffix = [
+            Event(id="evt_before", type="custom.before_budget"),
+            Event(id="evt_budget", type="runtime.budget_exhausted"),
+            Event(id="evt_after", type="custom.after_budget"),
+            Event(id="evt_fired", type="custom.already_fired"),
+            Event(
+                id="evt_started",
+                type="behavior.started",
+                payload={"event_id": "evt_fired"},
+            ),
+            Event(
+                id="evt_promoted",
+                type="custom.promoted",
+                actor="promote:test",
+            ),
+        ]
+        for event in suffix:
+            store.append(event)
+
+        loaded = Runtime.load(path, behaviors=[])
+
+        assert [event.type for event in loaded._queue._q] == [
+            "custom.before_budget",
+            "custom.after_budget",
+        ]

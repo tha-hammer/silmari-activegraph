@@ -28,6 +28,7 @@ from activegraph import (
     llm_behavior,
     tool,
 )
+from activegraph.llm.cache import LLMCache
 from activegraph.llm import LLMMessage, LLMResponse, ToolCall
 
 
@@ -65,6 +66,7 @@ class _ScriptedProvider:
     def __init__(self, responses: list[LLMResponse]):
         self._responses = list(responses)
         self.call_count = 0
+        self.calls: list[dict[str, Any]] = []
 
     def complete(
         self,
@@ -80,6 +82,12 @@ class _ScriptedProvider:
         tools=None,
     ) -> LLMResponse:
         self.call_count += 1
+        self.calls.append(
+            {
+                "messages": list(messages),
+                "tools": list(tools or []),
+            }
+        )
         return self._responses.pop(0)
 
     def estimate_cost(self, *, input_tokens, output_tokens, model) -> Decimal:
@@ -263,6 +271,91 @@ def test_unknown_tool_call_triggers_behavior_failed():
     Runtime(g, llm_provider=provider).run_goal("g")
     failures = [e for e in g.events if e.type == "behavior.failed"]
     assert any(f.payload.get("reason") == "tool.unknown_tool" for f in failures)
+
+
+def test_returned_unique_short_tool_name_is_canonical_before_persistence():
+    calls: list[str] = []
+    dotted = Tool(
+        name="demo.my_tool",
+        fn=lambda args, ctx: calls.append(args.q) or _ToolOut(answer=args.q),
+        input_schema=_ToolIn,
+        output_schema=_ToolOut,
+        deterministic=True,
+    )
+    received = _register_behaviors(tools=[dotted, dotted])
+    original_call = ToolCall(id="c1", name="my_tool", args={"q": "x"})
+    original_response = _make_response(model="m", tool_calls=[original_call])
+    provider = _ScriptedProvider([
+        original_response,
+        _make_response(model="m", parsed=_Out(text="done"), tool_calls=None),
+    ])
+    cache = LLMCache()
+    graph = Graph()
+    rt = Runtime(
+        graph,
+        llm_provider=provider,
+        tools=[dotted],
+        llm_cache=cache,
+    )
+    rt.run_goal("g")
+
+    assert calls == ["x"]
+    assert received and received[0].text == "done"
+    assert original_call.name == "my_tool"
+    assert original_response.tool_calls == [original_call]
+    responded = [e for e in graph.events if e.type == "llm.responded"]
+    assert responded[0].payload["tool_calls"][0]["name"] == "demo.my_tool"
+    assert provider.calls[1]["messages"][-2].tool_calls[0].name == "demo.my_tool"
+    assert provider.calls[1]["messages"][-1].tool_name == "demo.my_tool"
+    first_hash = next(e for e in graph.events if e.type == "llm.requested").payload[
+        "prompt_hash"
+    ]
+    cached = cache.get(first_hash)
+    assert cached is not None
+    assert cached.tool_calls[0].name == "demo.my_tool"
+
+
+@pytest.mark.parametrize(
+    ("declared_names", "returned_name"),
+    [
+        (("demo.allowed",), "not_declared"),
+        (("a.same", "b.same"), "same"),
+    ],
+)
+def test_invalid_returned_tool_name_fails_before_success_cache_or_event(
+    declared_names, returned_name
+):
+    declared = [
+        Tool(name=name, fn=lambda args, ctx: {}, deterministic=True)
+        for name in declared_names
+    ]
+    _register_behaviors(tools=declared)
+    provider = _ScriptedProvider([
+        _make_response(
+            model="m",
+            tool_calls=[ToolCall(id="c1", name=returned_name, args={})],
+        )
+    ])
+    cache = LLMCache()
+    graph = Graph()
+    rt = Runtime(
+        graph,
+        llm_provider=provider,
+        tools=declared,
+        llm_cache=cache,
+    )
+    rt.run_goal("g")
+
+    failures = [e for e in graph.events if e.type == "behavior.failed"]
+    assert failures[-1].payload["reason"] == "tool.unknown_tool"
+    assert failures[-1].payload["exception_type"] == "UnknownToolError"
+    assert rt.budget.cost_used == Decimal("0.001")
+    assert len(cache) == 0
+    assert not [
+        e
+        for e in graph.events
+        if e.type == "llm.responded" and "error" not in e.payload
+    ]
 
 
 # ---------- tool input validation fails loud -------------------------------

@@ -62,6 +62,12 @@ pattern; the framework refuses to fuzz the read/write surfaces
 because mutations through a scoped accessor would silently miss
 relevant state outside the scope.
 
+`View.objects(type=..., where=...)` uses exactly the same filter semantics as
+`Graph.objects(...)`. Ordinary data fields have bare-name shorthand, while
+bare `id`, `type`, `version`, `data`, and `provenance` are canonical framework
+metadata. Use `data.<field>` for colliding domain fields; for example,
+`where={"data.id": "customer-provided-id"}`.
+
 ## How views compose with patterns
 
 Pattern subscriptions and view scoping serve different jobs:

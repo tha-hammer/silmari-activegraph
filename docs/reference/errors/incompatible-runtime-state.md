@@ -25,8 +25,9 @@ activegraph migrate --from <current-url> --to sqlite:///fork-source.db
 activegraph fork sqlite:///fork-source.db --run-id <run> --at-event <evt>
 ```
 
-`fork` uses SQLite-specific transactional copy primitives (CONTRACT
-v0.8 #5). Postgres-native forking is a known v1.1 follow-on — file
+`Runtime.fork()` uses SQLite-specific transactional copy primitives
+(CONTRACT v0.5 #9 and the 2026-08-12 Set 4 amendment #2). Postgres-native
+Runtime forking is a known follow-on — file
 an issue if you need it for a production workflow.
 
 ### attach_store when one is already attached

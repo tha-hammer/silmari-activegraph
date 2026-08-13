@@ -1653,13 +1653,16 @@ does not ship adapters.
 `status(recent: int = 20)` — single parameter controls the tail
 length. The CLI's `inspect --tail N` passes through.
 
-State is derived **from the event log**, not from in-memory
-bookkeeping. This means a freshly-loaded runtime and the runtime that
-saved the log agree on state. Walk back through events: if the most
-recent terminal lifecycle event is `runtime.budget_exhausted` →
-`exhausted`; if it's `runtime.idle` → `idle`; otherwise `stopped`.
-`running` is reserved for cross-thread observation of an in-progress
-loop (single-threaded today; documented for future async use).
+While no public drain is active, state is derived **from the event
+log**: walk back through events; if the most recent terminal lifecycle
+event is `runtime.budget_exhausted` → `exhausted`; if it is
+`runtime.idle` → `idle`; otherwise `stopped`. A lock-protected,
+process-local reference count around `run_goal`, `run_until_idle`,
+`run_until`, and `run_quantum` temporarily overlays that dormant state
+with `running`. The count, including nested drains, is always cleared
+in `finally`; it is neither an event nor persisted state. Same-instance
+cross-thread observers can see the overlay, but the lock protects only
+the count, not concurrent Runtime mutation.
 
 There is **no `last_error` field**. Errors are events; filter
 `recent_events` for type `behavior.failed`, or query the event store
@@ -2182,9 +2185,9 @@ Concretely, `activegraph.packs.diligence` provides:
 **Object types** (8): `company`, `document`, `question`, `claim`,
 `evidence`, `contradiction`, `risk`, `memo`.
 
-**Relation types** (6): `supports`, `contradicts`, `references`,
-`derived_from`, `addresses` (claim → question), `mitigates`
-(evidence → risk).
+**Relation types** (7): `supports`, `contradicts`, `has_contradiction`
+(claim → contradiction), `references`, `derived_from`, `addresses`
+(claim → question), `mitigates` (evidence → risk).
 
 **Behaviors** (7):
   - `company_planner` (deterministic — bootstraps a `company` object
@@ -2197,8 +2200,8 @@ Concretely, `activegraph.packs.diligence` provides:
   - `evidence_linker` (deterministic — safety net for evidence
     objects that lack a `supports` edge to their claim)
   - `contradiction_detector` (pattern subscription, deterministic)
-  - `risk_identifier` (LLM, `activate_after=8` so it fires once
-    claims have accumulated)
+  - `risk_identifier` (LLM, idempotent graph-state gate so only the first
+    risk batch per company materializes)
   - `memo_synthesizer` (LLM)
 
 **Tools** (3, all pack-scoped):
@@ -2243,6 +2246,12 @@ The contradiction **detector** (pattern subscription on
 `(c1:claim)-[r:contradicts]->(c2:claim)`) is in scope and creates
 `contradiction` objects. The contradiction **resolver** (an LLM
 behavior that picks a winning claim) is **deferred to v1.0**.
+
+Every created contradiction object receives exactly two
+`claim --has_contradiction--> contradiction` relations, using the object's
+stored real claim ids. `Graph.neighborhood(claim_id, depth=1)` is therefore the
+canonical traversal from either claim to its open review item. The relation is
+an index/discovery edge only; it does not resolve or rank either claim.
 
 Why: the resolver adds a second LLM loop with its own prompt, its
 own determinism story, and its own evaluation problem ("did it
@@ -2302,12 +2311,13 @@ the same layout for reproducible demos.
 
 ## v0.9 #20. runtime.status() is log-derived (re-affirm)
 
-Already true for v0.8 but worth pinning here: `runtime.status()` is
+Already true for v0.8 outside active drains: dormant terminal state is
 computed from the event log, not from in-memory caches. After
-`load_pack`, status reflects the `pack.loaded` event. Live runtime
-and `activegraph inspect` see identical state because both read from
-the same source of truth. This is the property that lets operators
-trust the dashboard.
+`load_pack`, status reflects the `pack.loaded` event. A live Runtime and
+`activegraph inspect` therefore agree when the live instance has no
+active drain. During a drain, only the same process and instance can see
+the non-persisted `running` overlay; `inspect` loads a separate dormant
+Runtime and is not a cross-process liveness probe.
 
 The operator guide gets a short section on this property.
 
@@ -2355,8 +2365,8 @@ shared reference for the pack format itself.
 The trace printer gains rendering for `pack.loaded` events:
 
 ```
-[pack.loaded]    diligence v0.1.0 (8 object_types, 6 relation_types,
-                 7 behaviors, 3 tools, 2 policies, 5 prompts)
+[pack.loaded]    diligence v0.1.0 (8 object_types, 7 relation_types,
+                 7 behaviors, 3 tools, 2 policies, 4 prompts)
 ```
 
 Trace causal chains follow `pack.loaded` provenance back to the
@@ -2767,7 +2777,7 @@ step.
 
 ## v1.0 #3. The error message format is locked
 
-Every framework error follows this exact shape:
+Structured framework errors follow this exact shape:
 
 ```
 <ErrorClass>: <one-line summary>
@@ -2784,6 +2794,15 @@ How to fix:
 More:
   https://docs.activegraph.ai/errors/<error-class-slug>
 ```
+
+**Narrow compatibility waiver:** `SandboxStartupError` is rooted in
+`ConfigurationError` and has its own documentation slug, but retains its
+published one-positional-message rendering in this ancestry-only cycle.
+Therefore `str(exc)` remains the exact legacy startup text,
+`exc.args == (str(exc),)`, the structured fields/context are empty, and the
+message has no `More:` block. That rendering is deprecated for a separately
+reviewed next-major conversion with new snapshots, tracked by AF-wse. This is
+not precedent for new unstructured errors.
 
 Snapshot-tested per-error-class. Doc URL must resolve to a real
 page; broken links fail CI. Until DNS for `docs.activegraph.ai` is
@@ -2837,6 +2856,7 @@ or implementation-detail voice, send the PR back.
 ```
 ActiveGraphError
 ├── ConfigurationError      # runtime construction problems
+│   └── SandboxStartupError # sandbox preflight setup; also RuntimeError
 ├── RegistrationError       # behavior/tool/pack registration
 │   ├── PackConflictError
 │   ├── MissingProviderError
@@ -2892,7 +2912,9 @@ transition:
   fields. `__str__` produces the locked format.
 - **Legacy**: pass a single positional message. `__str__` returns that
   message verbatim. Format-noncompliant but valid Python, so existing
-  raises in unmigrated leaves keep working through PR-B → PR-F.
+  raises keep working. `SandboxStartupError` deliberately retains this
+  compatibility branch while its ancestry is repaired; AF-wse tracks
+  the next-major structured-rendering migration.
 
 `ActiveGraphError.is_structured()` returns True for the first mode, False
 for the second. Snapshot tests in `tests/test_errors_format.py` only run
@@ -7529,6 +7551,16 @@ cause if not, so consumers fail loud at boot. Pinned by
 `test_explicit_code_channel_rescues_a_restricted_child`, and
 `test_env_allow_list_stays_closed_secrets_do_not_leak`.
 
+`SandboxStartupError` is a setup/configuration leaf with bases
+`(ConfigurationError, RuntimeError)`: framework-wide catches now include it,
+while existing built-in `RuntimeError` handlers select the same branch. It is
+exported only by `activegraph.sandbox`, uses the stable
+`sandbox-startup-error` documentation slug, and the raise site still passes
+the exact single positional message above. The narrow legacy-rendering waiver
+is recorded under v1.0 #3 and is tracked for next-major conversion by AF-wse;
+actual trial timeout/import/materialization failures remain `TrialReport`
+outcomes rather than acquiring implicit preflight behavior.
+
 Post-release addendum (v1.7.1, a macOS soak surfaced a third defect —
 exposed BECAUSE 1c's import fix let the child reach limit
 application): **1d. The memory budget's enforcement is per-platform
@@ -7773,16 +7805,26 @@ Every attachment selects one closed-set ``OverflowPolicy``:
   if the worker is able to continue.
 
 No policy waits for capacity. Every overflow increments the attachment's
-``dropped`` count with its reason. An ``on_event`` exception increments
-``errors`` and not ``delivered``; the worker continues so one bad record
-does not discard the bounded suffix silently. An ``open`` failure marks
-the attachment failed. ``SinkStatus`` exposes name, lifecycle state,
-capacity, current depth, policy, enqueued, delivered, dropped,
-error counts, and the last error. ``SinkHandle.status()``,
+``dropped`` count with its reason. Every later delivery refused because
+the handle is already non-accepting increments ``dropped`` under the
+low-cardinality ``sink.not_accepting`` reason; this is a refusal, not a
+new overflow. An ``on_event`` exception increments ``errors`` and not
+``delivered``; the worker continues so one bad record does not discard
+the bounded suffix silently. An ``open`` failure marks the attachment
+failed. ``SinkStatus`` exposes name, lifecycle state, capacity, current
+depth, policy, enqueued, delivered, dropped, error counts, and the last
+error. ``SinkHandle.status()``,
 ``Graph.sink_statuses()`` / ``Runtime.sink_statuses()``, and bounded
 ``flush_sinks`` / ``close_sinks`` calls are the in-process observability
 and lifecycle surface. A timeout reports incomplete flush/close; it does
 not wait forever on a hanging adapter.
+
+Flush is non-detaching: it does not finalize attachment ownership or release a
+name. If a timed-out close later reaches CLOSED or FAILED, only close/remove
+reaps closing ownership. A terminal failure remains queryable until explicit
+removal or name reuse. A failed close retry may return ``False`` while still
+reaping the closing attachment, releasing its name, and retaining the failed
+snapshot for inspection.
 
 Four names are added to the locked standard metric table:
 
@@ -7795,7 +7837,9 @@ The v0.8 #C4 cardinality rule remains unchanged: ``run_id`` appears only
 on the active-state queue-depth gauge, never on a sink counter. Status is
 the source of exact per-attachment counts even when ``NoOpMetrics`` is
 configured. Metric backend exceptions are best-effort and cannot turn a
-sink observation into a runtime failure.
+sink observation into a runtime failure. Sink workers publish metric batches;
+exact status remains authoritative for a refusal recorded after a terminal
+worker has stopped, because the emit thread never calls a metrics backend.
 
 ## v1.8 #4. Normal replay is silent; historical export is a separate mode
 
@@ -8651,3 +8695,494 @@ The supported minimum OpenAI Python SDK is `1.55.3` with HTTPX 0.28.x. Literal
 HTTP compatibility tests at that exact floor prove preservation of
 `usage.cost`, choice/top-level error extensions, and `finish_reason="error"`;
 CI installs `[dev,openrouter]` and has a separate exact-minimum lane.
+
+## v1.11 #3. Object approval is explicit; policy attributes ownership
+
+This clause is an append-only correction to two inaccurate historical
+descriptions. It supersedes only v0.9 #15's statements that
+`memo_approval` means "memo writes require approval" and `risk_approval`
+means "risk objects require approval", plus v1.4 #3's statement that a
+disabled pack's "gating policies stop gating". The original clauses remain
+in place as history.
+
+1. `Graph.add_object` is always an immediate write. It emits
+   `object.created` and returns the materialized object regardless of loaded
+   `Policy` or `PackPolicy` declarations. No declaration intercepts or
+   rewrites this call.
+2. `Context.propose_object` is the only object-approval entry point. It
+   always creates a pending approval and emits `approval.proposed`; the
+   object is absent until `Runtime.approve` materializes it and emits
+   `object.created`. There is no runtime auto-grant setting.
+3. `PackPolicy.requires_approval` supplies owner attribution for explicit
+   proposals. The loader records matching canonical policy names; the first
+   matching loaded policy determines `PendingApproval.pack` and the `pack`
+   field of `approval.proposed`. No policy id or route is stored on the
+   approval. Per-behavior `Policy.requires_approval` is audit metadata and
+   likewise does not intercept writes.
+4. Disabling a pack removes its attribution from future explicit proposals.
+   Existing pending approvals and their durable events remain unchanged and
+   may still be approved or denied. This correction changes no approval or
+   object event schema.
+
+## v1.11 #4. Capability declarations are verified; wiring remains host-owned
+
+This append-only correction supersedes only v1.4 #1's statement that both
+`capabilities` and `consumes` are excluded from `verify_surface`. It also
+clarifies v1.9 #1: adding `action_class` to the verified capability surface
+did not make a declaration register a gateway or resolve credentials. The
+historical clauses remain in place as archaeology.
+
+1. `Pack.capabilities` is declaration data. Construction requires
+   `CapabilityDecl` entries, validates closed `risk_class` and optional
+   `action_class` values, and rejects duplicate `(provider, capability)`
+   pairs. It does not require non-empty provider, capability, or
+   `credential_ref` values.
+2. `verify_surface` checks capabilities in both directions by
+   `(provider, capability)` and requires exact `risk_class` and
+   `action_class` agreement for shared pairs. `credential_ref` is recorded
+   but not compared.
+3. For a discoverable manifest, normal `Runtime.load_pack` retains v1.6 #1's
+   warning tier: a capability mismatch emits one structured
+   `pack.manifest_invalid` warning and the pack remains loaded and
+   dispatchable. Fork-trial sandbox materialization uses the same comparison
+   strictly before runtime loading, so the mismatch fails materialization.
+4. Manifest `consumes` parses and normalizes to a tuple but is excluded from
+   `verify_surface` on both connectors. A consumes-only difference neither
+   warns during normal load nor fails sandbox materialization.
+5. `pack.loaded` records capability declarations for audit. ActiveGraph does
+   not create a gateway registry, register an implementation, resolve a
+   credential, or use `consumes` for runtime authority. Host code owns those
+   operations and the gateway-side declaration check.
+
+## v1.11 #5. Delayed relation behavior fire-time contract
+
+This append-only amendment corrects and completes v0.7 #13. Event-count
+timing remains unchanged and wall-clock scheduling remains out of scope.
+
+1. A `RelationBehavior` with `activate_after=N` is scheduled once per matching
+   behavior/event, then executes at its due event-count tick. Fire-time matching
+   uses the exact still-registered behavior object and its unchanged name; a
+   rebuilt registry or newly reloaded same-name wrapper cannot inherit old work.
+2. "Current graph state" means current relation candidates and current pattern
+   bindings. `where=` is re-evaluated against the original triggering event
+   payload, because the query language has no graph root for `where`. No
+   trigger-time relation IDs or relation enumeration order are persisted.
+3. A successful fire-time pattern evaluation emits exactly one
+   `pattern.matched` marker for the scheduled behavior/event before the first
+   relation lifecycle start. Every relation invocation receives the identical
+   complete `ctx.matches` binding list.
+4. Disabling a pack cancels pending entries owned by its exact behavior
+   wrappers before the registry is rebuilt. Reloading may create new work, but
+   it never resurrects a disabled wrapper's entry; other behaviors retain FIFO.
+5. If budget capacity ends before a due entry starts, the entire unprocessed
+   due suffix is restored at the front in FIFO order. Once a relation entry
+   starts fan-out, its local remaining relations are non-resumable, exactly like
+   immediate fan-out: no cursor is stored, completed relations never repeat,
+   and a contained handler failure does not prevent siblings while capacity
+   remains.
+
+## v1.11 #6. Explicit JSON log payloads are detached and redacted
+
+This append-only amendment extends v0.8 #6's structured logging schema and
+v1.0.3 #3's `doc_url` addition. Those historical clauses remain unchanged.
+Appending optional `payload` is an additive v1.11 schema change; removing or
+renaming any field remains breaking.
+
+1. `LOG_FIELDS` is exactly these 17 fields in this order:
+   `timestamp`, `level`, `logger`, `message`, `run_id`, `event_id`,
+   `behavior`, `tool`, `model`, `cache_hit`, `cost_usd`, `latency_seconds`,
+   `reason`, `error_type`, `error_message`, `doc_url`, `payload`. As before,
+   inapplicable fields are omitted rather than nulled.
+2. `payload` is caller-supplied opt-in data, never an implicit copy of a graph
+   event, prompt, response, tool argument/output, or goal. Either
+   `runtime_log_extra(payload=mapping)` or direct stdlib
+   `extra={"payload": mapping}` crosses the same final boundary: the
+   `JsonLineFormatter` on the ActiveGraph handler installed by
+   `configure_logging(json_output=True)`.
+3. Input may be any `Mapping`. The formatter materializes and deep-copies it
+   into a detached concrete `dict`, then invokes the process-global configured
+   redactor exactly once. The callback must return a concrete `dict`. With no
+   callback, the detached mapping is emitted unchanged; a later
+   `configure_logging(..., payload_redactor=None)` clears the callback.
+4. The callback result is validated with the formatter's exact final JSON
+   semantics: `json.dumps(..., separators=(",", ":"), ensure_ascii=False)`.
+   A non-Mapping input, copy failure, callback exception, non-dict result, or
+   serialization failure omits `payload` without losing the otherwise valid log
+   line and never falls back to the original. Copy, callback, and serialization
+   catch `Exception`, not `BaseException`.
+5. The promise is limited to that configured ActiveGraph JSON formatter.
+   Arbitrary operator-installed handlers are outside it. Human output
+   (`json_output=False`) never interpolates payload or invokes the callback.
+   Event persistence and `EventSink` export are separate policy surfaces; log
+   redaction changes neither. Built-in framework log records remain
+   payload-free, including event-emitted records and behavior-failure records
+   whose graph events retain their original data or traceback.
+
+## v1.11 #7. Standard metrics are emitted from authoritative runtime seams
+
+This append-only amendment completes and clarifies v0.8 #8–#10 and #C4,
+including the v1.8 gauge-retirement limitation. The exact 24 existing
+`METRIC_NAMES`, kinds, and tag keys are unchanged; adding or changing a row
+remains a public API change. An executable public-production-path matrix proves
+every catalog row is actually observed with its declared kind and exact tags.
+
+1. Every accepted live graph event increments
+   `activegraph_events_emitted_total`. Runtime-owned `llm.requested`,
+   `llm.responded`, `tool.requested`, and `tool.responded` additionally map to
+   their standard families. Requests count every attempt, including cache hits
+   and retries; cache-hit counters require literal `cache_hit is True`.
+   Request-side LLM labels use the request model and response-side labels use
+   the response model. Missing/non-string names use `unknown_model` or
+   `unknown_tool`.
+2. A response `error` Mapping is failure, absent/`None` is success, and another
+   non-`None` shape is malformed and omits family-specific response metrics.
+   Successful LLM tokens accept exact nonnegative integers. Successful cost
+   accepts a finite nonnegative decimal value, with a logical cache hit forced
+   to zero. Tool duration accepts finite nonnegative latency, with cache hits
+   and explicit early-error responses forced to zero. Invalid tool input is
+   post-request and therefore records call, failure, and zero duration;
+   missing/undeclared-tool and budget gates reached before the request remain
+   behavior-only.
+3. Plain, LLM, and relation behavior invocation paths increment before work;
+   relation fan-out counts once per relation. Duration covers only the
+   developer handler. Exactly one failure observation is owned by each
+   `behavior.failed` emission.
+4. Metric labels are deliberately closed without rewriting diagnostic event or
+   log values. Documented LLM, tool, budget, and replay codes pass through;
+   missing/open values normalize to bounded values including `unknown_reason`,
+   `llm.other`, `tool.other`, `budget.other`, `exception.other`, and `other`.
+5. `activegraph_queue_depth` is one untagged shared series. Each successful
+   activation, listener push, recovery batch, and successful pop publishes that
+   Runtime's local main-queue depth: **last writer wins; it is not a sum**.
+   Independent depths require independent backend instances or registries.
+6. Budget gauges publish only for finite `max_events` and `max_cost_usd`, after
+   successful activation/load and Runtime-owned `consume`/`add_cost`
+   observations. Direct mutation or replacement of public `Runtime.budget` has
+   no immediate metric-freshness guarantee. Failed construction or strict load
+   creates no initial queue/budget gauge ghost. The three-method protocol has
+   no deletion operation, so zero and older run-id series follow backend
+   retention.
+7. Every actual shared pattern matcher call is counted and timed, including an
+   empty result or raised evaluation. Each strict replay divergence that
+   escapes a public boundary is counted once using the closed exception kind;
+   reconstructed and fresh verifier work uses NoOp metrics, preventing ordinary
+   simulated-work observations and double counting.
+8. Standard observations always use exactly the catalog kind and tag-key set.
+   Instrumentation is non-throwing and does not change graph event payloads or
+   ordering. Attached sink metrics retain the v1.8 worker-owned semantics.
+## v1.11 #8. Event types have purpose-specific runtime policy
+
+Event classification has four independent decisions owned by
+`activegraph.runtime.event_policy`: whether a type may schedule behaviors,
+whether it may trigger a pattern-only behavior, whether it is included in a
+structural diff, and whether it is included in strict replay comparison.
+These decisions MUST NOT be collapsed into a single "lifecycle" predicate.
+
+`behavior.*`, `relation_behavior.*`, `runtime.*`, `llm.*`, `tool.*`,
+`pattern.*`, `approval.*`, `embedding.*`, `dev.*`, and `authority.*` never
+schedule behaviors and never trigger pattern-only behaviors. Exact
+`context.read` has the same scheduling rule; this is not a `context.*`
+reservation. Diff continues to exclude only the three structural families
+(`behavior.*`, `relation_behavior.*`, and `runtime.*`). Strict replay excludes
+those three families plus exact `context.read`; it retains LLM, tool, pattern,
+approval, behavior-derived embedding, developer-override, and authority
+history. Direct operator embedding pairs retain their separate replay carveout.
+
+This amendment narrows and supersedes v0.5 #8 and its v0.6 #18 fork extension:
+load/fork recovery may requeue only post-drain suffix events whose types are
+eligible for live behavior scheduling. The last `runtime.idle` remains the
+drain high-water mark; the `behavior.started` fired-on check,
+`runtime.budget_exhausted` recovery, and `actor="promote:*"` exclusion remain
+unchanged.
+
+Treating `embedding.*` as non-scheduling bookkeeping is a new compatibility
+decision. v1.8 #6 established runtime ownership, caching, and the distinction
+between direct and behavior-derived embedding replay, but did not previously
+guarantee that embedding events could not schedule a subscriber or advance the
+queue tick. This amendment adds that guarantee. It also supersedes v0.6 #1's
+historical statement that `llm.*` events flow through the behavior queue:
+current v0.7-and-later LLM and tool bookkeeping suppression remains the
+authoritative live-dispatch behavior.
+
+## v1.11 #9. Prompt identity has one canonical byte owner
+
+`activegraph.llm.prompt_identity` owns the base prompt fields, canonical JSON
+(`sort_keys=True`, compact separators, UTF-8), and SHA-256 operation used by
+public prompt inspection, runtime turn/cache identity, and recorded fixtures.
+The public `AssembledPrompt.hash()` domain continues to omit the `tools` key.
+Runtime-turn and fixture identities explicitly include it; both `tools=None`
+and `tools=[]` normalize to JSON `null`, while non-empty tool definitions
+participate in the hash. `structured_output_mode` remains omit-when-prompt and
+is included only as `"native"`. Message serialization continues to omit
+`tool_calls` when absent and preserve it when present. These domain distinctions
+are intentional; the shared owner does not make the public and per-turn hashes
+interchangeable.
+
+## v1.11 #10. Fixture identity uses declared determinism with bounded legacy reads
+
+`AssembledPrompt.deterministic` is the authority for runtime-driven fixture
+identity. `RecordedLLMProvider` and `RecordingLLMProvider` alone advertise the
+duck-typed `accepts_prompt_identity = True` capability. Runtime supplies the
+atomic `prompt_hash`/`deterministic` pair only when that marker is truthy;
+absent or false markers receive neither value. The runtime-checkable
+`LLMProvider` Protocol is deliberately unchanged, so existing structural and
+strict-signature providers remain compatible.
+
+The pair invariant is exact:
+
+- both values absent means a direct legacy call, whose only available behavior
+  is sampling-based inference;
+- both values present means declared canonical identity, and the fixture
+  provider MUST recompute and verify the supplied hash;
+- exactly one value present raises structured `PromptIdentityError(kind=
+  "incomplete_metadata_pair")`;
+- a supplied/local mismatch raises `PromptIdentityError(kind="hash_mismatch")`.
+
+Both internal errors occur before fixture probing/writing or a wrapped live
+provider call. Runtime re-raises them before generic provider translation, so
+they do not become retryable `llm.network_error` events. Recording writes only
+the canonical declared filename and never forwards fixture-only metadata to
+the inner provider. Replay probes the canonical filename first; only after a
+miss may it probe the legacy inferred filename, at most once and only when its
+hash differs. A total miss reports the canonical requested hash. This fallback
+is read compatibility for old fixtures, never a new-write policy.
+
+## v1.11 #11. Provider wire owns shared exception and retry-header policy
+
+Anthropic and OpenAI adapters consume the same module-level
+`activegraph.llm.wire.classify_provider_exception` and
+`retry_after_seconds` symbols. Providers retain ownership of their
+`LLMBehaviorError` envelopes. Retry-header parsing deliberately preserves the
+existing narrow semantics: read lowercase `retry-after` through `.get`, apply
+`float()`, and return `None` for absent/unreadable values or `TypeError`/
+`ValueError`. It does not normalize header case, parse HTTP dates, clamp
+negative values, or otherwise reinterpret provider input.
+
+## v1.11 #12. Global and pack behavior decorators share pure construction
+
+`activegraph.behaviors._factory` is the sole owner of plain, LLM, and relation
+behavior construction. Each builder is two-stage: the decorator expression
+parses/compiles `pattern`, parses `activate_after`, then (for LLM behaviors)
+validates `output_schema`; the returned binder validates the handler, makes
+defensive copies, and constructs the dataclass. This locks error precedence as
+pattern before activation before schema before handler. Construction has no
+registry, Pack, or live-runtime side effect.
+
+This amendment precisely supersedes v0.9 #3's statement that global and pack
+decorators have identical signatures and differ only by skipped registration.
+Their common construction parameters/defaults/validation are identical,
+including `LLMBehavior.model: Optional[str] = None`. Policy intentionally
+splits after successful construction: global plain/relation behaviors append
+once; global LLM behaviors validate against live runtimes and only then append;
+public `register()` likewise validates before append. Pack decorators never
+append or live-validate, and instead set `_pack_local` plus exact
+`__pack_meta__`. Pack tools additionally have the pack-only `export_globally`
+surface and `_export_globally` metadata, specified separately below.
+
+Consequently an omitted pack LLM model survives loader cloning as `None` until
+the Runtime resolves its configured provider's default, and invalid pack LLM
+schemas fail at decoration with the same error and precedence as global ones.
+
+## v1.11 #13. Global and pack tools share pure canonical construction
+
+`activegraph.tools._factory` is the sole owner of Tool construction. Its first
+stage normalizes `cost_per_call` to `Decimal`, so an invalid cost fails before
+handler validation. Its returned binder validates the `(args, ctx)` signature,
+infers an omitted input schema, converts `timeout_seconds` to exact `float` and
+`deterministic` to exact `bool`, and constructs the Tool before any effect.
+Global `@tool` then appends exactly once. Pack `@tool` never appends; it sets
+`_pack_local`, boolean `_export_globally`, and exact `__pack_meta__` instead.
+
+The pack-only `export_globally` parameter remains an intentional exception to
+the common signature. It controls whether the loader-renamed canonical Tool is
+also entered under its short key in a Runtime's effective `tool_registry`; it
+does not append to the module-global registry. Regardless of export, an
+unambiguous `Runtime.get_tool(short)` continues to resolve through Pack short-
+name metadata. Canonical and exported-short registry keys point to the same
+loader clone, not the original decorated pack Tool.
+
+The omitted cost is newly locked to exact `Decimal("0")`, including string
+rendering `"0"` and Decimal exponent/tuple representation. This authority
+comes from the canonical Tool field and original global decorator plus v0.9
+parity—not from a later historical contract change—and supersedes the pack
+copy's stale `"0.0"` default.
+---
+
+## 2026-08-12 Set 4 amendment #1 — backend-neutral duplicate appends
+
+The v0.5 #2/#3 EventStore contract, v0.8 #17/#18 conformance contract,
+and v1.0 PR-C `DuplicateEventError` contract are clarified as follows.
+Every shipped EventStore translates only a duplicate `(event.id, run_id)`
+append to the existing public `DuplicateEventError`. Its structured context
+is exactly `event_id`, the store's actual `run_id`, and the stable backend
+name (`memory`, `sqlite`, or `postgres`). The rejected append leaves the
+existing backend-native event and event count unchanged. Reusing the same
+event id in a distinct run remains legal. Encoding failures and all other
+driver/database failures retain their existing exception types.
+
+## 2026-08-12 Set 4 amendment #2 — durable fork atomicity
+
+This amendment extends v0.5 #9/#11/#12 and the v1.5 compaction-horizon
+rules. Absent concurrent mutation of the parent, a successful durable
+`fork_run` makes destination run metadata and the complete ordered event
+prefix through `at_event_id` visible together. On any failure, destination
+metadata and events are restored to their backend-native pre-call observable
+snapshot, and the parent is observably unchanged from its backend-native
+pre-call snapshot.
+
+SQLite enforces the stable-parent premise with `BEGIN IMMEDIATE`. The existing
+Postgres implementation uses separate cut and copy statements under READ
+COMMITTED without locking the parent; therefore this amendment does not promise
+a stable Postgres prefix during concurrent parent mutation. Shared conformance
+tests intentionally exclude concurrent parent mutation. This fork guarantee is
+distinct from v0.8 #5, which governs migration transactionality only.
+
+## 2026-08-12 Set 4 amendment #3 — FalkorDB index provisioning
+
+Opening `FalkorDBGraphStore` provisions every required index and fails loud on
+syntax, permission, authentication, connection, and other server/client
+errors. The only ignored response is an instance of
+`redis.exceptions.ResponseError` whose text exactly equals
+`Attribute '<property>' is already indexed` for the property in the current
+index statement. Both the exception type and statement-specific property must
+match; classification/import failures preserve the original provisioning
+exception.
+
+Once an owned database client has been constructed, any graph-selection or
+index-provisioning failure closes it best-effort without allowing cleanup to
+replace the primary exception. An injected graph remains caller-owned. This
+type/text rule is the verified compatibility basis for FalkorDB Python 1.0.0
+through 1.6.2, redis-py 5.0.1 through 8.1.0, and FalkorDB 4.10.0 through
+4.18.3; it is not a timeless upstream guarantee. The live reopen canary must
+fail if a future supported version changes that response contract.
+
+## 2026-08-12 Set 4 amendment #4 — TrialSpecification schema v2 pins
+
+This amendment versions, rather than rewrites, v1.8 #9. Wire schema v1
+historically preserved an intentional empty-pin posture. Wire schema v2 is now
+the only form emitted by `TrialSpecification.to_json` and the only version
+accepted by direct `TrialSpecification` construction. The version value must
+be the exact integer `2`; booleans, floats, and strings do not qualify.
+
+`PackSource.expected_bundle_hash` is required and must match exactly
+`sha256:[0-9a-f]{64}`. This applies independently to the candidate and every
+ordered extra pack, including when `manifest_required` is false. The child
+always verifies each accepted pin before manifest loading or module import.
+
+`TrialSpecification.from_json` remains a migration reader for exact integer
+schema versions 1 and 2. A v1 payload is accepted only when its candidate and
+every extra already carry well-formed, nonempty pins; it is returned and
+reserialized as schema v2. Missing, empty, or malformed pins in either wire
+version fail with `pack_source.expected_bundle_hash` or the indexed
+`extra_packs[i].expected_bundle_hash` path before executor work, parent fork,
+or child import. This intentionally breaks the insecure subset of v1 rather
+than retain an unpinned escape hatch.
+
+## 2026-08-12 Set 4 amendment #5 — canonical Pack-name boundary
+
+This amendment intentionally narrows the public v0.9 #2/#6 Pack identity
+contract. Logical `Pack.name` values and manifest `pack.name` values must be
+strings matching `^[a-z][a-z0-9_]{0,63}$`: one through 64 ASCII snake-case
+characters beginning with a lowercase letter. Caller spelling is preserved,
+and equality/hash remain exactly `(name, version)`.
+
+The scaffold continues to strip surrounding whitespace and lowercase input,
+then requires a one-through-64-character ASCII kebab distribution slug. Its
+derived snake name is revalidated through the logical-name rule; a raw
+underscore is not accepted as a distribution slug. Third-party Pack names
+longer than 64 characters must choose a shorter stable identity before
+upgrading. Hard constructor rejection in the current 1.x line is an explicit
+compatibility break, justified by aligning all identity boundaries before a
+Pack can register or emit audit events.
+
+## 2026-08-12 Set 4 amendment #6 — PEP 440 Pack versions
+
+This amendment intentionally narrows v0.9 #2/#6 and resolves the v0.9 #26
+version-string deferral. Both `Pack.version` and manifest `pack.version` must
+be strings accepted by `packaging.version.Version`; surrounding whitespace is
+rejected before parsing. The original valid string is retained without
+normalization, and `(name, version)` identity remains exact-string identity.
+Consequently, distinct valid spellings such as `1.0` and `1.0.0` do not pass
+surface agreement.
+
+Hard rejection in the current 1.x line is an explicit compatibility break,
+justified by refusing invalid identity before registration or audit events.
+Third-party labels such as `nightly` must migrate to a valid exact spelling
+such as `0+nightly`. No automatic rewrite is performed on callers' behalf.
+
+## 2026-08-12 Set 4 amendment #7 — manifest location and shipped artifacts
+
+This amendment extends the v0.9 #2 Pack shape by appending the defaulted field
+`manifest_path: Path | None = None` after `capabilities`. A non-None value must
+be an absolute `pathlib.Path`; strings and relative paths fail Pack
+construction. It is metadata only and remains excluded from equality and
+hashing, which stay exactly `(name, version)`. A declared path is authoritative:
+the loader checks exactly that path, including when it is missing, and never
+falls back. Without a declaration, legacy discovery continues to anchor on
+behavior/tool functions, a nonempty settings class, and object schemas.
+Relation-only and componentless packs must use an explicit path.
+
+This deliberately amends the v1.6 #1 warning policy. Before 2.0, manifest
+validation remains warn-and-load and truly absent legacy manifests remain
+silent. Schema/TOML/surface violations use `pack.manifest_invalid`; missing,
+unreadable, and unexpected locator/checker failures use
+`pack.manifest_check_failed`. Every failure is a structured WARNING, carries
+the pack identity, resolved path or `<unresolved>`, failure kind, error type,
+error detail, and applicable violations, and is emitted at most once per
+`(name, version)` per process. This intentionally promotes unexpected tier
+failures from DEBUG: an explicit locator is an owner assertion whose failed
+check must be visible, while identity deduplication prevents log flooding.
+
+`fixtures.entrypoint` is a pack-relative resource path from the manifest's
+directory. It must be a nonempty string with no absolute form, `..` component,
+or symlink component; its resolved target must remain inside the pack and be an
+existing regular file. It declares a fixture resource, not an executable
+sandbox scenario. The manifest schema's two-way live-surface check covers
+object types, relation types, behaviors, tools, settings, and capabilities;
+policies and prompts remain intentionally outside the current manifest schema.
+
+The bundled Diligence pack and every `activegraph pack new` scaffold now ship a
+wheel-included `manifest.toml` that passes schema, live-surface, and content-hash
+verification. Scaffolded Packs use an explicit absolute locator and ship a
+minimal deterministic fixture resource. Content hashes exclude
+`manifest.toml`; external bundle hashes include it.
+# Unreleased — deterministic Runtime sink ownership
+
+`Runtime.close(timeout: float | None = 5.0) -> bool` delegates to the existing
+graph-wide `close_sinks()` operation and owns exactly the same set: every sink
+attached to the Runtime's Graph. It does not close stores or remove listeners.
+The first call closes the Runtime to subsequent state-changing Runtime methods;
+those methods raise `RuntimeClosedError`, while read-only inspection and
+explicit close retries remain available. Repeated close is safe.
+
+`Runtime.__enter__()` returns the open Runtime and raises `RuntimeClosedError`
+after close. `Runtime.__exit__()` returns `None` and never suppresses a user
+exception. An ordinary timeout or partial adapter failure remains the existing
+exception-free `False` result; status stays queryable and no automatic retry is
+performed. Only if close unexpectedly raises while a user exception is active
+does the user exception remain primary with the close exception attached as
+its `__context__`.
+
+# Unreleased — Store-owned extensible migration boundary
+
+`activegraph.store.migration` is the canonical administrative data-movement
+module. `activegraph.observability.migration` remains an identity-preserving
+compatibility shim. Migration does not widen the deliberately per-run
+`EventStore` protocol or the built-in-only `open_store()` dispatcher.
+
+Migration providers declare unique normalized URL schemes, a `read`/`write`
+capability frozenset, pure `validate_url()`, and `open()`. Both endpoints and
+required capabilities are resolved before either backend opens. Built-in
+SQLite/Postgres providers are registered directly; third parties use explicit
+`register_migration_backend()` calls or one
+`activegraph.migration_backends` entry point per alias. Duplicate claims fail
+closed, requested entry-point load failures are typed, and unrelated broken
+plugins are not loaded.
+
+Each opened backend is one URL-owned session. Central orchestration preserves
+provider run order, owns strict/skip-corrupted policy, and closes destination
+then source on every exit. A sole cleanup failure raises
+`MigrationBackendCloseError`; cleanup failures during another exception are
+attached as diagnostics without replacing the primary error. Backend adapters
+own schema setup, raw corruption recovery, and transactional SQL; central
+migration contains only provider-neutral policy and reports.

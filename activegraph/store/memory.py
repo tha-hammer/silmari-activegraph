@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Iterator, Optional
 
 from activegraph.core.event import Event
-from activegraph.store.errors import DuplicateEventError, EventNotFoundError
+from activegraph.store.errors import EventNotFoundError, _duplicate_event_error
 
 
 def _event_not_found(event_id: str, *, run_id: str, where: str) -> EventNotFoundError:
@@ -58,29 +58,8 @@ class InMemoryEventStore:
 
     def append(self, event: Event) -> None:
         if event.id in self._by_id:
-            raise DuplicateEventError(
-                f"duplicate event id: {event.id}",
-                what_failed=(
-                    f"An event with id {event.id!r} already exists in this "
-                    f"in-memory store. Appends are id-unique."
-                ),
-                why=(
-                    "Event ids are the addressing primitive for the entire "
-                    "framework — behaviors reference events by id, the replay "
-                    "cache keys on them, the causal chain walks them. A "
-                    "duplicate id would silently reroute one of those "
-                    "references, corrupting the audit trail. The store refuses "
-                    "the append rather than risk it."
-                ),
-                how_to_fix=(
-                    "Event ids in normal use come from the runtime's monotonic "
-                    "id generator (IDGen) and cannot collide. A duplicate almost "
-                    "always means a test fixture is hand-constructing events with "
-                    "fixed ids and a previous test left state behind. Use IDGen "
-                    "to generate ids, or call `clear_registry()` / construct a "
-                    "fresh Graph between tests."
-                ),
-                context={"event_id": event.id, "run_id": self.run_id},
+            raise _duplicate_event_error(
+                event_id=event.id, run_id=self.run_id, backend="memory"
             )
         self._by_id[event.id] = len(self._events)
         self._events.append(event)

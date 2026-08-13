@@ -22,6 +22,7 @@ from activegraph import (
     ActiveGraphError,
     AmbiguousBehaviorError,
     AmbiguousToolError,
+    ApplyPatchNotFoundError,
     ApprovalNotFoundError,
     BehaviorNotFoundError,
     ConfigurationError,
@@ -38,19 +39,26 @@ from activegraph import (
     InvalidStoreURL,
     InvalidToolRegistration,
     LLMBehaviorError,
+    MigrationBackendCloseError,
+    MigrationBackendConflictError,
+    MigrationBackendLoadError,
     MissingOptionalDependency,
     MissingProviderError,
     MissingToolError,
     NonSerializableEventError,
+    ObjectNotFoundError,
     PackConflictError,
     PackError,
     PackNotFoundError,
     PackSchemaViolation,
     PackVersionConflictError,
     PatternError,
+    PatchNotFoundError,
     RegistrationError,
     ReplayDivergenceError,
     ReplayError,
+    RejectPatchNotFoundError,
+    RuntimeClosedError,
     RuntimeContextRequiredError,
     SchemaVersionMismatch,
     StorageError,
@@ -58,8 +66,12 @@ from activegraph import (
     ToolNotFoundError,
     UnknownToolError,
     UnsupportedPatternError,
+    UnsupportedMigrationBackendError,
+    UnsupportedMigrationCapabilityError,
 )
 from activegraph.errors import GITHUB_NEW_ISSUE_URL, internal_bug_fields
+from activegraph.llm.errors import PromptIdentityError
+from activegraph.sandbox import SandboxStartupError
 
 
 SNAPSHOTS_DIR = Path(__file__).parent / "snapshots" / "errors"
@@ -191,6 +203,33 @@ def test_active_graph_error_is_the_root() -> None:
         PackError,
     ):
         assert issubclass(cls, ActiveGraphError), cls
+
+
+def test_sandbox_startup_error_has_narrow_legacy_format_waiver() -> None:
+    message = "trial child could not start (exit 17): deterministic failure"
+    err = SandboxStartupError(message)
+
+    assert issubclass(SandboxStartupError, ConfigurationError)
+    assert issubclass(SandboxStartupError, ActiveGraphError)
+    assert issubclass(SandboxStartupError, RuntimeError)
+    assert type(err) is SandboxStartupError
+    assert str(err) == message
+    assert err.args == (message,)
+    assert err.what_failed == ""
+    assert err.why == ""
+    assert err.how_to_fix == ""
+    assert err.context == {}
+    assert err.is_structured() is False
+    assert err.doc_url == (
+        "https://docs.activegraph.ai/errors/sandbox-startup-error"
+    )
+
+
+def test_sandbox_startup_error_stays_out_of_top_level_exports() -> None:
+    import activegraph
+
+    assert "SandboxStartupError" not in activegraph.__all__
+    assert not hasattr(activegraph, "SandboxStartupError")
 
 
 def test_doc_slug_is_unique_per_category() -> None:
@@ -459,6 +498,11 @@ def test_storage_leaves_inherit_from_storage_error() -> None:
         SchemaVersionMismatch,
         EventNotFoundError,
         DuplicateEventError,
+        MigrationBackendCloseError,
+        MigrationBackendConflictError,
+        MigrationBackendLoadError,
+        UnsupportedMigrationBackendError,
+        UnsupportedMigrationCapabilityError,
     ):
         assert issubclass(cls, StorageError), cls
         assert issubclass(cls, ActiveGraphError), cls
@@ -476,6 +520,9 @@ def test_storage_leaves_preserve_legacy_base_classes() -> None:
     assert issubclass(EventNotFoundError, KeyError)
     # DuplicateEventError multi-inherits ValueError for the same reason.
     assert issubclass(DuplicateEventError, ValueError)
+    # SchemaVersionMismatch is a framework storage leaf, not the stale
+    # RuntimeError shape that older CLI helpers used to string-match.
+    assert not issubclass(SchemaVersionMismatch, RuntimeError)
 
 
 def test_invalid_store_url_bare_path_snapshot() -> None:
@@ -588,19 +635,22 @@ def test_event_not_found_is_a_key_error() -> None:
         list(store.iter_events(after="evt_does_not_exist"))
 
 
-def test_duplicate_event_snapshot() -> None:
-    """Hand-constructed events colliding on id. Voice frames this as
-    a programmer error (the id generator is monotonic in normal use)."""
-    from activegraph import Event
-    from activegraph.store import InMemoryEventStore
-    store = InMemoryEventStore(run_id="run_test")
-    e1 = Event(id="evt_001", type="goal.created", payload={}, timestamp="2026-05-17T00:00:00Z")
-    e2 = Event(id="evt_001", type="goal.created", payload={}, timestamp="2026-05-17T00:00:01Z")
-    store.append(e1)
-    with pytest.raises(DuplicateEventError) as excinfo:
-        store.append(e2)
-    _assert_format_compliant(excinfo.value)
-    _check_snapshot("duplicate_event", excinfo.value)
+@pytest.mark.parametrize("backend", ["memory", "sqlite", "postgres"])
+def test_duplicate_event_factory_is_backend_neutral(backend: str) -> None:
+    """Every store uses identical operator prose and backend-rich context."""
+    from activegraph.store.errors import _duplicate_event_error
+
+    err = _duplicate_event_error(
+        event_id="evt_001", run_id="run_test", backend=backend
+    )
+    assert err.context == {
+        "event_id": "evt_001",
+        "run_id": "run_test",
+        "backend": backend,
+    }
+    _assert_format_compliant(err)
+    if backend == "memory":
+        _check_snapshot("duplicate_event", err)
 
 
 def test_duplicate_event_is_a_value_error() -> None:
@@ -646,6 +696,33 @@ def test_llm_behavior_error_preserves_reason_signature() -> None:
     assert err.payload_extras == {"raw_text": "<...>"}
     assert err.context["reason"] == "llm.parse_error"
     assert err.context["payload_extras"] == {"raw_text": "<...>"}
+
+
+def test_prompt_identity_incomplete_pair_error_snapshot() -> None:
+    err = PromptIdentityError(
+        "incomplete_metadata_pair",
+        prompt_hash="supplied-hash",
+    )
+    assert isinstance(err, ExecutionError)
+    assert isinstance(err, ValueError)
+    assert err.kind == "incomplete_metadata_pair"
+    assert err.context["prompt_hash"] == "supplied-hash"
+    _assert_format_compliant(err)
+    _check_snapshot("prompt_identity_error__incomplete_pair", err)
+
+
+def test_prompt_identity_hash_mismatch_error_snapshot() -> None:
+    err = PromptIdentityError(
+        "hash_mismatch",
+        prompt_hash="supplied-hash",
+        computed_hash="computed-hash",
+        deterministic=False,
+    )
+    assert err.kind == "hash_mismatch"
+    assert err.context["computed_hash"] == "computed-hash"
+    assert err.context["deterministic"] is False
+    _assert_format_compliant(err)
+    _check_snapshot("prompt_identity_error__hash_mismatch", err)
 
 
 def test_tool_error_preserves_reason_signature() -> None:
@@ -1026,11 +1103,12 @@ def test_invalid_tool_registration_snapshot() -> None:
 
 
 def test_config_leaves_inherit_from_configuration_error() -> None:
-    """The three ConfigurationError leaves are in the v1.0 hierarchy."""
+    """Runtime configuration/lifecycle leaves share the hierarchy."""
     for cls in (
         InvalidRuntimeConfiguration,
         InvalidArgumentType,
         IncompatibleRuntimeState,
+        RuntimeClosedError,
     ):
         assert issubclass(cls, ConfigurationError), cls
         assert issubclass(cls, ActiveGraphError), cls
@@ -1045,6 +1123,13 @@ def test_config_leaves_preserve_legacy_base_classes() -> None:
     assert issubclass(InvalidRuntimeConfiguration, ValueError)
     assert issubclass(InvalidArgumentType, TypeError)
     assert issubclass(IncompatibleRuntimeState, RuntimeError)
+    assert issubclass(RuntimeClosedError, RuntimeError)
+
+
+def test_runtime_closed_error_is_structured_and_names_operation() -> None:
+    err = RuntimeClosedError("run_goal")
+    _assert_format_compliant(err)
+    assert err.context == {"operation": "run_goal"}
 
 
 def test_pr_f_cross_category_leaves_are_execution() -> None:
@@ -1057,6 +1142,63 @@ def test_pr_f_cross_category_leaves_are_execution() -> None:
     assert issubclass(InvalidPatchLifecycleState, ExecutionError)
     assert not issubclass(RuntimeContextRequiredError, ConfigurationError)
     assert not issubclass(InvalidPatchLifecycleState, ConfigurationError)
+
+
+def test_graph_lookup_leaves_preserve_exact_hierarchy_and_builtin_routing() -> None:
+    assert issubclass(ObjectNotFoundError, ExecutionError)
+    assert issubclass(ObjectNotFoundError, ActiveGraphError)
+    assert issubclass(ObjectNotFoundError, KeyError)
+    assert not issubclass(ObjectNotFoundError, AttributeError)
+
+    assert issubclass(PatchNotFoundError, ExecutionError)
+    assert issubclass(PatchNotFoundError, ActiveGraphError)
+    assert not issubclass(PatchNotFoundError, KeyError)
+    assert not issubclass(PatchNotFoundError, AttributeError)
+
+    assert issubclass(ApplyPatchNotFoundError, PatchNotFoundError)
+    assert issubclass(ApplyPatchNotFoundError, KeyError)
+    assert not issubclass(ApplyPatchNotFoundError, AttributeError)
+
+    assert issubclass(RejectPatchNotFoundError, PatchNotFoundError)
+    assert issubclass(RejectPatchNotFoundError, AttributeError)
+    assert not issubclass(RejectPatchNotFoundError, KeyError)
+
+
+@pytest.mark.parametrize(
+    ("err", "field", "value", "slug", "snapshot"),
+    [
+        (
+            ObjectNotFoundError(object_id="task#404"),
+            "object_id",
+            "task#404",
+            "object-not-found-error",
+            "object_not_found",
+        ),
+        (
+            ApplyPatchNotFoundError(patch_id="patch_404"),
+            "patch_id",
+            "patch_404",
+            "apply-patch-not-found-error",
+            "apply_patch_not_found",
+        ),
+        (
+            RejectPatchNotFoundError(patch_id="patch_404"),
+            "patch_id",
+            "patch_404",
+            "reject-patch-not-found-error",
+            "reject_patch_not_found",
+        ),
+    ],
+)
+def test_graph_lookup_leaf_format_and_semantic_fields(
+    err, field, value, slug, snapshot
+) -> None:
+    _assert_format_compliant(err)
+    assert getattr(err, field) == value
+    assert err.context[field] == value
+    assert err.doc_url.endswith(f"/errors/{slug}")
+    assert err.args == (str(err),)
+    _check_snapshot(snapshot, err)
 
 
 # --- Reverse-audit-order snapshots (hardest first) ---
@@ -1109,8 +1251,9 @@ def test_incompatible_runtime_state_fork_snapshot() -> None:
             "native primitives (SQLite uses a direct SQL copy under a "
             "single transaction). Postgres has a different transactional "
             "shape and an in-memory store has no copy primitive at all. "
-            "v0.8 deliberately scoped the fork command to SQLite first — "
-            "the limitation is documented in CONTRACT v0.8 #5."
+            "Runtime.fork() remains scoped to SQLite under CONTRACT v0.5 "
+            "#9; its durable atomicity is clarified by the 2026-08-12 "
+            "Set 4 amendment #2."
         ),
         how_to_fix=(
             "Migrate the run to a SQLite store first, then fork:\n"

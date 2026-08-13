@@ -44,6 +44,7 @@ from decimal import Decimal
 from typing import Any, Mapping, Optional
 
 from activegraph.llm.errors import LLMBehaviorError
+from activegraph.llm.wire import classify_provider_exception, retry_after_seconds
 from activegraph.llm.parsing import parse_structured_response as _parse_structured
 from activegraph.llm.provider import LLMProvider
 from activegraph.llm.types import LLMMessage, LLMResponse, ToolCall
@@ -298,13 +299,13 @@ class OpenAIProvider(LLMProvider):
         try:
             raw = client.chat.completions.create(**kwargs)
         except Exception as e:
-            reason = _classify_provider_exception(e)
+            reason = classify_provider_exception(e)
             extras: dict[str, Any] = {
                 "model": model,
                 "exception_type": type(e).__name__,
                 "message": str(e),
             }
-            ra = _retry_after_seconds(e)
+            ra = retry_after_seconds(e)
             if ra is not None:
                 extras["retry_after_seconds"] = ra
             raise LLMBehaviorError(reason, str(e), payload_extras=extras) from e
@@ -568,26 +569,3 @@ def _get(obj: Any, key: str) -> Any:
     if isinstance(obj, dict):
         return obj.get(key)
     return getattr(obj, key, None)
-
-
-def _classify_provider_exception(e: Exception) -> str:
-    # CONTRACT v1.3 #3: shared classification. Auth and invalid-request
-    # failures get their own terminal reason codes instead of the
-    # retried llm.network_error catch-all.
-    from activegraph.llm.wire import classify_provider_exception
-
-    return classify_provider_exception(e)
-
-
-def _retry_after_seconds(e: Exception) -> Optional[float]:
-    response = getattr(e, "response", None)
-    headers = getattr(response, "headers", None) if response is not None else None
-    if headers is None:
-        return None
-    ra = headers.get("retry-after") if hasattr(headers, "get") else None
-    if ra is None:
-        return None
-    try:
-        return float(ra)
-    except (TypeError, ValueError):
-        return None

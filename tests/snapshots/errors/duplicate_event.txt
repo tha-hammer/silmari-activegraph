@@ -1,10 +1,10 @@
-DuplicateEventError: duplicate event id: evt_001
+DuplicateEventError: duplicate event id 'evt_001' in run 'run_test'
 
 What failed:
-  An event with id 'evt_001' already exists in this in-memory store. Appends are id-unique.
+  An event with id 'evt_001' already exists in run 'run_test'. Appends require unique (event id, run id) pairs.
 
 Why:
-  Event ids are the addressing primitive for the entire framework — behaviors reference events by id, the replay cache keys on them, the causal chain walks them. A duplicate id would silently reroute one of those references, corrupting the audit trail. The store refuses the append rather than risk it.
+  Event ids are the addressing primitive for the entire framework — behaviors reference events by id, the replay cache keys on them, and the causal chain walks them. A duplicate id would silently reroute one of those references, corrupting the audit trail. The store refuses the append rather than risk it.
 
 How to fix:
   Event ids in normal use come from the runtime's monotonic id generator (IDGen) and cannot collide. A duplicate almost always means a test fixture is hand-constructing events with fixed ids and a previous test left state behind. Use IDGen to generate ids, or call `clear_registry()` / construct a fresh Graph between tests.

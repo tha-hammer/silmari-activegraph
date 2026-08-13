@@ -58,6 +58,7 @@ relation_types = []
 behaviors = []
 tools = []
 settings_schema = ""
+consumes = ["gateway.search", "archive.write"]
 
 [[surface.capabilities]]
 provider = "meeting"
@@ -74,8 +75,10 @@ deterministic = true
 def _write_pack(tmp_path, manifest_text=GOOD_MANIFEST):
     root = tmp_path / "meeting_notes"
     root.mkdir(parents=True)
-    (root / "manifest.toml").write_text(manifest_text)
     (root / "__init__.py").write_text("# pack module\n")
+    (root / "fixtures").mkdir()
+    (root / "fixtures" / "run_fixtures.py").write_text("# deterministic\n")
+    (root / "manifest.toml").write_text(manifest_text)
     return root
 
 
@@ -88,7 +91,72 @@ def test_load_manifest_round_trip(tmp_path):
     assert m.pack_deps == {"core": ">=0.1"}
     assert m.object_types == ("meeting",)
     assert m.capabilities[0].risk_class == "medium"
+    assert m.consumes == ("gateway.search", "archive.write")
     assert m.fixtures_deterministic is True
+
+
+@pytest.mark.parametrize("name", ["a", "a" * 64])
+def test_manifest_name_accepts_canonical_boundaries(tmp_path, name):
+    text = GOOD_MANIFEST.replace('name = "meeting_notes"', f'name = "{name}"')
+    assert load_manifest(_write_pack(tmp_path, text)).name == name
+
+
+@pytest.mark.parametrize("name", ["", "a" * 65, "UPPER", "9pack", "my-pack"])
+def test_manifest_name_rejects_noncanonical_identity(tmp_path, name):
+    text = GOOD_MANIFEST.replace('name = "meeting_notes"', f'name = "{name}"')
+    with pytest.raises(PackManifestError, match="pack.name"):
+        load_manifest(_write_pack(tmp_path, text))
+
+
+@pytest.mark.parametrize("toml_value", ["123", "true"])
+def test_manifest_name_rejects_non_string_without_coercion(tmp_path, toml_value):
+    text = GOOD_MANIFEST.replace(
+        'name = "meeting_notes"', f"name = {toml_value}"
+    )
+    with pytest.raises(PackManifestError) as excinfo:
+        load_manifest(_write_pack(tmp_path, text))
+    assert any(
+        violation == "pack.name must be a string"
+        for violation in excinfo.value.violations
+    )
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["0.1", "1.0.0rc1", "1!2.0", "1.0.post1", "1.0.dev2", "1.0+local.1"],
+)
+def test_manifest_version_accepts_pep440_without_rewriting(tmp_path, version):
+    text = GOOD_MANIFEST.replace(
+        'version = "0.1.0"', f'version = "{version}"'
+    )
+    assert load_manifest(_write_pack(tmp_path, text)).version == version
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["", " 1.0", "1.0 ", "nightly", "1..0", "release-1", "1.0+local..1"],
+)
+def test_manifest_version_rejects_non_pep440_values(tmp_path, version):
+    text = GOOD_MANIFEST.replace(
+        'version = "0.1.0"', f'version = "{version}"'
+    )
+    with pytest.raises(PackManifestError, match="pack.version"):
+        load_manifest(_write_pack(tmp_path, text))
+
+
+@pytest.mark.parametrize("toml_value", ["123", "true"])
+def test_manifest_version_rejects_non_string_without_coercion(
+    tmp_path, toml_value
+):
+    text = GOOD_MANIFEST.replace(
+        'version = "0.1.0"', f"version = {toml_value}"
+    )
+    with pytest.raises(PackManifestError) as excinfo:
+        load_manifest(_write_pack(tmp_path, text))
+    assert any(
+        violation == "pack.version must be a string"
+        for violation in excinfo.value.violations
+    )
 
 
 def test_violations_are_aggregated_into_one_error(tmp_path):
@@ -114,6 +182,58 @@ def test_nonempty_signature_is_rejected_not_skipped(tmp_path):
     root = _write_pack(tmp_path, signed)
     with pytest.raises(PackManifestError, match="signature"):
         load_manifest(root)
+
+
+def test_fixture_entrypoint_accepts_contained_regular_file(tmp_path):
+    manifest = load_manifest(_write_pack(tmp_path))
+    assert manifest.fixtures_entrypoint == "fixtures/run_fixtures.py"
+
+
+def test_fixture_entrypoint_rejects_non_string(tmp_path):
+    text = GOOD_MANIFEST.replace(
+        'entrypoint = "fixtures/run_fixtures.py"', "entrypoint = 42"
+    )
+    with pytest.raises(PackManifestError) as excinfo:
+        load_manifest(_write_pack(tmp_path, text))
+    assert any("must be a string" in v for v in excinfo.value.violations)
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "expected"),
+    [
+        ("/tmp/run_fixtures.py", "relative"),
+        ("../outside.py", "traversal"),
+        ("fixtures/missing.py", "does not exist"),
+        ("fixtures", "regular file"),
+    ],
+)
+def test_fixture_entrypoint_rejects_unsafe_or_missing_targets(
+    tmp_path, entrypoint, expected
+):
+    text = GOOD_MANIFEST.replace(
+        'entrypoint = "fixtures/run_fixtures.py"',
+        f'entrypoint = "{entrypoint}"',
+    )
+    with pytest.raises(PackManifestError) as excinfo:
+        load_manifest(_write_pack(tmp_path, text))
+    assert any(expected in violation for violation in excinfo.value.violations)
+
+
+def test_fixture_entrypoint_rejects_escaping_symlink(tmp_path):
+    root = _write_pack(tmp_path)
+    outside = tmp_path / "outside.py"
+    outside.write_text("# outside\n")
+    os.symlink(outside, root / "fixtures" / "linked.py")
+    text = GOOD_MANIFEST.replace(
+        'entrypoint = "fixtures/run_fixtures.py"',
+        'entrypoint = "fixtures/linked.py"',
+    )
+    (root / "manifest.toml").write_text(text)
+
+    with pytest.raises(PackManifestError) as excinfo:
+        load_manifest(root)
+
+    assert any("symlink" in violation for violation in excinfo.value.violations)
 
 
 # --------------------------------------------------- surface check
@@ -149,7 +269,63 @@ def test_surface_check_passes_on_agreement(tmp_path):
             ),
         ),
     )
+    # The non-empty manifest consumes tuple is host-owned metadata, so it is
+    # intentionally absent from Pack and excluded from this comparison.
     verify_surface(m, pack)  # no raise
+
+
+def test_consumes_only_difference_is_excluded_from_verify_surface(tmp_path):
+    from activegraph.packs.manifest import CapabilityDecl
+
+    manifest = load_manifest(_write_pack(tmp_path))
+    pack = Pack(
+        name="meeting_notes",
+        version="0.1.0",
+        object_types=_pack().object_types,
+        capabilities=(
+            CapabilityDecl(
+                provider="meeting",
+                capability="export_summary",
+                risk_class="medium",
+            ),
+        ),
+    )
+
+    assert manifest.consumes == ("gateway.search", "archive.write")
+    verify_surface(manifest, pack)
+
+    changed = GOOD_MANIFEST.replace(
+        'consumes = ["gateway.search", "archive.write"]',
+        'consumes = ["different.host.route"]',
+    )
+    changed_manifest = load_manifest(_write_pack(tmp_path / "changed", changed))
+    assert changed_manifest.consumes == ("different.host.route",)
+    verify_surface(changed_manifest, pack)
+
+
+def test_surface_check_requires_exact_valid_version_spelling(tmp_path):
+    from activegraph.packs.manifest import CapabilityDecl
+
+    text = GOOD_MANIFEST.replace('version = "0.1.0"', 'version = "1.0"')
+    manifest = load_manifest(_write_pack(tmp_path, text))
+    pack = Pack(
+        name="meeting_notes",
+        version="1.0.0",
+        object_types=_pack().object_types,
+        capabilities=(
+            CapabilityDecl(
+                provider="meeting",
+                capability="export_summary",
+                risk_class="medium",
+            ),
+        ),
+    )
+
+    with pytest.raises(PackManifestError) as excinfo:
+        verify_surface(manifest, pack)
+
+    assert any("pack.version '1.0' != Pack(version='1.0.0')" in violation
+               for violation in excinfo.value.violations)
 
 
 def test_surface_check_catches_both_directions(tmp_path):
@@ -172,10 +348,14 @@ def test_content_hash_is_deterministic_and_byte_exact(tmp_path):
     root = _write_pack(tmp_path)
     (root / "behaviors.py").write_text("x = 1\n")
 
-    # Hand-compute the §4 stream for the two hashed files (the
+    # Hand-compute the §4 stream for all hashed files (the
     # manifest itself is excluded).
     h = hashlib.sha256()
-    for rel in [b"__init__.py", b"behaviors.py"]:
+    for rel in [
+        b"__init__.py",
+        b"behaviors.py",
+        b"fixtures/run_fixtures.py",
+    ]:
         data = (root / rel.decode()).read_bytes()
         h.update(rel)
         h.update(b"\x00")
@@ -284,7 +464,9 @@ def test_bundle_hash_includes_the_manifest(tmp_path):
 def test_bundle_hash_is_byte_exact(tmp_path):
     root = _write_pack(tmp_path)
     h = hashlib.sha256()
-    for rel in sorted([b"__init__.py", b"manifest.toml"]):
+    for rel in sorted(
+        [b"__init__.py", b"fixtures/run_fixtures.py", b"manifest.toml"]
+    ):
         data = (root / rel.decode()).read_bytes()
         h.update(rel)
         h.update(b"\x00")
