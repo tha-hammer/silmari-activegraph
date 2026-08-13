@@ -7,10 +7,10 @@
 in-process FIFO, pops them one at a time, asks the `Registry` which behaviors match, and invokes
 each matching behavior against a runtime-built scoped `View` with a read-only query surface (its
 returned handles are live, `activegraph/core/view.py:21-31`) plus a constrained mutation wrapper
-(`BehaviorGraph`). Everything a behavior does —
-mutations, LLM calls, tool calls, failures — is written back to the log as more events, which
-re-enter the queue, until the queue drains (`runtime.idle`) or the `Budget` ends the run
-(`runtime.budget_exhausted`). Dispatch is explicitly single-threaded, FIFO, no priority, no async
+(`BehaviorGraph`). Everything a behavior does — mutations, LLM calls, tool calls, failures — is
+written back to the log as more events; the shared event policy decides which of those events
+re-enter the queue. Dispatch continues until the queue drains (`runtime.idle`) or the `Budget` ends
+the run (`runtime.budget_exhausted`). Dispatch is explicitly single-threaded, FIFO, no priority, no async
 (`activegraph/runtime/queue.py:1`, `activegraph/runtime/runtime.py:1`).
 
 The subsystem also owns the run-level time-travel surface — `save_state`, `Runtime.load`, `fork`,
@@ -26,7 +26,7 @@ graph TD
     Graph["core.Graph<br/>event log + projection"]
     RT["Runtime<br/>runtime.py:387"]
     Q["EventQueue — FIFO deque<br/>queue.py:11"]
-    D["DelayedQueue + ScheduledEntry<br/>scheduler.py:55"]
+    D["DelayedQueue + ScheduledEntry<br/>scheduler.py:56"]
     REG["Registry.match<br/>registry.py:91"]
     BUD["Budget<br/>budget.py:37"]
     POL["classify_event_type<br/>event_policy.py:38"]
@@ -38,7 +38,7 @@ graph TD
     RR["ReadRecorder / TracedView<br/>context_reads.py:55 / 92"]
     BEH["Behavior / LLMBehavior / RelationBehavior"]
     EXT["LLMProvider / ToolInvoker / EmbeddingProvider"]
-    LIVE["_LIVE_RUNTIMES WeakSet<br/>_live.py:36"]
+    LIVE["_LIVE_RUNTIMES WeakSet<br/>_live.py:36-39"]
 
     Graph -->|"_on_event listener"| RT
     RT --> POL
@@ -82,13 +82,13 @@ while (queue or delayed) and budget_remaining:
     _fire_due_delayed()                                       # all three behavior kinds
 ```
 
-Entry points differ only in the `stop` predicate and whether they emit a terminal marker:
+Drain entry points differ in their `stop` predicate and terminal-marker behavior:
 
 | Entry point | `stop` predicate | emits idle / exhausted |
 |---|---|---|
 | `run_goal` | `lambda: False` (delegates to `run_until_idle`) | yes |
 | `run_until_idle` | `lambda: False` — `runtime.py:1494-1501` | idempotent idle/exhausted marker |
-| `run_until(pred)` | `lambda: pred(self.graph)` — `runtime.py:1557-1564` | idempotent idle/exhausted marker |
+| `run_until(pred)` | `lambda: pred(self.graph)` — `runtime.py:1557-1564` | always calls idle/exhausted emission, even on predicate stop |
 | `run_quantum` | tick-count OR wall deadline — `runtime.py:1503-1555` | only if actually idle or exhausted |
 
 ## Key types & entry points
@@ -114,7 +114,7 @@ Entry points differ only in the `stop` predicate and whether they emit a termina
 
 ### Data types owned here
 
-- `Context` and helpers — invocation state and sanctioned embedding/proposal access — `activegraph/runtime/runtime.py:188-269`. Only an LLM invocation receives the configured provider; plain/relation contexts retain `None`.
+- `Context` and helpers — invocation state and sanctioned embedding/proposal access — `activegraph/runtime/runtime.py:188-272`. Only an LLM invocation receives the configured provider; plain/relation contexts retain `None`.
 - `BehaviorFailure` — NamedTuple of `behavior, event_id, reason, exception_type, message, failed_event_id` — `activegraph/runtime/runtime.py:275-299`
 - `RunQuantumResult` — frozen dataclass; `elapsed_seconds` is deliberately never written to the log — `activegraph/runtime/runtime.py:301-316`
 
@@ -126,7 +126,7 @@ Entry points differ only in the `stop` predicate and whether they emit a termina
 - `InvalidActivateAfter(RegistrationError, ValueError)` — `activegraph/runtime/scheduler.py:118-151`
 - `BehaviorGraph` — the constrained mutation wrapper (`add_object`, `add_relation`, `patch_object`, `propose_patch`, `emit`, `get_object`, `get_relation`) plus `Counters` — `activegraph/runtime/behavior_graph.py:24-169`
 - `build_view(behavior, event, graph) -> View` — `activegraph/runtime/view_builder.py:16-52`; `DEFAULT_RECENT_EVENTS = 50` at `activegraph/runtime/view_builder.py:13`
-- `ReadRecorder`, `TracedView`, `context_read_payload`, `CONTEXT_READ_ID_CAP = 200` — `activegraph/runtime/context_reads.py:52-143`
+- `ReadRecorder`, `TracedView`, `context_read_payload`, `CONTEXT_READ_ID_CAP = 200` — `activegraph/runtime/context_reads.py:52-151`
 - `track_runtime` / `untrack_runtime` / `live_runtimes` / validation over a module-level `_LIVE_RUNTIMES: WeakSet` — `activegraph/runtime/_live.py:39-90`
 
 ## Interfaces & contracts at each seam
@@ -180,9 +180,10 @@ Contract notes:
   (`activegraph/runtime/runtime.py:1060-1079`).
 - `_tick` advances only on popped queue events, so policy-suppressed events never move the
   `activate_after` time axis (`activegraph/runtime/runtime.py:1703-1709`).
-- Constructor rollback removes the listener and any partially attached sinks and avoids live-set
-  registration (`activegraph/runtime/runtime.py:635-663`). It is not a transaction over earlier
-  store attachment or run-row creation.
+- `_attach_sink_configs` rolls back its own partial sink attachment (`runtime.py:646-663`), and the
+  outer constructor handler removes the listener on later failure (`:635-644`). This is not full
+  constructor rollback: failure in the initial metric snapshot occurs after live-set registration
+  and successful sink attachment, neither of which that outer handler undoes.
 - Snapshot materialization is fail-loud: a missing blob or hash mismatch raises
   `SnapshotIntegrityError` rather than silently producing wrong state
   (`activegraph/runtime/runtime.py:5031-5091`).
@@ -288,17 +289,21 @@ runtime-owned-abort ::= ReplayDivergenceError | PromptIdentityError
 Contract notes:
 
 - Behaviors never receive the raw `Graph` — only `BehaviorGraph`
-  (`activegraph/runtime/behavior_graph.py:1-8`). Provenance is stamped automatically and cannot be
-  forged by the behavior (`activegraph/runtime/behavior_graph.py:36-67`).
+  (`activegraph/runtime/behavior_graph.py:1-8`). Its public mutation methods stamp runtime-owned
+  provenance automatically (`activegraph/runtime/behavior_graph.py:36-67`); as usual in Python,
+  underscore internals are conventional rather than a security boundary.
 - Plain, LLM, and relation terminal/context event shapes are emitted at
   `activegraph/runtime/runtime.py:1857-1908,1968-2000,2549-2561,3021-3065,3202-3228`.
-- A behavior fires **once per event** regardless of how many pattern bindings matched; iterating
-  `ctx.matches` is the developer's job (`activegraph/runtime/runtime.py:197-205`).
+- A plain or LLM behavior fires **once per event** regardless of how many pattern bindings matched;
+  iterating `ctx.matches` is the developer's job. A `RelationBehavior` fires once per matching
+  `(event, relation)` pair (`activegraph/runtime/runtime.py:197-205`;
+  `activegraph/behaviors/base.py:78-110`).
 - Behavior failures are events, not exceptions: "Failures inside behaviors become `behavior.failed`
   events, not exceptions (CONTRACT v1.0 #4b) — read them from `errors`; exceptions surface only at
-  construction and entry points" (`activegraph/runtime/runtime.py:398-400`). Exactly one WARNING log
-  line is produced per failure because every failure routes through `_emit_behavior_failed`
-  (`activegraph/runtime/runtime.py:2969-2979`).
+  construction and entry points" (`activegraph/runtime/runtime.py:398-400`). Framework-generated
+  failures route through `_emit_behavior_failed` and produce one WARNING (`runtime.py:2919-2981`);
+  `BehaviorGraph.emit` can emit an arbitrary event type directly and is not routed through that
+  helper (`activegraph/runtime/behavior_graph.py:141-153`).
 - Runtime-owned replay/identity aborts escape translation: `ReplayDivergenceError` is re-raised in
   all three invocation paths (`activegraph/runtime/runtime.py:1867-1871,2529-2533,3031-3036`), and
   `PromptIdentityError` is re-raised before retry/translation (`:2250-2254`). Graph, store, and
@@ -514,8 +519,9 @@ Contract notes:
 - An input-schema validation failure still emits a *complete* `tool.requested` + `tool.responded`
   (error) pair before failing, so the trace never shows a request without a response
   (`activegraph/runtime/runtime.py:2592-2628`).
-- The `ToolContext` is built with `external_io_mode="runtime_recorded"` and a fresh
-  `idempotency_key=uuid4()` per call (`activegraph/runtime/runtime.py:2672-2680`).
+- On a live cache miss, `ToolContext` is built with `external_io_mode="runtime_recorded"` and a
+  fresh `idempotency_key=uuid4()`; cache hits do not construct a context
+  (`activegraph/runtime/runtime.py:2669-2680`).
 - A tool the LLM names must be declared on the behavior; an undeclared name fails the invocation
   rather than reaching the registry (`activegraph/runtime/runtime.py:2344-2359,2432-2457`).
 - The tool result is handed back to the turn loop through `self._last_tool_result_message`
@@ -604,21 +610,24 @@ drive a real runtime — the only non-`TYPE_CHECKING`, non-lazy import of `Runti
 `activegraph/__init__.py`.
 
 ```ebnf
-sink-api            ::= runtime.add_sink( sink | config ) "->" delegate( graph, metrics )
+sink-api            ::= runtime.add_sink( sink ) "->" delegate( graph, metrics )
                       | runtime.remove_sink( name )
                       | runtime.sink_statuses() "->" tuple[ SinkStatus, ... ]
                       | runtime.flush_sinks() | runtime.close_sinks()
 preflight           ::= graph._sink_names_in_use()          (* duplicate-name check, runtime.py:449-461 *)
 attach              ::= _attach_sink_configs( configs )
                         (* all-or-nothing: partial attachment is rolled back *)
-failure             ::= raise ... after rollback + graph._remove_listener(self._on_event)
+failure             ::= attachment-failure -> remove newly attached handles, then listener
+                      | later-construction-failure -> remove listener only
 ```
 
 Contract notes:
 
-- Sink attachment is atomic from the caller's view: partial attachment is rolled back
-  (`activegraph/runtime/runtime.py:646-663`), and a construction that fails during attachment removes
-  the graph listener before re-raising (`:635-644`).
+- `_attach_sink_configs` removes any handles it attached if a later attachment fails
+  (`activegraph/runtime/runtime.py:646-663`). Constructor/load/fork accept `SinkConfig`; public
+  `Runtime.add_sink` accepts an `EventSink` plus options (`:798-820`). A later initial-metrics
+  failure only removes the graph listener (`:635-644`), leaving successful sinks/live-set tracking
+  as a current cleanup gap.
 - `Graph.emit` offers to sinks *before* notifying listeners, so sink ordering is unaffected by
   behaviors re-entering `emit` (`activegraph/core/graph.py:584-625`).
 
@@ -730,8 +739,9 @@ cli-driver          ::= Runtime.load( path [, run_id ] )
                         rt.diff( other ) | rt.promote( fork, dry_run? )
 private-reach       ::= from activegraph.runtime.runtime import _now_iso  (* cli/main.py:609 *)
 
-sandbox-child       ::= Runtime.load( ... ) rt.run_until_idle()
-                        (* sandbox/_child.py:255-260 — the child process's whole job *)
+sandbox-child       ::= Runtime.load( ... )
+                        ( resolved-scenario(rt) | rt.run_until_idle() )
+                        (* sandbox/_child.py:255-272 *)
 sandbox-fork        ::= Runtime.load( store_path, run_id=parent_run_id, behaviors=[] )
                         parent_rt.fork( at_event=..., label=..., behaviors=[] )
                         (* sandbox/__init__.py:435,506 *)
@@ -875,7 +885,7 @@ bookkeeping and excluded from scheduling (`activegraph/runtime/event_policy.py:1
 the queue, which is what makes the loop converge. Current anchors are
 `activegraph/runtime/runtime.py:1468-1501,1697-1734,1910-2781,3189-3228`.
 
-## Open questions
+## Resolved findings from the 2026-08-11 audit
 
 1. **Resolved — `_inside_dispatch` was removed.** Current constructor state is
    `activegraph/runtime/runtime.py:449-644`; no live source path reads or writes that vestige.
@@ -911,6 +921,44 @@ the queue, which is what makes the loop converge. Current anchors are
 7. **Resolved boundary — core's reverse edge is lazy error imports.** The seven current sites are
    `activegraph/core/graph.py:133,547,811,915,919,972,1162-1191`; no runtime behavior/protocol is
    imported at core module initialization.
+
+## Current code-only concerns
+
+1. **A delayed-only queue can busy-spin.** `_loop` remains live while `_delayed` is non-empty, but
+   `_tick` advances only when `_queue` yields an event. If the next delayed entry is not due and no
+   main-queue event exists, `_fire_due_delayed` cannot make progress
+   (`activegraph/runtime/runtime.py:1697-1734`).
+
+2. **`run_until(predicate)` can record false idle.** Predicate stop returns from `_loop` with queued
+   work, then `run_until` unconditionally calls `_emit_idle_or_exhausted` (`runtime.py:1557-1564`).
+   Resume treats the last `runtime.idle` as a completed-drain high-water mark (`:4671-4697`), so
+   pending work before that marker can be lost after load.
+
+3. **Budget-gated fan-out contradicts the resume invariant.** An event is popped before its match
+   list is traversed, and exhaustion can break before later behaviors or relations start
+   (`runtime.py:1703-1728`). `_requeue_unfired` treats any started behavior for the event as proof
+   that all fan-out completed (`:4655-4659,4701-4714`), so later matches are not recoverable.
+
+4. **Cached tool failures replay through the success path.** `ToolCache.from_events` retains
+   recorded `error` payloads (`activegraph/tools/cache.py:123-150`), but `_invoke_tool` does not
+   inspect `cached_tool.error`; it validates/emits the cached output with `error: None`
+   (`activegraph/runtime/runtime.py:2630-2637,2669-2768`).
+
+5. **Two advertised budget dimensions are never consumed.** `Budget` exposes `max_patches` and
+   `max_depth` as hard limits (`activegraph/runtime/budget.py:19-48`), while runtime consumption
+   covers only events, behavior calls, LLM calls, tool calls, and cost.
+
+6. **Reserved event types are not protected at the behavior wrapper.** `BehaviorGraph.emit` accepts
+   any string (`activegraph/runtime/behavior_graph.py:141-153`), so a behavior can forge lifecycle
+   markers that status and resume logic interpret as runtime bookkeeping.
+
+7. **Pack-load commit is not rolled back if `pack.loaded` emission fails.** Runtime pack state,
+   registries, schemas, and validators mutate before the final graph emission
+   (`activegraph/packs/loader.py:257-318`).
+
+8. **Constructor cleanup is incomplete after post-attachment metric failure.** If
+   `_record_initial_metric_snapshot` raises, the handler removes the listener but does not remove
+   attached sinks or undo `track_runtime` (`activegraph/runtime/runtime.py:635-663`).
 
 **Performance observations (not correctness):**
 
