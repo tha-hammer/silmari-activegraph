@@ -372,7 +372,7 @@ sequenceDiagram
         RT->>RT: verify state_hash_of(blob), else SnapshotIntegrityError
         RT->>GS: put_object / put_relation from the blob, prime id counters
     end
-    loop remaining events
+    loop every log event, including the snapshot marker
         RT->>G: _replay_event(ev), silent - no persist, no sinks, no listeners
     end
     RT->>G: ids.reseed_from_events(events)
@@ -403,7 +403,8 @@ parent's resolved `sys.path`, never forwarded from ambient env.
 
 Materialization inside the child is **pin-first** and the order is load-bearing
 (`activegraph/sandbox/_child.py:120-169`): `verify_bundle_hash` **before any import**, then
-`load_manifest`, then import, then `verify_surface` two-way against the live `Pack`. Schema v2
+`load_manifest`, then import, then `verify_surface` two-way across the manifest-supported live
+surface (identity, types, behaviors, tools, settings, and capabilities). Schema v2
 requires an exact `sha256:` plus 64 lowercase hexadecimal pin for the candidate and every extra
 (`activegraph/sandbox/__init__.py:102-126`); the child verifies it unconditionally even when
 manifest checks are disabled (`activegraph/sandbox/_child.py:140-144`). The serialized-spec reader
@@ -426,6 +427,10 @@ after the child exits; the stdout tail supplies outcome/detail rather than autho
 (`:502-531`). On timeout the parent appends its own `trial.wall_clock_exhausted` marker
 (`:507-527`). Because `events_appended` is calculated after that append (`:528-530`), the timeout
 count includes this one parent-authored marker in addition to child-authored events.
+Materialization failures get the child's structured `materialization_failed` report, while
+exceptions from the later `Runtime.load` or `load_pack` calls occur outside the child's scenario
+classification block and are classified by the parent as `crashed` from the exit code and stderr
+tail (`activegraph/sandbox/_child.py:227-293`; `activegraph/sandbox/__init__.py:464-489`).
 
 Not verifiable from this repo: the orchestration *around* the trial — proposal, static gate, promote
 — lives in the out-of-repo `activegraph-packs` evolution pack. Nothing under `activegraph/` calls
@@ -460,9 +465,14 @@ sequenceDiagram
         CH->>CRT: Runtime.load(store_path, run_id=fork_run_id, behaviors=[], budget)
         Note over CRT: no llm_provider is configured, key-freedom is structural
         CH->>CRT: load_pack for each extra pack, then the candidate
-        CH->>CRT: scenario(rt) or run_until_idle()
-        CRT->>DB: appends events to the fork run only
-        CH-->>SB: one JSON report line on stdout, exit 0 / 30 / 40
+        alt Runtime.load or load_pack raises
+            CH-->>SB: exits without a report tail
+            SB->>SB: classify crashed and retain the stderr cause
+        else runtime and packs are ready
+            CH->>CRT: scenario(rt) or run_until_idle()
+            CRT->>DB: appends events to the fork run only
+            CH-->>SB: one JSON report line on stdout, exit 0 / 30 / 40
+        end
     end
 
     SB->>SB: classify outcome from timeout, tail, then exit code
@@ -480,8 +490,9 @@ sequenceDiagram
 ## 6. A fork is promoted into its parent
 
 `Runtime.promote(fork, *, dry_run=False)` (`activegraph/runtime/runtime.py:4110-4409`) is
-**fail-closed and atomic**: any conflict raises `PromoteConflictError` *before the first mutation*
-(`:4242-4249`), and there is no `force=` flag — the escape hatch is to re-fork
+**fail-closed before application**: any planned conflict raises `PromoteConflictError` *before
+the first mutation* (`:4242-4249`), and pack-schema validation also completes before the marker
+or delta is emitted (`:4251-4280`). There is no `force=` flag — the escape hatch is to re-fork
 (`activegraph/runtime/promote.py:14-17`).
 
 Preconditions are checked in a fixed order and lineage comes from the **store**, not from what the
