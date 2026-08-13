@@ -518,7 +518,7 @@ observe the delta events even though scheduling ignores them. Finally the id gen
 reseeded past the promoted ids so future mints cannot collide (`:4401-4403`).
 
 Pack code is never adopted — fork-only `pack.loaded` and `pack.settings_overridden` events surface
-as plan **warnings** only (`activegraph/runtime/promote.py:356-411`) — but the delta *is*
+as plan **warnings** only (`activegraph/runtime/promote.py:356-410`) — but the delta *is*
 revalidated against this runtime's pack schemas before it is applied
 (`activegraph/runtime/runtime.py:4251-4280`).
 
