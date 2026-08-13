@@ -23,13 +23,13 @@ sentences.
 
 | File | Lines | Registers on `Pack(...)` as | Role |
 |---|---|---|---|
-| `__init__.py` | 86 | the assembly point itself | Imports every other module's list/schema and builds the single `pack = Pack(...)` value (`__init__.py:59-83`) |
+| `__init__.py` | 86 | the assembly point itself | Imports the live component lists/schema, defines two policies, loads prompts, and builds the single `pack = Pack(...)` value (`__init__.py:45-83`) |
 | `object_types.py` | 169 | `object_types=`, `relation_types=` | 8 Pydantic schemas + 8 `ObjectType` wrappers, 7 `RelationType` wrappers |
 | `settings.py` | 60 | `settings_schema=` | One Pydantic `BaseModel`, `DiligenceSettings`, 8 fields, every field has a default |
 | `tools.py` | 124 | `tools=` | 3 `@tool`-decorated functions, each with its own input/output Pydantic schema |
-| `behaviors.py` | 449 | `behaviors=` | 7 `@behavior` / `@llm_behavior` functions plus their LLM-output Pydantic schemas |
+| `behaviors.py` | 449 | `behaviors=` | 7 functions: 3 plain `@behavior`s and 4 `@llm_behavior`s, plus the four LLM-output Pydantic schemas |
 | `prompts/*.md` (4 files) | 25–35 each | `prompts=` via `load_prompts_from_dir()` | One markdown file per LLM behavior, TOML frontmatter (`version = "1.0.0"`), matched to the behavior by filename |
-| `manifest.toml` | 39 | *checked against the Pack* | Declarative identity, dependencies, live surface, fixture resource, and normative content hash; shipped as wheel package data |
+| `manifest.toml` | 36 | *checked against the Pack* | Declarative identity, dependencies, live surface, fixture resource, and internal-consistency content hash; shipped as wheel package data |
 | `fixtures/companies.py` | 511 | *not registered on the Pack at all* | Raw fixture data: 3 companies × documents, filings, summaries, questions, findings, risks, memos |
 | `fixtures/__init__.py` | 365 | *not registered on the Pack at all* | `RecordedDiligenceProvider` (a scripted `LLMProvider`) + the three tool-lookup functions `tools.py` calls |
 
@@ -37,20 +37,21 @@ Two things worth stating up front because they're easy to assume wrongly:
 
 - **`manifest.toml` is the declarative counterpart to the live Pack.** Direct
   tests parse it, two-way check every schema-supported live surface, recompute
-  its content hash, and repeat those checks from an installed wheel. Policies
-  and prompts are not fields in the current manifest schema.
+  its content hash (`tests/test_diligence_pack.py:72-78`), and repeat those
+  checks from an installed wheel (`tests/test_wheel_completeness.py:101-126`).
+  Policies and prompts are not fields in the current manifest schema.
 - **`fixtures/` is not part of the `Pack` value at all.** It's plain Python
   that `tools.py`'s three functions import *at call time* (`tools.py:76`,
   `:96`, `:115` — `from activegraph.packs.diligence.fixtures import
   lookup_...`) and that the quickstart CLI imports *separately* to build a
   `RecordedDiligenceProvider` and hand it to `Runtime(llm_provider=...)`
-  (`cli/quickstart.py:76-79`, read earlier this session). A pack ships
+  (`cli/quickstart.py:75-79,104-113`). A pack ships
   fixtures beside itself by convention; the framework has no `fixtures=`
   field on `Pack`.
 
 ---
 
-## System map: six files → one `Pack` value
+## System map: five registered inputs → one `Pack` value
 
 ```mermaid
 flowchart TD
@@ -77,7 +78,7 @@ flowchart TD
 
     behaviors -.->|"imports Company/Claim/... schemas"| objtypes
     behaviors -.->|"typed param: settings: DiligenceSettings"| settings
-    behaviors -.->|"tools=[fetch_company_docs, ...]"| tools
+    behaviors -.->|"tools=[fetch_company_docs, summarize_document]"| tools
     tools -.->|"lookup_company_docs() etc, call-time only"| fixtures
 
     init ==>|"pack = Pack(name='diligence', version='0.1.0', ...)"| PACKOBJ(["<b>pack : Pack</b><br/>the single exported value"])
@@ -129,15 +130,20 @@ edge between two claims. The detector then emits exactly two
 `claim --has_contradiction--> contradiction` relations, using the two real
 claim IDs stored on the object. `Graph.neighborhood(claim_id, depth=1)` is
 therefore the supported discovery path from either claim to the aggregate.
+The diagram is the registered relation-type inventory and its allowed endpoint
+types; the Diligence handlers do not necessarily emit every registered type
+(`references` and `mitigates`, for example, are available schema surface but
+are not created by these seven handlers).
 
 ---
 
 ## The trigger cascade: how one goal becomes one memo
 
 This is the mechanical answer to Beat 2 point 2 ("reactive behaviors fired
-automatically... pattern-matched against event types and object shapes")
-— every arrow below is a `@behavior`/`@llm_behavior`'s `on=`/`where=`/
-`pattern=` declaration, not a call from one function to another.
+automatically... pattern-matched against event types and object shapes").
+Trigger arrows are `@behavior`/`@llm_behavior` `on=`/`where=`/`pattern=`
+subscriptions; arrows out of behavior nodes are mutations performed by the
+handler, not direct calls to another behavior.
 
 ```mermaid
 flowchart TD
@@ -146,14 +152,17 @@ flowchart TD
     cp -->|creates| companyobj(["object.created<br/>type=company"])
 
     companyobj -->|"on=object.created, where type=company<br/>behaviors.py:111-122"| qg["question_generator<br/>(@llm_behavior)"]
-    qg -->|"creates N questions<br/>(settings.min/max_questions)"| qobj(["object.created<br/>type=question × N"])
+    qg -->|"creates N questions<br/>(trims only above settings.max_questions;<br/>min_questions is a soft prompt floor)"| qobj(["object.created<br/>type=question × N"])
 
     qobj -->|"on=object.created, where type=question<br/>behaviors.py:145-160<br/>fires once PER question"| dr["document_researcher<br/>(@llm_behavior + tools)"]
-    dr -.->|"tool call"| t1["fetch_company_docs"]
-    dr -.->|"tool call"| t2["summarize_document"]
-    dr -->|creates| docobj(["object.created<br/>type=document"])
+    dr -.->|"exposed tool; fixture calls it"| t1["fetch_company_docs"]
+    dr -.->|"exposed tool; fixture calls it"| t2["summarize_document"]
+    dr -->|"creates if URL is new;<br/>otherwise reuses"| docobj(["object.created<br/>type=document"])
     dr -->|creates| claimobj(["object.created<br/>type=claim"])
     dr -->|creates, if evidence_quote present| evobj(["object.created<br/>type=evidence"])
+    dr -->|"every claim"| addressesedge(["relation.created<br/>type=addresses"])
+    dr -->|"every claim"| derivededge(["relation.created<br/>type=derived_from"])
+    dr -->|"immediately for each evidence"| supportsedge(["relation.created<br/>type=supports"])
     dr -->|"optional: contradicts edge<br/>if contradicts_claim_text matched"| contraedge(["relation.created<br/>type=contradicts"])
 
     evobj -->|"on=object.created, where type=evidence<br/>behaviors.py:238-260"| el["evidence_linker<br/>(plain @behavior, safety net)"]
@@ -163,34 +172,37 @@ flowchart TD
     cd -->|creates| contraobj(["object.created<br/>type=contradiction"])
     contraobj -->|"then creates exactly 2<br/>one per stored claim id"| hascontra(["relation.created × 2<br/>type=has_contradiction"])
 
-    claimobj -->|"on=object.created, where type=claim<br/>behaviors.py:305-322<br/>idempotent: one risk batch per company"| ri["risk_identifier<br/>(@llm_behavior)"]
-    ri -->|creates| riskobj(["object.created<br/>type=risk"])
+    claimobj -->|"on=object.created, where type=claim<br/>behaviors.py:307-324<br/>skips if a materialized or pending risk exists"| ri["risk_identifier<br/>(@llm_behavior)"]
+    ri -->|"adds, or proposes when auto approval is false"| riskobj(["object.created<br/>type=risk<br/>(a proposal emits approval.proposed instead)"])
 
-    riskobj -->|"on=object.created, where type=risk<br/>behaviors.py:371-388<br/>idempotent: one memo per company"| ms["memo_synthesizer<br/>(@llm_behavior)"]
-    ms -->|creates| memoobj(["object.created<br/>type=memo — terminal"])
+    riskobj -->|"on=object.created, where type=risk<br/>behaviors.py:373-390<br/>skips after a materialized memo exists"| ms["memo_synthesizer<br/>(@llm_behavior)"]
+    ms -->|"adds, or proposes when auto approval is false"| memoobj(["object.created<br/>type=memo — no pack behavior consumes it<br/>(a proposal emits approval.proposed instead)"])
 
     style memoobj fill:#f0fff0,stroke:#66aa66
     style goal fill:#f0f0ff,stroke:#6666cc
 ```
 
-Two mechanisms make this graph converge instead of looping or exploding,
-neither obvious from the diagram alone:
+Two runtime details are not obvious from the diagram alone:
 
-- **Idempotency by graph query, not by event count.** `risk_identifier`
-  fires on *every* `claim` creation but scans `ctx.view.objects(type=
-  "risk")` (plus `ctx._runtime.pending_approvals()`) and returns
-  immediately once a risk exists for the company (`behaviors.py:338-344`).
-  `memo_synthesizer` does the same for `memo` (`behaviors.py:399-404`).
-  Both fire many times per run and no-op after the first. The decorators carry
-  no `activate_after=` argument; the idempotent graph scan is what ships.
+- **Idempotency by state query, not by event count.** `risk_identifier` fires
+  on *every* `claim` creation but scans both materialized risks and
+  `ctx._runtime.pending_approvals()`, returning once either state contains a
+  risk for the company (`behaviors.py:337-346`). `memo_synthesizer` checks only
+  materialized memos (`behaviors.py:398-406`): that converges in the default
+  `auto_approve_memos=True` path, but pending memo proposals are not part of
+  its guard. Neither decorator carries `activate_after=`; these state scans
+  are what ship.
 - **`contradiction_detector` is the only pattern-subscription behavior in
   the pack** — it declares both `on=`/`where=` *and* `pattern=`
   (`behaviors.py:263-271`), so it fires on a `relation.created` event AND
   only when the Cypher-subset pattern (`(c1:claim)-[r:contradicts]->
   (c2:claim) WHERE c1.confidence > 0.7 AND c2.confidence > 0.7`) matches
-  the graph shape around it. Every other behavior in this pack uses plain
-  `on=`/`where=` — this is the pack's one worked example of the pattern
-  subscription mechanism `03-runtime-governance.md` documents abstractly.
+  the graph shape around it. The handler then also rejects either claim below
+  `settings.confidence_threshold_for_review` (`behaviors.py:285-289`), so the
+  effective gate is the hard-coded strict `> 0.7` pattern plus the configurable
+  floor. Every other behavior in this pack uses plain `on=`/`where=` — this is
+  the pack's one worked example of the pattern subscription mechanism
+  `03-runtime-governance.md` documents abstractly.
 
 ---
 
@@ -200,7 +212,7 @@ Generalized from the instance above, cross-checked against `07-packs.md`'s
 abstract format spec:
 
 ```ebnf
-pack-source        ::= "__init__.py"                 (* required, the assembly point *)
+pack-source        ::= "__init__.py"                 (* conventional assembly point exporting pack *)
                         [ "manifest.toml" ]           (* recommended declarative surface;
                                                           generated packs locate it explicitly *)
                         [ "object_types.py" ]         (* optional — a pack with no new
@@ -208,33 +220,39 @@ pack-source        ::= "__init__.py"                 (* required, the assembly p
                         [ "settings.py" ]              (* optional — omit for EmptySettings *)
                         [ "tools.py" ]                  (* optional — a pack can be pure
                                                             LLM/deterministic behaviors *)
-                        "behaviors.py"                (* the pack's actual reason to exist *)
-                        [ "prompts/*.md" ]              (* required 1:1 with every
-                                                            @llm_behavior, by filename *)
+                        [ "behaviors.py" ]              (* optional; Pack.behaviors defaults empty *)
+                        [ "prompts/*.md" ]              (* optional; a same-named PackPrompt
+                                                            augments an LLM behavior *)
                         [ "fixtures/" ]                (* convention, not a Pack field —
                                                             needed only for offline/CI demos *)
 
 assembly            ::= "pack" "=" "Pack" "("
-                          "name="            snake-case-name ","
-                          "version="         string ","
-                          "description="     string ","
-                          [ "object_types="  object-type-list "," ]
-                          [ "relation_types=" relation-type-list "," ]
-                          "behaviors="        behavior-list ","
-                          [ "tools="          tool-list "," ]
-                          [ "policies="       policy-list "," ]
-                          [ "prompts="        "load_prompts_from_dir(" prompts-dir ")" "," ]
-                          [ "settings_schema=" pydantic-model-class "," ]
-                          [ "manifest_path=" absolute-path ]
+                          "name="            canonical-pack-name     (* ^[a-z][a-z0-9_]{0,63}$ *)
+                          ","
+                          "version="         pep440-string
+                          { "," optional-pack-field }
+                          [ "," ]
                         ")"
 
-behavior-kind       ::= trigger-only            (* on= only, no LLM, seeds the graph —
+optional-pack-field ::= "description="       string
+                       | "object_types="      object-type-list
+                       | "relation_types="    relation-type-list
+                       | "behaviors="          behavior-list
+                       | "tools="              tool-list
+                       | "policies="           policy-list
+                       | "prompts="            "load_prompts_from_dir(" prompts-dir ")"
+                       | "settings_schema="    pydantic-model-class
+                       | "capabilities="       capability-list
+                       | "manifest_path="      absolute-pathlib-path
+
+diligence-pattern   ::= trigger-only            (* on= only, no LLM, seeds the graph —
                                                      diligence: company_planner *)
                        | llm-with-tools          (* @llm_behavior, tools=[...], multi-turn —
                                                      diligence: document_researcher *)
                        | llm-idempotent-gate     (* @llm_behavior, fires often, no-ops via
                                                      a graph-state check — diligence:
-                                                     risk_identifier, memo_synthesizer *)
+                                                     risk_identifier; memo_synthesizer after
+                                                     a memo is materialized *)
                        | deterministic-safety-net (* plain @behavior, idempotent edge repair —
                                                       diligence: evidence_linker *)
                        | pattern-subscription     (* on= + where= + pattern=, Cypher-subset —
@@ -244,18 +262,19 @@ settings-access     ::= typed-param              (* def fn(event, graph, ctx, *,
                                                      settings: PackSettings): ... — primary *)
                        | ctx-dot-settings         (* ctx.settings.field, same object *)
                        | ctx-pack-settings        (* ctx.pack_settings("other_pack") —
-                                                      cross-pack only *)
+                                                      cross-pack lookup; accepts any loaded pack *)
 
-prompt-binding      ::= filename "==" behavior-name  (* load_prompts_from_dir matches by
-                                                          stem; a behavior with no matching
-                                                          file gets no prompt body appended *)
+prompt-binding      ::= pack-prompt-name "==" behavior-name
+                       (* PackPrompt.name defaults to the filename stem, but TOML
+                          frontmatter may override it; an unmatched behavior gets no
+                          prompt body appended to its decorator description *)
 
 fixture-pattern     ::= scripted-provider "keys off" behavior-name
                        ( extracted-from : "system prompt's"
                          '`behavior named "<name>"`' line )
                        "+" per-entity-canned-payload
                        (* diligence: RecordedDiligenceProvider,
-                          fixtures/__init__.py:56-146 *)
+                          fixtures/__init__.py:56-162 *)
 ```
 
 ---
@@ -267,41 +286,63 @@ pack for the orchestrator/worker proposal in `13-orchestrator-worker-
 proposal.md` — stated as direct consequences of the anatomy above, not as
 new claims:
 
-1. **A pack needs no LLM at all to be valid.** `company_planner` and
-   `evidence_linker` are plain `@behavior`s with zero LLM involvement;
-   this session's own iteration-2 experiment (`judge_evidence` behavior)
-   is exactly this shape. A pack can be 100% `trigger-only` +
-   `deterministic-safety-net` behaviors.
+1. **A pack needs no LLM at all to be valid.** `company_planner`,
+   `evidence_linker`, and `contradiction_detector` are plain `@behavior`s with
+   zero LLM involvement. A pack can be 100% deterministic behaviors.
 2. **Idempotent-scan is the pack's answer to "don't repeat this
    downstream side effect,"** not event deduplication or
-   `activate_after` scheduling — `risk_identifier`/`memo_synthesizer`
-   both just query the graph before acting. Worth copying directly for
-   any behavior that should fire "once per worker" rather than once per
-   triggering event.
-3. **Prompts are optional per behavior, not per pack** — the four
-   `@llm_behavior`s have a matching `prompts/*.md`; `company_planner`,
-   `evidence_linker`, and `contradiction_detector` have none, because
-   `load_prompts_from_dir` only
-   supplies a body, it doesn't require one per behavior.
+   `activate_after` scheduling. Copy the complete `risk_identifier` shape —
+   query both materialized and pending state — when approvals are possible.
+   `memo_synthesizer`'s materialized-only check is sufficient for its default
+   auto-approved path, not a general pending-approval-safe template.
+3. **Prompts are optional, including for LLM behaviors.** Diligence's four
+   `@llm_behavior`s each have a matching `prompts/*.md`; `company_planner`,
+   `evidence_linker`, and `contradiction_detector` have none. The loader
+   appends a same-named `PackPrompt` body when one exists and does not require
+   a prompt for every behavior.
 4. **Fixtures are a convention that lives beside a pack, not inside its
    registered surface** — a future worker pack that wants to run
-   deterministically offline (as this session's judge-behavior
-   experiments already do, just without formalizing it as a `fixtures/`
-   directory) should follow the same shape: a scripted provider module,
-   imported by tools/demo code at call time, never listed on `Pack(...)`.
-5. **A pack with zero `object_types=`/`relation_types=`/`tools=`/
-   `policies=`/`prompts=`/`settings_schema=` is legal** — diligence
-   happens to use all six optional fields, but `07-packs.md`'s grammar
-   marks every one of them optional except `name=`/`version=`/
-   `behaviors=`. A minimal worker-observability pack could be behaviors
-   and object types only.
+   deterministically offline can follow the same shape: a scripted provider
+   module imported by tools/demo code, never listed on `Pack(...)`.
+5. **Only `Pack.name` and `Pack.version` are required.** `description`, all
+   registered surface sequences (including `behaviors`), `settings_schema`,
+   `capabilities`, and `manifest_path` have defaults
+   (`activegraph/packs/__init__.py:580-605`). Diligence populates every live
+   surface it needs, while a minimal pack can legally be just
+   `Pack(name="...", version="...")`.
 
-## Open questions
+## Historical findings — resolved
 
-1. **Contradiction traversal is now explicit.** The former open question is
-   resolved by `has_contradiction`: exactly two claim-to-aggregate edges make
-   the review item discoverable from either claim without assigning A/B roles.
-2. **Manifest schema scope is narrower than Pack scope.** Diligence's manifest
-   declares all schema-supported live surfaces and its fixture resource, but
-   prompts and policies remain outside the current schema and are verified by
-   their dedicated loaders/tests instead.
+1. **14.1 (`activate_after=8`) is resolved.** The stale roster entry was in
+   `diligence/__init__.py`, not `behaviors.py`; it now describes
+   `risk_identifier` as an idempotent graph scan (`__init__.py:12-15`), matching
+   the decorator and handler at `behaviors.py:307-346`.
+2. **14.2 (missing manifest) is resolved.** `manifest.toml` now declares the
+   Diligence identity, surface, fixtures, and content hash. Source-tree and
+   installed-wheel tests verify its surface and bytes.
+3. **14.3 (unreachable contradiction aggregates) is resolved.** The
+   `has_contradiction` relation type and detector's two emitted edges make each
+   aggregate reachable from both claims; `tests/test_diligence_pack.py:158-241`
+   checks inventory, endpoints, exact edge count, and depth-one traversal.
+
+## Current boundaries
+
+- **Manifest schema scope remains narrower than Pack scope.** Diligence's
+  manifest declares every schema-supported live surface plus its fixture
+  resource. Prompts and policies are Pack fields but have no manifest fields;
+  prompt loading/hashing and policy registration follow their separate Pack
+  and loader paths.
+- **Approval-safe idempotency is asymmetric.** Risk generation checks pending
+  approvals; memo generation does not. With `auto_approve_memos=False`, a
+  second risk can therefore lead to another pending memo proposal before the
+  first proposal is approved.
+- **The pack's own prose disagrees on the LLM count.** The live `BEHAVIORS`
+  list has four `LLMBehavior`s. `manifest.toml:4` says four, but
+  `__init__.py:64-65` says three and `behaviors.py:3-5` says only two behaviors
+  are deterministic and all five others are LLM-backed (incorrectly counting
+  plain `company_planner`).
+- **Two advertised settings are currently inert.** `llm_model` and
+  `max_documents_per_company` are defined in `settings.py:24-31` and supplied
+  by the quickstart, but no Diligence handler reads either. LLM behaviors leave
+  `model=None` for runtime/provider default resolution, while the recorded
+  research provider requests three documents directly.
