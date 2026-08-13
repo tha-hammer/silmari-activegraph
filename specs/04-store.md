@@ -12,27 +12,29 @@ in `core/` and re-exported here (`activegraph/store/__init__.py:14`), so `store/
 import surface for both.
 
 The package also owns the connection-URL grammar (`url.py`), the JSON wire format for event
-payloads (`serde.py`), two reusable pytest conformance suites that *are* the written storage
-contract (`conformance.py`, `graph_conformance.py`), and the offline compaction/retention policy
-(`retention.py`). The `EventStore` protocol is intentionally tiny — "append, iterate, count,
-lookup, truncate-after. No queries, no indexes beyond what the backend ships. This is an event
-log, not a database" (`activegraph/store/base.py:7-9`).
+payloads (`serde.py`), the separate administrative migration-provider seam (`migration.py`), two
+reusable pytest conformance suites that *are* the written storage contract (`conformance.py`,
+`graph_conformance.py`), and the offline compaction/retention policy (`retention.py`). The
+`EventStore` protocol is intentionally tiny — "append, iterate, count, lookup, truncate-after. No
+queries, no indexes beyond what the backend ships. This is an event log, not a database"
+(`activegraph/store/base.py:7-9`). Multi-run migration does not widen that hot-path protocol; it
+uses `MigrationBackend` and `MigrationBackendProvider` (`activegraph/store/migration.py:1-68`).
 
 ## Component map
 
 ```mermaid
 graph TD
     subgraph consumers["callers outside store/"]
-        Graph["core.Graph<br/>core/graph.py:519"]
-        Runtime["runtime.Runtime<br/>runtime/runtime.py:341"]
+        Graph["core.Graph<br/>core/graph.py:152"]
+        Runtime["runtime.Runtime<br/>runtime/runtime.py:387"]
     end
 
     subgraph log["EventStore side — the durable log"]
         Base["EventStore Protocol<br/>store/base.py:45"]
         Mem["InMemoryEventStore<br/>store/memory.py:43"]
-        SQL["SQLiteEventStore<br/>store/sqlite.py:201"]
-        PG["PostgresEventStore<br/>store/postgres.py:316"]
-        Conf["EventStoreConformance<br/>store/conformance.py:25"]
+        SQL["SQLiteEventStore<br/>store/sqlite.py:319"]
+        PG["PostgresEventStore<br/>store/postgres.py:430"]
+        Conf["EventStoreConformance + fork atomicity<br/>store/conformance.py:26 / 217"]
     end
 
     subgraph proj["GraphStore side — the projection"]
@@ -45,6 +47,7 @@ graph TD
     subgraph xcut["cross-cutting"]
         URL["url.py<br/>parse_store_url / open_store"]
         Serde["serde.py<br/>encode / decode / validate"]
+        Mig["migration.py<br/>provider registry + migrate"]
         Ret["retention.py<br/>pins / compact / retire"]
     end
 
@@ -62,6 +65,8 @@ graph TD
     URL -->|constructs| SQL
     URL -->|constructs| PG
     Base -->|payload codec| Serde
+    Mig -->|built-in provider| SQL
+    Mig -->|built-in provider| PG
     Ret -->|SQLite only| SQL
     Ret -.->|"lazy import: Runtime.load"| Runtime
 ```
@@ -70,19 +75,22 @@ graph TD
 
 ### EventStore side (the durable log)
 
-- `EventStore` — `typing.Protocol`, six methods plus a `run_id` attribute; the seam everything
-  codes against — `activegraph/store/base.py:45-73`
+- `EventStore` — `typing.Protocol`, six methods plus a `run_id` attribute; the seam ordinary
+  runtime persistence codes against — `activegraph/store/base.py:45-79`
 - `RunRecord` — dataclass, the canonical `runs`-table row (fork lineage, label, goal, frame) —
-  `activegraph/store/base.py:26-42`
-- `replay_into(graph, events) -> int` — module-level replay helper — `activegraph/store/base.py:76-86`
-  (see Open questions #1: no in-package callers)
-- `InMemoryEventStore` — volatile list+dict reference implementation — `activegraph/store/memory.py:43-128`
-- `SQLiteEventStore` — durable single-file; the only backend with compaction and fork primitives —
-  `activegraph/store/sqlite.py:201-599`
+  `activegraph/store/base.py:27-42`
+- `replay_into(graph, events) -> int` — public module-level replay helper; its docstring accurately
+  notes that `Runtime.load` and `Runtime.fork` do not call it — `activegraph/store/base.py:82-92`
+- `InMemoryEventStore` — volatile list+dict reference implementation — `activegraph/store/memory.py:43-107`
+- `SQLiteEventStore` — durable single-file; the only backend with snapshot/archive compaction, and
+  one of two backends with an atomic `fork_run` primitive —
+  `activegraph/store/sqlite.py:319-727`
 - `PostgresEventStore` — shared-state multi-process; optional `psycopg>=3.1,<4` dependency —
-  `activegraph/store/postgres.py:316-609`
+  `activegraph/store/postgres.py:430-727`
 - `EventStoreConformance` — reusable pytest ABC pinning EventStore semantics —
-  `activegraph/store/conformance.py:25-161`
+  `activegraph/store/conformance.py:26-214`
+- `ForkRunAtomicityConformance` — reusable durable-backend suite pinning rollback and complete-prefix
+  commit semantics — `activegraph/store/conformance.py:217-336`
 
 ### GraphStore side (the projection)
 
@@ -90,34 +98,40 @@ graph TD
   `activegraph/core/graph_store.py:58-291`, re-exported at `activegraph/store/__init__.py:14`
 - `ChainMatch` — frozen dataclass `(objects, relations)` for pattern pushdown —
   `activegraph/core/graph_store.py:43-55`
-- `InMemoryGraphStore` — dict-backed default; returns live instances **without copying** so the
-  projector's in-place mutation still works — `activegraph/core/graph_store.py:294-357`
+- `InMemoryGraphStore` — dict-backed default; returns live instances **without copying**, unlike
+  external stores that reconstruct values — `activegraph/core/graph_store.py:294-356`
 - `FalkorDBGraphStore` — Cypher-backed; overrides all 5 query hooks to push down —
-  `activegraph/store/falkordb.py:141-648`
+  `activegraph/store/falkordb.py:168-679`
 - `GraphStoreConformance` — reusable pytest ABC pinning GraphStore semantics —
   `activegraph/store/graph_conformance.py:22-491`
 
 ### Cross-cutting
 
 - `parse_store_url(url) -> StoreURL` — `activegraph/store/url.py:87`
-- `open_store(url, run_id) -> EventStore` — `activegraph/store/url.py:207`
+- `open_store(url, run_id) -> EventStore` — `activegraph/store/url.py:209`
 - `encode_payload` / `decode_payload` / `encode_event` / `decode_event` / `validate_event` —
   `activegraph/store/serde.py:51,116,175,188,201`
 - `compact` / `retire` / `pins` / `verify_snapshot` / `state_hash_of` —
   `activegraph/store/retention.py:253,312,179,337,174`
+- `MigrationBackend` / `MigrationBackendProvider` — capability protocols separate from `EventStore`
+  — `activegraph/store/migration.py:44-68`
+- `register_migration_backend` / `resolve_migration_backend` / `migrate` — explicit registration,
+  entry-point discovery, capability gating, and per-run copy —
+  `activegraph/store/migration.py:176-201,268-316,363-417`
 - Error leaves: `SchemaVersionMismatch`, `EventNotFoundError` (+`KeyError`), `DuplicateEventError`
-  (+`ValueError`), `CorruptedEventPayloadError` — `activegraph/store/errors.py:27,41,53,66`; plus
+  (+`ValueError`), `CorruptedEventPayloadError`, and five migration-provider leaves —
+  `activegraph/store/errors.py:36-259`; plus
   `NonSerializableEventError` (+`TypeError`) at `activegraph/store/serde.py:26` and
   `InvalidStoreURL` (+`ValueError`) at `activegraph/store/url.py:42`. All descend from
   `activegraph.errors.StorageError` (`activegraph/errors.py:179`).
 
 ### Public re-export surface
 
-`activegraph/__init__.py:81-97` re-exports `EventStore`, `GraphStore`, `InMemoryEventStore`,
-`InMemoryGraphStore`, `SQLiteEventStore`, `FalkorDBGraphStore`, `RunRecord`, `open_store`,
-`parse_store_url`, and all four `store.errors` leaves. **`PostgresEventStore` is not re-exported**
-at either level — it is absent from `activegraph/store/__init__.py:28-46`'s `__all__` and reachable
-only as `from activegraph.store.postgres import PostgresEventStore`.
+`activegraph/__init__.py:87-120` re-exports the ordinary store surface plus the migration protocols,
+reports, registration/resolution functions, and typed migration errors. **`PostgresEventStore` is
+still not re-exported** at either level — it is absent from
+`activegraph/store/__init__.py:47-82`'s `__all__` and reachable only as
+`from activegraph.store.postgres import PostgresEventStore`.
 
 ## Interfaces & contracts at each seam
 
@@ -125,11 +139,13 @@ only as `from activegraph.store.postgres import PostgresEventStore`.
 
 `core.graph.Graph` is the only writer on the hot path. A graph accepts at most one store for its
 whole lifetime: `Graph.attach_store` is idempotent on the *same* store and raises
-`IncompatibleRuntimeState` when handed a different one (`activegraph/core/graph.py:519-556`).
-`Graph.emit` is the sole caller of `store.append` (`activegraph/core/graph.py:564-576`), and its
-step order is contractual. The `EventStore` type import is `TYPE_CHECKING`-only
+`IncompatibleRuntimeState` when handed a different one (`activegraph/core/graph.py:539-576`).
+`Graph.emit` is the sole live hot-path caller of `store.append`
+(`activegraph/core/graph.py:584-596`); `Runtime.save_state` also uses `append` to copy detached
+in-memory history into a newly attached store (`activegraph/runtime/runtime.py:3732-3741`). The
+emit step order is contractual. The `EventStore` type import is `TYPE_CHECKING`-only
 (`activegraph/core/graph.py:42`); the runtime import of `validate_event` is function-local
-(`activegraph/core/graph.py:570`), so `core` never imports `store` at module scope.
+(`activegraph/core/graph.py:590`), so `core` never imports `store` at module scope.
 
 ```ebnf
 store-attach   ::= graph.attach_store( event-store ) -> None
@@ -140,15 +156,14 @@ event-store    ::= { run_id : run-id ,
                      truncate_after, close }
 
 append         ::= store.append( event ) -> None
-                 | !! DuplicateEventError             (* in-memory only *)
-                 | !! sqlite3.IntegrityError          (* sqlite, unwrapped *)
-                 | !! psycopg.errors.UniqueViolation  (* postgres, unwrapped *)
+                 | !! DuplicateEventError             (* every backend *)
 
 iter_events    ::= store.iter_events( [after], [until] ) -> Iterator<event>
                    (* after: EXCLUSIVE ; until: INCLUSIVE ; order = seq *)
                  | !! EventNotFoundError              (* after/until names unknown id *)
 
-get_event      ::= store.get_event( event-id ) -> event | None   (* never raises *)
+get_event      ::= store.get_event( event-id ) -> event | None
+                   (* unknown id -> None; decode/driver failures may still raise *)
 count          ::= store.count() -> int                          (* this run only *)
 truncate_after ::= store.truncate_after( event-id ) -> None
                  | !! EventNotFoundError
@@ -160,26 +175,27 @@ emit-path      ::= validate_event(event)
                    -> store.append(event)
                    -> sink._offer(event, delivery-context)
                    -> listeners
-                   (* activegraph/core/graph.py:564-596 *)
+                   (* activegraph/core/graph.py:584-625 *)
 
 event          ::= { id, type, payload, actor, frame_id, caused_by, timestamp }
 ```
 
-**Contract notes.** The conformance suite (`activegraph/store/conformance.py:25-161`) is the
+**Contract notes.** The ordinary conformance suite (`activegraph/store/conformance.py:26-214`) is the
 normative statement of this seam; every backend subclasses it
 (`tests/test_store_conformance.py:19,26`, `tests/test_postgres_store.py:26`):
 
 | Invariant | Test | Line |
 |---|---|---|
-| Iteration returns events in **append order**, not timestamp order | `test_append_then_iter_in_order` | `conformance.py:66-74` |
-| `count()` is 0 on a fresh store and tracks appends | `test_count` | `conformance.py:76-84` |
-| `get_event(unknown)` returns **`None`**, does not raise | `test_get_event_known_and_unknown` | `conformance.py:86-95` |
-| `iter_events(after=X)` is **exclusive** of X | `test_iter_after_skips_inclusive_boundary` | `conformance.py:97-105` |
-| `iter_events(until=Y)` is **inclusive** of Y | `test_iter_until_includes_boundary` | `conformance.py:107-115` |
-| `truncate_after(X)` keeps X, drops everything after | `test_truncate_after_drops_tail` | `conformance.py:117-126` |
-| Payloads round-trip nested dicts/lists, unicode, empty lists, `None` byte-identically | `test_payload_round_trip_preserves_structure` | `conformance.py:128-142` |
-| A duplicate event id in the same run raises **something** (deliberately untyped `pytest.raises(Exception)`) | `test_duplicate_id_in_same_run_is_rejected` | `conformance.py:144-151` |
-| `close()` is idempotent | `test_close_is_idempotent` | `conformance.py:153-161` |
+| Iteration returns events in **append order**, not timestamp order | `test_append_then_iter_in_order` | `conformance.py:79-87` |
+| `count()` is 0 on a fresh store and tracks appends | `test_count` | `conformance.py:89-97` |
+| `get_event(unknown)` returns **`None`**, does not raise | `test_get_event_known_and_unknown` | `conformance.py:99-108` |
+| `iter_events(after=X)` is **exclusive** of X | `test_iter_after_skips_inclusive_boundary` | `conformance.py:110-118` |
+| `iter_events(until=Y)` is **inclusive** of Y | `test_iter_until_includes_boundary` | `conformance.py:120-128` |
+| `truncate_after(X)` keeps X, drops everything after | `test_truncate_after_drops_tail` | `conformance.py:130-139` |
+| Payloads round-trip nested dicts/lists, unicode, empty lists, `None` by structural equality | `test_payload_round_trip_preserves_structure` | `conformance.py:141-155` |
+| A same-run duplicate raises `DuplicateEventError`, preserves the original row/count, and names the backend | `test_duplicate_id_in_same_run_is_rejected` | `conformance.py:157-181` |
+| The same logical event id is allowed in two runs | `test_same_event_id_is_allowed_in_distinct_runs` | `conformance.py:183-204` |
+| `close()` is idempotent | `test_close_is_idempotent` | `conformance.py:206-214` |
 
 Structural invariants beyond the suite:
 
@@ -191,27 +207,32 @@ Structural invariants beyond the suite:
   (`activegraph/store/sqlite.py:31-36`, `activegraph/store/postgres.py:5-7`).
 - **`seq` (AUTOINCREMENT / BIGSERIAL) is the ordering authority, not `timestamp`** — "wall clocks
   can lie; AUTOINCREMENT cannot" (`activegraph/store/sqlite.py:28-29`). Every `iter_events` sorts
-  `ORDER BY seq` (`activegraph/store/sqlite.py:256`, `activegraph/store/postgres.py:363`).
-- Fork **copies rows, never shares them** (CONTRACT v0.5 #11) — `activegraph/store/sqlite.py:476-477`,
-  `activegraph/store/postgres.py:532`.
+  `ORDER BY seq` (`activegraph/store/sqlite.py:379`, `activegraph/store/postgres.py:477-480`).
+- Fork **copies rows, never shares them** (CONTRACT v0.5 #11), and destination metadata plus the
+  complete prefix commit atomically — `activegraph/store/sqlite.py:589-727`,
+  `activegraph/store/postgres.py:639-727`; rollback/success parity is pinned by
+  `ForkRunAtomicityConformance` (`activegraph/store/conformance.py:217-336`).
 - The log is the source of truth; **the graph projection is never stored in the EventStore**
   (`activegraph/store/base.py:53-54`).
 - Storage failures **raise rather than emit**: "a store that can't be trusted can't record its own
   failure" (`activegraph/errors.py:186-187`).
-- Duplicate-append is **not portable across backends today** — see Open questions #2.
+- Duplicate-append is portable: all three backends raise the same `DuplicateEventError` with
+  `{event_id, run_id, backend}` context (`activegraph/store/errors.py:62-100`).
 
 Transactionality differs per backend and is part of the contract:
 
 - **SQLite** opens with `isolation_level=None`, i.e. autocommit — every `append` is its own
-  transaction (`activegraph/store/sqlite.py:227`). WAL and `synchronous=NORMAL` are set on every
+  transaction (`activegraph/store/sqlite.py:345,351-364`). WAL and `synchronous=NORMAL` are set on every
   open (`activegraph/store/sqlite.py:122-127`): crash-safe against process crash, may lose the last
-  committed transactions on OS crash, never corrupts. The only explicit transaction is
-  `archive_prefix`'s `BEGIN IMMEDIATE … COMMIT/ROLLBACK` (`activegraph/store/sqlite.py:388-407`).
+  committed transactions on OS crash, never corrupts. `archive_prefix` and `fork_run` use explicit
+  `BEGIN IMMEDIATE … COMMIT/ROLLBACK` transactions (`activegraph/store/sqlite.py:507-531,589-727`).
 - **Postgres** routes through `_ConnectionSource`, supporting three ownership shapes — URL (store
   owns the connection), borrowed `psycopg.Connection`, or `ConnectionPool` with getconn/putconn per
-  operation (`activegraph/store/postgres.py:82-163`). Per-operation cursors run `autocommit=True`
-  (`activegraph/store/postgres.py:179`); `_TxCtx` flips autocommit off for a real transaction and
-  restores it after (`activegraph/store/postgres.py:194-229`).
+  operation (`activegraph/store/postgres.py:84-173`). URL-owned connections open with
+  `autocommit=True`, and pool checkouts are temporarily forced to autocommit for ordinary
+  operations; borrowed connections retain their caller-selected mode
+  (`activegraph/store/postgres.py:100-109,176-203`). `_TxCtx` temporarily disables and restores
+  autocommit for a real transaction (`activegraph/store/postgres.py:205-240`).
 
 ### store <-> core (projection: `Graph` -> `GraphStore`)
 
@@ -261,7 +282,7 @@ relation      ::= { id, source, target, type, data, provenance }
 **Contract notes** (pinned by `activegraph/store/graph_conformance.py`):
 
 - `put_*` is an **upsert**; `get_*` returns `None` for an unknown id; `remove_*` on an unknown id is
-  a **no-op, not an error** (`activegraph/core/graph_store.py:62-66`, pinned at
+  a **no-op, not an error** (`activegraph/core/graph_store.py:61-65`, pinned at
   `graph_conformance.py:111-120`).
 - The 5 query hooks ship working Python defaults, so **the base class is the single source of truth
   for their semantics**; an override "MUST return exactly what the default would"
@@ -277,10 +298,10 @@ relation      ::= { id, source, target, type, data, provenance }
   relationship-isomorphism" (`graph_conformance.py:438-454`; semantics at
   `activegraph/core/graph_store.py:219-223`).
 - **Identity semantics are backend-dependent.** `InMemoryGraphStore` returns live instances without
-  copying, so the projector's in-place mutations (`obj.data.update(...)`, `obj.version += 1`) behave
-  exactly as pre-v1.2 (`activegraph/core/graph_store.py:298-302`). `FalkorDBGraphStore` necessarily
-  cannot — it reconstructs `Object`/`Relation` from Cypher rows on every read. Projector code that
-  relies on identity-mutation is not portable.
+  copying (`activegraph/core/graph_store.py:294-302`); `FalkorDBGraphStore` reconstructs
+  `Object`/`Relation` values from Cypher rows. The projector is portable across both because it
+  writes each mutated object or patch back through `put_object` / `put_patch`
+  (`activegraph/core/graph.py:1085-1103`), but external callers must not assume object identity.
 
 FalkorDB-specific invariants:
 
@@ -295,36 +316,41 @@ FalkorDB-specific invariants:
   no label churn (`activegraph/store/falkordb.py:47-49`).
 - `remove_object` **demotes to placeholder rather than deleting**, keeping edges alive long enough
   for the projector's cascade to enumerate them; the node is deleted only at degree 0
-  (`activegraph/store/falkordb.py:268-286`).
+  (`activegraph/store/falkordb.py:300-318`).
 - **Security invariant:** relations use a fixed relationship type so every value crosses the Cypher
   boundary as a bound `$param` (`activegraph/store/falkordb.py:59-61`). The only spliced tokens are
-  a validated `int` hop count in `neighborhood` (`activegraph/store/falkordb.py:466-467`) and
+  a validated `int` hop count in `neighborhood` (`activegraph/store/falkordb.py:510-511`) and
   generated names `n0/r0…` plus arrow directions drawn from the closed set `{"right","left"}` in
-  `match_chain` (`activegraph/store/falkordb.py:528-530`). Neither splice accepts caller text.
+  `match_chain` (`activegraph/store/falkordb.py:578-583`). Neither splice accepts caller text.
 - Connection resolution order: explicit `graph=` -> `url=`/`host=` -> `FALKORDB_URL` /
-  `FALKORDB_HOST` env -> embedded `falkordblite` (`activegraph/store/falkordb.py:105-138,164-166`).
+  `FALKORDB_HOST` env -> embedded `falkordblite` (`activegraph/store/falkordb.py:105-138,200-246`).
+- Index creation suppresses only the verified FalkorDB duplicate-index `ResponseError`; auth,
+  syntax, and connection failures propagate, and owned connections close on constructor failure
+  (`activegraph/store/falkordb.py:141-165,213-263`).
 
 ### store <-> runtime (lifecycle, fork, load, promote, compaction)
 
-`runtime.Runtime` owns store lifecycle. It opens or accepts a store at construction, replays on
-`load`, and drives the SQLite-only fork/promote/compaction primitives. The reverse direction exists
+`runtime.Runtime` coordinates store opening/attachment and run-level replay, save, fork, and
+promote, but `Runtime.close()` deliberately closes only sinks and leaves stores/listeners open
+(`activegraph/runtime/runtime.py:717-725`). Retention owns and drives compaction, using
+`Runtime.load` to rebuild projection state. The reverse direction exists
 but is narrow: exactly two function-local imports from `store/` into `runtime/` — no module-scope
-`store -> runtime` import exists anywhere (`activegraph/store/postgres.py:109` for
+`store -> runtime` import exists anywhere (`activegraph/store/postgres.py:111` for
 `InvalidArgumentType`, `activegraph/store/retention.py:273` for `Runtime.load`).
 
 ```ebnf
 (* Persistent-backend extras. NOT on the EventStore protocol — reached by duck-typing or
    isinstance. Runtime._open_sqlite_store is typed Any precisely because of this:
-   activegraph/runtime/runtime.py:4084-4086 *)
+   activegraph/runtime/runtime.py:4628-4633 *)
 
 runtime-init      ::= Runtime( … , persist_to = path-or-url )
                     | Runtime( … , store = event-store )
-                      (* mutually exclusive; both -> config error, runtime.py:476-504 *)
+                      (* mutually exclusive; both -> config error, runtime.py:562-590 *)
                       -> _open_sqlite_store -> store.upsert_run(…) -> graph.attach_store(store)
 
 open-dispatch     ::= _open_sqlite_store( path-or-url , run-id )
                       (* bare path      => SQLiteEventStore
-                         contains "://" => store.open_store       runtime.py:4081-4098 *)
+                         contains "://" => store.open_store       runtime.py:4628-4645 *)
 
 run-metadata      ::= store.get_run() -> run-record | None
                     | store.upsert_run( created_at ,
@@ -381,31 +407,32 @@ load-with-snapshot::= Runtime.load(…) sees events[0].type == "runtime.snapshot
                       -> store.get_snapshot( state_hash )
                       -> assert state_hash_of(blob) == recorded
                       -> project objects/relations, prime id counters
-                      -> replay the post-snapshot suffix
-                      (* runtime.py:3311-3318, 4489-4549 *)
+                      -> replay the complete hot log (snapshot marker is a projection no-op)
+                      (* runtime.py:3806-3817, 5031-5091 *)
 ```
 
 **Contract notes.**
 
 - `_most_recent_run_id` dispatches backend-aware through `parse_store_url` to
   `PostgresEventStore.most_recent_run_id` / `SQLiteEventStore.most_recent_run_id`
-  (`activegraph/runtime/runtime.py:4063-4078`).
-- `Runtime.load(path, run_id=…, graph_store=…)` (`activegraph/runtime/runtime.py:3308-3361`,
-  signature at `:3271`): open store -> `iter_events()` -> optional `_materialize_snapshot` ->
+  (`activegraph/runtime/runtime.py:4610-4625`).
+- `Runtime.load(path, run_id=…, graph_store=…)` (`activegraph/runtime/runtime.py:3745-3903`):
+  open store -> `iter_events()` -> optional `_materialize_snapshot` ->
   replay -> `reseed_from_events` -> `attach_store` -> `upsert_run(created_at=…)`. The `graph_store`
-  argument is threaded into `Graph(..., graph_store=...)` (`:3309`) and likewise on `fork`
-  (`:3409`, `:3484`).
+  argument is threaded into `Graph(..., graph_store=...)` (`:3807`) and likewise on `fork`
+  (`:3921`, `:4001`).
 - **`Runtime.fork` requires `SQLiteEventStore` specifically** and raises when the attached store is
-  anything else (`activegraph/runtime/runtime.py:3431-3463`), then calls
-  `SQLiteEventStore.fork_run(store.path, …)` (`:3475`) and opens a second
-  `SQLiteEventStore(store.path, run_id=new_run_id)` (`:3483`).
+  anything else (`activegraph/runtime/runtime.py:3945-3981`), then calls
+  `SQLiteEventStore.fork_run(store.path, …)` (`:3992`) and opens a second
+  `SQLiteEventStore(store.path, run_id=new_run_id)` (`:4000`).
 - **`Runtime.promote(fork)` requires both sides on `SQLiteEventStore` and on the same `path`**
-  (`activegraph/runtime/runtime.py:3637-3678`), then reads lineage via `fork_store.get_run()` (`:3679`).
-- `Runtime.save_state(path)` late-binds a SQLite store and replays all in-memory events into it
-  (`activegraph/runtime/runtime.py:3237-3246`).
+  (`activegraph/runtime/runtime.py:4158-4205`), then validates the stored lineage (`:4205-4224`).
+- `Runtime.save_state(path_or_url)` late-binds through `_open_sqlite_store` and replays all in-memory
+  events into it: a bare path selects SQLite, while a URL delegates to `open_store` and may select
+  SQLite or Postgres (`activegraph/runtime/runtime.py:3732-3742,4628-4645`).
 - `_materialize_snapshot` calls `store.get_snapshot(hash)` and `retention.state_hash_of`, raising
   `SnapshotIntegrityError` on a missing or mismatched blob
-  (`activegraph/runtime/runtime.py:4489-4549`, raised at `:4510` and `:4516`) — "replaying from it
+  (`activegraph/runtime/runtime.py:5031-5091`, raised at `:5052` and `:5058`) — "replaying from it
   would silently produce wrong state" (`activegraph/store/retention.py:116-146`).
 - Retention policy: **"never deletion"** — compaction moves rows to an `events_archive` tier inside
   the same store file (`activegraph/store/retention.py:1`, `activegraph/store/sqlite.py:95-110`).
@@ -424,14 +451,14 @@ load-with-snapshot::= Runtime.load(…) sees events[0].type == "runtime.snapshot
   exactly those bytes (`activegraph/store/retention.py:153-176`).
 - **Forking below the compaction horizon refuses loudly:** `SQLiteEventStore.fork_run` checks
   `events_archive` and raises a dedicated `EventNotFoundError` — "compaction narrows where you can
-  branch history, never what state is" (`activegraph/store/sqlite.py:490-525`).
+  branch history, never what state is" (`activegraph/store/sqlite.py:598-656`).
 - Phase-1 limits stated up front (`activegraph/store/retention.py:24-28`): the archive tier is a
   table in the same file, `causal_chain` does not read the archive, there is no CLI, and proposed
   patches block compaction.
 - Schema versioning: both backends carry `SCHEMA_VERSION = "1"` in a `meta` table
-  (`activegraph/store/sqlite.py:54`, `activegraph/store/postgres.py:29`) and raise
+  (`activegraph/store/sqlite.py:56`, `activegraph/store/postgres.py:29`) and raise
   `SchemaVersionMismatch` on open when it differs (`activegraph/store/sqlite.py:138-172`,
-  `activegraph/store/postgres.py:243-275`). Refusal is **bidirectional** — newer *and* older —
+  `activegraph/store/postgres.py:243-286`). Refusal is **bidirectional** — newer *and* older —
   because either direction "would corrupt the audit trail." The v1.5 compaction tables were added as
   additive `IF NOT EXISTS` so `schema_version` stays `"1"`
   (`activegraph/store/sqlite.py:91-94`).
@@ -452,63 +479,75 @@ open-or-die       ::= _open_store_or_die( url , run-id ) -> event-store
 list-runs         ::= _list_runs_or_die( url )
                       -> SQLiteEventStore.list_runs | PostgresEventStore.list_runs
                     | SchemaVersionMismatch -> stderr-once , EXIT_CORRUPTION
-                      (* cli/main.py:109-123 *)
-recent-run        ::= _most_recent_run_id_or_die( url ) (* cli/main.py:78-106 *)
+                      (* cli/main.py:128-143 *)
+recent-run        ::= _most_recent_run_id_or_die( url ) (* cli/main.py:92-125 *)
                     | SchemaVersionMismatch -> stderr-once , EXIT_CORRUPTION
 
 fork-cmd          ::= "activegraph fork" -> SQLiteEventStore.fork_run
                                           | PostgresEventStore.fork_run
                     | KeyError (i.e. EventNotFoundError) -> EXIT_NOT_FOUND
-                      (* cli/main.py:626-651 ; cross-store fork REFUSED at :600-605 *)
+                      (* cli/main.py:647-674 ; cross-store fork REFUSED at :621-627 *)
 
 promote-cmd       ::= "activegraph promote" -> validate run ids via _list_runs_or_die
                                              -> Runtime.load
-                      (* cli/main.py:910-913 — load upserts a phantom run row
+                      (* cli/main.py:935-947 — load upserts a phantom run row
                          for unknown ids, so validation must precede it *)
 
-migrate-cmd       ::= "activegraph migrate" -> parse_store_url(src) , parse_store_url(dst)
-                                             -> list-runs(src)       (* source first *)
-                                             -> list-runs(dst)       (* destination second *)
-                                             -> observability.migration.migrate
-                      (* cli/main.py:1102-1113 *)
+migrate-cmd       ::= "activegraph migrate"
+                      -> store.migration.migrate(src, dst)
+                      -> resolve source(read), resolve destination(write)
+                      -> open source, then open destination
+                      (* cli/main.py:1090-1141; store/migration.py:363-417 *)
 ```
 
 The exact typed mapping also encloses every direct CLI store boundary:
 `Runtime.load` in inspect, replay, fork override recording, diff, promote,
 and export-trace, plus the driver `fork_run` call. Direct Python callers
-continue to receive `SchemaVersionMismatch`. Nested helpers convert the leaf
-to `SystemExit`, so the CLI cannot print it twice. Migration preflights the
-source before opening the destination; a fresh destination is eagerly
-initialized with only the current schema and metadata after the source passes.
-This is compatibility validation, not cross-version schema translation.
+continue to receive `SchemaVersionMismatch`. Nested helpers convert the leaf to `SystemExit`, so
+the CLI cannot print it twice. Migration resolves both endpoint capabilities before opening either
+backend, then opens the source before the destination; a source schema mismatch therefore cannot
+initialize the destination. Third-party migration-only schemes reach this resolver without being
+rejected by the ordinary built-in-only URL dispatcher (`activegraph/cli/main.py:1118-1132`). This
+is compatibility validation, not cross-version schema translation.
 
 **Contract notes.** The multi-inheritance in the error taxonomy is what makes this seam work:
 `EventNotFoundError(StorageError, KeyError)` lets `activegraph fork` catch a bare `KeyError` and map
-fork-point-not-found to `EXIT_NOT_FOUND` (`activegraph/store/errors.py:9-13,41`,
-`activegraph/cli/main.py:648-650`). Sibling leaves follow the same pattern:
-`DuplicateEventError(StorageError, ValueError)` (`errors.py:53`),
+fork-point-not-found to `EXIT_NOT_FOUND` (`activegraph/store/errors.py:9-12,50`,
+`activegraph/cli/main.py:647-674`). Sibling leaves follow the same pattern:
+`DuplicateEventError(StorageError, ValueError)` (`errors.py:62`),
 `NonSerializableEventError(StorageError, TypeError)` (`serde.py:26`),
 `InvalidStoreURL(StorageError, ValueError)` (`url.py:42`). DB-driver errors
 (`sqlite3.OperationalError`, `psycopg.OperationalError`) are **explicitly not wrapped**, deferred
-because "the recovery prose varies enough per mode" (`activegraph/errors.py:14-19`).
+because "the recovery prose varies enough per mode" (`activegraph/store/errors.py:14-21`).
 
-### store <-> observability (cross-store migration)
+### store <-> migration providers / observability compatibility
 
-`observability/migration.py` copies runs between backends. It imports `EventStore`, `RunRecord`,
-`CorruptedEventPayloadError`, `decode_event`, and `parse_store_url` at module level
-(`activegraph/observability/migration.py:27-30`), and a `_StoreFacade` unifies the SQLite/Postgres
-call shapes for `list_runs`, `open_run`, and `write_run_transactionally`
-(`activegraph/observability/migration.py:271-330`). This is the tightest coupling into `store/` in
-the codebase and it is **not mediated by any protocol** — see Open questions #7.
+`activegraph.store.migration` is now the canonical cross-store migration owner. The former
+`activegraph.observability.migration` module is a compatibility-only re-export shim
+(`activegraph/observability/migration.py:1-31`). Migration is mediated by two runtime-checkable
+protocols: a URL-bound `MigrationBackend`, and a provider that declares URL schemes plus `read` /
+`write` capabilities (`activegraph/store/migration.py:44-68`). Built-in SQLite and Postgres
+providers live beside their drivers (`activegraph/store/sqlite.py:203-317`,
+`activegraph/store/postgres.py:327-427`); third parties register explicitly or through the
+`activegraph.migration_backends` entry-point group.
 
 ```ebnf
-migrate          ::= migrate( source-url , dest-url ,
-                              [only_run_ids] , [skip_corrupted] , [on_progress] )
+migrate          ::= resolve( source-url, require="read" )
+                     resolve( dest-url, require="write" )
+                     open-source open-destination { migrate-run } close-both
                      -> migration-report
 
-direct-source-mismatch ::= raise SchemaVersionMismatch
-direct-dest-mismatch   ::= failed run-report( error = "write failure: ..." )
-(* CLI preflight changes neither direct-library behavior above *)
+resolve          ::= explicit-registration
+                   | built-in-provider
+                   | unique-entry-point
+                   | !! MigrationBackendConflictError
+                   | !! UnsupportedMigrationBackendError
+                   | !! UnsupportedMigrationCapabilityError
+                   | !! MigrationBackendLoadError
+
+migrate-run      ::= source.iter_run( run-id )
+                     destination.write_run_transactionally( record, events )
+                     -> run-report
 
 migration-report ::= { source_url, dest_url, runs : [ run-report ] }
 run-report       ::= { run_id ,
@@ -520,21 +559,22 @@ run-report       ::= { run_id ,
 
 **Contract notes.** One transaction per run against the destination; writes use
 `INSERT … ON CONFLICT (id, run_id) DO NOTHING` against the `UNIQUE(id, run_id)` constraint, so a
-rerun after a partial failure is idempotent (`activegraph/observability/migration.py:1-10,330-420`).
-The operation is one-directional — no sync, no rollback; to go back, migrate the other way.
-`--skip-corrupted` is the sanctioned escape hatch for `CorruptedEventPayloadError`
-(`activegraph/store/serde.py:137-145`). The module reaches into store privates —
-`activegraph.store.sqlite._ensure_schema` (`migration.py:324`),
-`activegraph.store.postgres._ConnectionSource` (`migration.py:274,373`), `_EVENT_COLUMNS` and
-`_ensure_schema` (`migration.py:373-377`) — justified by "driver-specific raw row iteration is
-required because Python generators die after raising" (`migration.py:16-18`).
+rerun after a partial failure is idempotent (`activegraph/store/sqlite.py:243-290`,
+`activegraph/store/postgres.py:361-403`). The operation is one-directional — no sync, no rollback;
+to go back, migrate the other way. `--skip-corrupted` is the sanctioned escape hatch for
+`CorruptedEventPayloadError` (`activegraph/store/migration.py:319-360`). Providers are completely
+resolved and URL-validated before either endpoint opens (`:268-316,373-382`); open order is source
+then destination, and both are closed in reverse order. A close failure is raised as
+`MigrationBackendCloseError` only when no earlier failure is active; otherwise it is attached as a
+note to the primary failure (`:400-417`).
 
 ### store <-> sinks (serde reuse only)
 
 `sinks/` does not touch the EventStore protocol; it borrows the serializer so an exported record is
-byte-identical to a stored one. `sinks/jsonl.py:12,48-51` imports `encode_payload` and calls it as
-"the EventStore normalization authority", then `json.loads` back — so a JSONL sink writes exactly
-the normalization the store does (`Decimal` -> str, `datetime` -> ISO, `set` -> sorted list).
+structurally identical to the store-normalized payload. `sinks/jsonl.py:12,48-51` imports
+`encode_payload` and calls it as "the EventStore normalization authority", then `json.loads` back —
+so a JSONL sink writes the same normalized JSON value the store does (`Decimal` -> str, `datetime`
+-> ISO, `set` -> sorted list), without claiming backend byte formatting is identical.
 `sinks/conformance.py:24,179` uses `InMemoryEventStore` as a test fixture.
 
 ```ebnf
@@ -559,7 +599,7 @@ fs-path           ::= relative-path | "/" absolute-path
                       (* THREE slashes total for relative: sqlite:///run.db
                          FOUR slashes total for absolute:  sqlite:////abs/run.db
                          urlparse yields "/run.db" / "//abs/run.db"; exactly one
-                         leading slash is stripped — url.py:126-171 *)
+                         leading slash is stripped — url.py:128-173 *)
 
 postgres-url      ::= postgres-scheme "://" [ userinfo "@" ] authority [ "/" dbname ]
 postgres-scheme   ::= "postgres" | "postgresql"      (* normalised to "postgres" *)
@@ -597,15 +637,17 @@ decode            ::= decode_payload( json-text ) -> json-object
 
 **Contract notes.**
 
-- **The framework never guesses a URL.** A bare filesystem path is refused with a message naming the
-  exact fix, `sqlite:///<that path>` (`activegraph/store/url.py:110-125`). The rationale is stated
+- **The ordinary URL parser never guesses a URL.** A bare filesystem path is refused with a message
+  naming the exact fix, `sqlite:///<that path>` (`activegraph/store/url.py:111-127`). The rationale is stated
   once as `_WHY_NO_GUESS` and reused by every leaf (`activegraph/store/url.py:62-69`): guessing wrong
   "would either corrupt the audit trail or open an unintended store."
-- `parse_store_url` is the **single validation entry point**; `open_store` and the CLI both route
-  through it "so a malformed URL fails identically everywhere" (`activegraph/store/url.py:92-94`).
+- `parse_store_url` is the **ordinary runtime-store validation entry point**; `open_store` and
+  non-migration CLI commands route through it (`activegraph/store/url.py:87-96`). Administrative
+  migration resolves its own extensible provider registry first, then each selected provider
+  validates its URL, so third-party migration-only schemes do not broaden `open_store`.
   Drivers are imported lazily inside `open_store` so the Postgres dependency stays optional
-  (`activegraph/store/url.py:212-223`), and the unsupported-scheme error explicitly points at
-  `store/base.py` as the extension path for new backends (`activegraph/store/url.py:200-201`).
+  (`activegraph/store/url.py:209-225`), and the unsupported-scheme error explicitly points at
+  `store/base.py` as the extension path for ordinary runtime backends (`activegraph/store/url.py:191-204`).
 - Optional dependencies: `psycopg>=3.1,<4` via `_require_psycopg`
   (`activegraph/store/postgres.py:69-79`, extras `postgres`); `falkordb` via
   `_require_falkordb_client` and embedded `redislite.falkordb_client` via `_require_falkordblite`
@@ -616,8 +658,9 @@ decode            ::= decode_payload( json-text ) -> json-object
   stay flat dicts of JSON primitives" (`activegraph/store/serde.py:8-11`). This asymmetry is
   contractual, not an oversight.
 - `validate_event` is a fail-fast pre-check called from `Graph.emit` *before* any state mutation
-  (`activegraph/store/serde.py:201-203`, `activegraph/core/graph.py:569-572`) — but only when a
-  store is attached; see Open questions #4.
+  (`activegraph/store/serde.py:201-203`, `activegraph/core/graph.py:584-596`) only when a store is
+  attached. Ephemeral graphs deliberately do not pay this JSON validation cost; the adjacent source
+  comment now states the narrower durable-storage guarantee exactly.
 - Encode-side and decode-side failures are deliberately distinct types with distinct recoveries. On
   encode failure the framework walks the payload to name the offending field path
   (`_find_non_serializable`, `activegraph/store/serde.py:90-113`) and puts it in the message and
@@ -645,7 +688,7 @@ sequenceDiagram
     RT->>U: parse_store_url(url) then open_store(url, run_id)
     U->>S: SQLiteEventStore(sqlite_path, run_id)
     S->>S: _ensure_schema + SCHEMA_VERSION check
-    Note over S: mismatch raises SchemaVersionMismatch<br/>sqlite.py:138-172
+    Note over S: mismatch raises SchemaVersionMismatch<br/>sqlite.py:140-174
     RT->>S: iter_events()
     S->>SD: decode_event(row)
     SD-->>S: Event
@@ -657,10 +700,10 @@ sequenceDiagram
         S-->>RT: canonical JSON blob
         RT->>R: state_hash_of(blob)
         R-->>RT: sha256 digest
-        Note over RT: mismatch or missing blob raises<br/>SnapshotIntegrityError, runtime.py:4510,4516
+        Note over RT: mismatch or missing blob raises<br/>SnapshotIntegrityError, runtime.py:5052,5058
         RT->>G: project objects and relations, prime IDGen counters
     end
-    loop post-snapshot suffix
+    loop complete hot log (snapshot marker is a projection no-op)
         RT->>G: graph._replay_event(ev)
     end
     RT->>G: reseed_from_events()
@@ -669,90 +712,71 @@ sequenceDiagram
     RT-->>C: Runtime
 ```
 
-## Open questions
+## Finding status and remaining open questions
 
-1. **`replay_into` has no in-package callers.** Defined at `activegraph/store/base.py:76-86` and
-   documented as "the single replay entry point — used by `Runtime.load` and `Runtime.fork`," but a
-   repo-wide grep finds zero callers: `Runtime.load` (`runtime.py:3316-3317`) and `Runtime.fork`
-   (`runtime.py:3487-3492`) both inline their own `for ev in events: graph._replay_event(ev)` loop.
-   Its only remaining role is as a re-exported public API symbol
-   (`activegraph/store/__init__.py:15,45`; it is *not* in `activegraph/__init__.py`'s list). The
-   docstring is stale.
+1. **Resolved: `replay_into` documentation.** The public helper still has no in-package callers, but
+   its docstring now says explicitly that `Runtime.load` and `Runtime.fork` do not call it
+   (`activegraph/store/base.py:82-92`). It remains re-exported by `activegraph.store`, not by the
+   top-level package (`activegraph/store/__init__.py:15,79`).
 
-2. **Duplicate-append raises three different exception types across backends.**
-   `InMemoryEventStore.append` raises a rich `DuplicateEventError` (`memory.py:60-84`);
-   `SQLiteEventStore.append` (`sqlite.py:233-241`) and `PostgresEventStore.append`
-   (`postgres.py:326-344`) do no duplicate check at all, so the raw `sqlite3.IntegrityError` /
-   `psycopg` `UniqueViolation` escapes. The conformance suite papers over this with
-   `pytest.raises(Exception)` (`conformance.py:148`) and `errors.py:14-19` says wrapping driver
-   errors is deliberately deferred. Consequence: **`except DuplicateEventError` is not portable
-   across backends today.**
+2. **Resolved: duplicate-append errors are portable.** Memory, SQLite, and Postgres all raise the
+   shared `DuplicateEventError` with `{event_id, run_id, backend}` context, preserving the existing
+   row and count (`activegraph/store/errors.py:62-100`; conformance at `store/conformance.py:157-204`).
 
-3. **`EventNotFoundError`'s docstring contradicts the conformance suite.** `errors.py:46-47` says it
-   "Fires from every `store.get_event(event_id)`", but all three backends return `None` for an
-   unknown id (`memory.py:106-110`, `sqlite.py:260-265`, `postgres.py:372-379`) and
-   `conformance.py:93` explicitly asserts `store.get_event("evt_missing") is None`. The error
-   actually fires from `iter_events(after=/until=)`, `truncate_after`, and `fork_run`. Docstring bug,
-   not a behavior bug — but it will mislead anyone writing a new backend.
+3. **Resolved: `EventNotFoundError` documentation.** It now states that
+   `store.get_event(event_id)` returns `None` for a missing id
+   (`activegraph/store/errors.py:50-57`).
 
-4. **`Graph.emit` validates serializability only when a store is attached**
-   (`core/graph.py:569-572`). The comment one line above claims the check exists "so bad payloads
-   never land in the in-memory log either," but the guard defeats that for store-less graphs. A run
-   that works in memory can therefore fail the moment it is persisted or `save_state`d. Possibly
-   intentional (avoiding the JSON round-trip cost on ephemeral runs), but it is not what the comment
-   says.
+4. **Resolved documentation; conditional behavior retained.** `Graph.emit` still validates JSON
+   serializability only when a store is attached, and its adjacent comment now states exactly that
+   durable-storage guarantee (`activegraph/core/graph.py:584-596`). Ephemeral graphs may therefore
+   hold payloads that a later persistence step rejects; this is no longer contradicted by source prose.
 
-5. **Compaction is SQLite-only, and the capability split is not expressed in any type.**
-   `events_archive` / `snapshots` exist only in `sqlite.py:95-117`; `postgres.py:32-66` has neither.
-   `retention.py:74` imports `SQLiteEventStore` at module scope and `compact` asserts
-   `isinstance(store, SQLiteEventStore)` (`retention.py:305`). `Runtime.fork` (`runtime.py:3431-3463`)
-   and `Runtime.promote` (`runtime.py:3637-3666`) hard-require SQLite too. **The effective backend
-   capability tiers are therefore InMemory < Postgres < SQLite** — the "shared-state, multi-process"
-   backend is strictly *less* capable than the single-file one. This inversion is the most surprising
-   thing in the subsystem.
+5. **Open: runtime time-travel and retention capabilities remain concrete-backend checks.** Both
+   SQLite and Postgres expose atomic file/database-level `fork_run`, and the CLI supports both, but
+   `Runtime.fork` and `Runtime.promote` still require `SQLiteEventStore`
+   (`activegraph/runtime/runtime.py:3945-4000,4158-4194`). Compaction/snapshots are SQLite-only:
+   `events_archive` / `snapshots` exist at `activegraph/store/sqlite.py:93-119`, while Postgres has
+   neither, and `retention.compact` asserts the concrete SQLite type (`retention.py:304-305`). The
+   migration provider seam types administrative `read` / `write`, but no corresponding
+   fork/promote/retention capability protocol exists.
 
-6. **`store -> runtime` is exactly two lazy imports.** `postgres.py:109`
+6. **Open: `store -> runtime` is exactly two lazy imports.** `postgres.py:111`
    (`InvalidArgumentType`, error taxonomy only, raised when `PostgresEventStore(target=…)` is handed
    something that is not a URL string, a `psycopg.Connection`, or a `psycopg_pool.ConnectionPool` —
-   `postgres.py:108-143`; the class docstring at `runtime/config_errors.py:70-72` names
+   `postgres.py:93-145`; the class docstring at `runtime/config_errors.py:70-72` names
    `PostgresEventStore` as its motivating case) and `retention.py:273`
-   (`Runtime.load`, a genuine functional call — `retention.py:275-303`). The second means
+   (`Runtime.load`, a genuine functional call — `retention.py:275-309`). The second means
    `retention.compact` is an *orchestration* function living in the storage package: architecturally
    it sits above the runtime, not beside the other store modules. It may deserve to move to
    `runtime/` or a new `ops/` layer.
 
-7. **`observability/migration.py` imports store privates** — `_ensure_schema` (`migration.py:324`),
-   `_ConnectionSource` (`:274`, `:373`), `_EVENT_COLUMNS` (`:373`). The module docstring justifies it
-   (`migration.py:16-18`), but it means the `store/` public surface is not sufficient for migration,
-   and any refactor of those privates breaks `observability/`.
+7. **Resolved: migration has a public store-owned protocol.** Canonical migration now lives behind
+   `MigrationBackend` / `MigrationBackendProvider` in `activegraph/store/migration.py:44-68`; the
+   observability module is only a compatibility re-export shim.
 
-8. **`retention.pins` leaks SQLite connections.** It constructs a `SQLiteEventStore` for the target
+8. **Open: retention helpers leak SQLite connections.** `pins` constructs a store for the target
    run (`retention.py:191`) and one per *other* run in the file (`:198`, `:215`) and never calls
-   `close()` on any of them; `retire` does the same (`:333`). On a store with many runs this opens
-   O(runs) connections per `pins()` call, released only by GC. Not a correctness bug (WAL readers do
-   not block), but a real resource issue for the "housekeeping window" usage the module docstring
-   describes.
+   `close()` before returning at `:250`. `retire` now closes its handle in `finally`
+   (`retention.py:333-337`), but `compact` leaves the store loaded by `Runtime.load` open (`:273-309`)
+   and `verify_snapshot` opens at `:352` without closing through `:371`. On a file with many runs,
+   one `pins()` call alone opens O(runs) handles that are released only by GC.
 
-9. **`SQLiteEventStore.fork_run` is not transactional** (`sqlite.py:481-599`, row-by-row insert loop
-   on an `isolation_level=None` autocommit connection), whereas `PostgresEventStore.fork_run` is
-   (`postgres.py:538-607`, single `INSERT … SELECT` inside `_TxCtx`). An interrupted SQLite fork
-   leaves a partially populated destination run with a valid-looking `runs` row. Given fork is
-   SQLite-only in the runtime (item 5), this is the *only* path most users take. No test covering
-   interrupted fork was found.
+9. **Resolved: durable forks are atomic.** SQLite now uses `BEGIN IMMEDIATE`, one
+   `INSERT … SELECT`, commit, and rollback (`activegraph/store/sqlite.py:589-727`), with shared
+   SQLite/Postgres rollback and successful-prefix coverage in
+   `activegraph/store/conformance.py:217-336`.
 
-10. **`pins()` has no "Pin 3".** Comments run `Pin 1` (`retention.py:193`), `Pin 2` (`:211`),
-    `Pin 4` (`:222`). Either a pin was removed and the numbering not reflowed, or a designed pin is
-    unimplemented. `compaction-design.md` would settle it; it was not read.
+10. **Resolved: retention pin numbering.** Comments are consecutively numbered 1, 2, and 3
+    (`activegraph/store/retention.py:193,211,222`).
 
 11. **Resolved: every CLI store boundary maps the exact typed schema leaf.**
     `SchemaVersionMismatch(StorageError)` remains intentionally outside `RuntimeError`. A narrow
     CLI context manager prints that leaf once and exits `EXIT_CORRUPTION` (4) around helpers,
-    direct `Runtime.load`, driver fork, and migration-preflight calls. The older
+    direct `Runtime.load`, driver fork, and migration calls. The older
     `RuntimeError["schema_version"]` match remains only in the two helpers that already supported
-    custom or legacy backends. Direct migration-library source-raise and destination-report
-    behavior is unchanged.
+    custom or legacy backends (`activegraph/cli/main.py:59-143`).
 
-12. **`falkordb.py:226-229` swallows every exception from `CREATE INDEX`.** The comment says
-    index-exists is "the only expected case," but an auth failure, a syntax error against a future
-    FalkorDB version, or a connection drop would also be silently absorbed — leaving the store
-    running full scans with no signal.
+12. **Resolved: FalkorDB index setup fails loud.** It suppresses only the exact verified
+    duplicate-index `ResponseError`; authentication, syntax, and connection failures propagate
+    (`activegraph/store/falkordb.py:141-165,248-261`).
