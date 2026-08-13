@@ -301,8 +301,9 @@ returned-resolution  ::= exact-bound-canonical-name
 
 **Contract notes.**
 
-- All Protocol methods are keyword-only (`provider.py:152-184`). Three are required — `complete`,
-  `estimate_cost`, `count_tokens`. Three members are additive and getattr-guarded by the runtime —
+- The three call-surface Protocol methods are keyword-only (`provider.py:152-184`): `complete`,
+  `estimate_cost`, and `count_tokens`. The two compatibility methods accept their model/name
+  positionally. Three members are additive and getattr-guarded by the runtime —
   `default_model`, `recognizes_model`, `supports_native_structured_output` (`provider.py:150`,
   `:186-211`) — so custom pre-v1.0.2 providers keep working. When `default_model` is absent Runtime
   retains the byte-compatible fallback `"claude-sonnet-4-5"` for model-less behaviors
@@ -311,10 +312,10 @@ returned-resolution  ::= exact-bound-canonical-name
   member: an absent descriptor resolves to `FULL_LLM_PROVIDER_CAPABILITIES`, preserving historical
   custom-provider behavior.
 - `recognizes_model` must be **permissive**: unknown names — fine-tuned models, internal deployment
-  names, experimental prefixes — should return `False` (`provider.py:110-113`).
-- No streaming, no multi-model orchestration (`provider.py:33-34`). Tool-loop ownership is the
+  names, experimental prefixes — should return `False` (`provider.py:201-209`).
+- No streaming, no multi-model orchestration (`provider.py:49-53`). Tool-loop ownership is the
   runtime's: the provider returns `tool_calls`, the runtime invokes the tools and re-calls
-  `complete()` with a `role="tool"` message (`provider.py:34-37`).
+  `complete()` with a `role="tool"` message (`provider.py:50-53`).
 - `accepts_prompt_identity` is an intentional fixture extension, not a Protocol member. Runtime
   sends `prompt_hash` and `deterministic` only as an atomic pair to providers advertising it
   (`runtime.py:2229-2248`; `recorded.py:201,345`). Recorded providers validate the pair before I/O;
@@ -332,10 +333,10 @@ returned-resolution  ::= exact-bound-canonical-name
   appended to messages, hashed into another turn, or dispatched. Provider cost is still charged
   for a live rejected response; cache hits are not charged.
 - `count_tokens` is called **only** when `cached is None and self.budget.has_cost_limit()`
-  (`runtime.py:2079-2081`); a raise there becomes `behavior.failed` with
-  `reason="llm.network_error", extras={"phase":"count_tokens"}` (`runtime.py:2087-2094`).
+  (`runtime.py:2079-2088`); a raise there becomes `behavior.failed` with
+  `reason="llm.network_error", extras={"phase":"count_tokens"}` (`runtime.py:2093-2100`).
 - `estimate_cost` prices the **worst case** — `max_tokens` is passed as the output-token estimate
-  (`runtime.py:2095`).
+  (`runtime.py:2102-2105`).
 - Native fallback is **audited, never an error**: every structured-output request records its
   resolved mode (`runtime.py:2155-2159`). Only a schema that reaches and fails the subset preflight
   produces a debug line (`runtime.py:1231-1240`); flag-off, model-none, or missing/false provider
@@ -374,11 +375,11 @@ returned-resolution  ::= exact-bound-canonical-name
 - **Every failed attempt is logged** as its own `llm.responded` event carrying an `error` object
   (`runtime.py:2873-2918`), so "a provider outage cannot be confused with a valid empty response"
   (`errors.py:121-123`). Retried events chain via `retry_of` and `caused_by = <previous error event
-  id>` (`runtime.py:2153-2157`, `:2271`). Retries reuse the **same turn hash**, and only
-  `attempt_index == 0` gets the strict-replay hash check (`runtime.py:2187-2188`).
+  id>` (`runtime.py:2160-2164`, `:2183-2187`, `:2271-2278`). Retries reuse the **same turn hash**,
+  and only `attempt_index == 0` gets the strict-replay hash check (`runtime.py:2193-2211`).
 - **There is no rate limiter, concurrency cap, RPM tracker, or circuit breaker** anywhere in the LLM
   path. Rate limiting is purely reactive: 429 → classify → backoff, and the sleep is a blocking
-  `time.sleep` on the runtime thread (`runtime.py:2273`, `:2313`).
+  `time.sleep` on the runtime thread (`runtime.py:2279-2280`, `:2319-2320`).
 - Error classification order is load-bearing and documented: rate-limit first (it is also a 4xx),
   then auth, then 408 timeout as transient network failure, then other 4xx, then network.
   `classify_provider_status` owns that numeric ladder; exception classification prefers the SDK's
@@ -396,8 +397,8 @@ Reason-code raise sites:
 
 | reason | terminal / transient | raised at |
 |---|---|---|
-| `llm.parse_error` | terminal | `parsing.py:67`; also `runtime.py:2506` when `parsed is None` despite a schema |
-| `llm.schema_violation` | terminal | `parsing.py:76`; also `runtime.py:2491` on cache-hydration failure |
+| `llm.parse_error` | terminal | `parsing.py:67`; also `runtime.py:2509-2522` when `parsed is None` despite a schema |
+| `llm.schema_violation` | terminal | `parsing.py:76`; also `runtime.py:2486-2506` on cache-hydration failure |
 | `llm.fixture_missing` | terminal | `recorded.py:261` |
 | `llm.rate_limited` | **transient** | via `wire.py:126-129` |
 | `llm.network_error` | **transient** | via shared status 408/5xx/missing fallback, exception fallback, or typed provider errors |
@@ -410,8 +411,9 @@ Reason-code raise sites:
 regenerated prompts hit the same recorded responses" (`cache.py:3-5`). The originating
 `llm.requested` id is stored for lineage but is not the key (`cache.py:6-7`; `CachedEntry` at
 `:41`). The runtime populates it from an event stream on `Runtime.load(..., replay_llm_cache=True)`
-and `runtime.fork(...)` (`runtime.py:3823`, `:4024-4026`, strict hydration `:4795`), and records inline after each live
-call (`runtime.py:2361-2368`) so same-run repeats hit too.
+and `runtime.fork(...)` (`runtime.py:3823`, `:4024-4026`, strict hydration `:4795`), and records
+inline after each live call (`runtime.py:2361-2368`) so same-run repeats can hit when cache reads
+are enabled.
 
 ```ebnf
 cache-read     ::= get( prompt_hash ) "->" ( LLMResponse{cache_hit=true} | None )
@@ -493,7 +495,8 @@ embed-cache-read ::= get( inputs_hash ) "->" ( fresh-list-copies | None )
 embed-hydrate    ::= from_events( event-stream ) "->" EmbeddingCache
                      accepting only pairs where every vector is a list of finite
                      non-bool numbers, all vectors share one dimension, and
-                     len(vectors) == requested.payload["input_count"]
+                     (input_count is not int or
+                      len(vectors) == requested.payload["input_count"])
 ```
 
 **Contract notes.**
@@ -506,9 +509,10 @@ embed-hydrate    ::= from_events( event-stream ) "->" EmbeddingCache
   (`embedding_cache.py:20-28`).
 - `EmbeddingCache.get()` returns fresh `list` copies "so callers cannot mutate the replay authority"
   (`embedding_cache.py:5-6`, `:46-52`, `:62-74`); storage is an immutable tuple-of-tuples.
-- `from_events` validation is strict and silent: it skips error responses and rejects non-list
-  vectors, mixed dimensionality, bool/non-numeric components, non-finite floats, and an input-count
-  mismatch, `continue`-ing past the offending pair (`embedding_cache.py:76-127`).
+- `from_events` validation is silent: it skips error responses and rejects non-list vectors, mixed
+  dimensionality, bool/non-numeric components, non-finite floats, and an integer input-count
+  mismatch, `continue`-ing past the offending pair. A missing or non-integer `input_count` is not a
+  rejection gate (`embedding_cache.py:76-127`).
 - The `embedding.requested` event stores model/count/cache metadata and the content hash, but never
   the input text (`runtime.py:1606-1616`); the response event stores the vectors
   (`runtime.py:1679-1692`).
@@ -575,7 +579,7 @@ volatile-stripped ::= json minus keys { "provenance" , "timestamp" , "run_id" }
 - **Volatile-field stripping** removes `provenance`, `timestamp`, `run_id` recursively before
   hashing/prompting, because provenance embeds the parent `run_id` and "without this, the cache
   would miss on every fork" (`prompt.py:360-363`, `:374-395`). The runtime advertises this as
-  `prompt_normalized: True` on every `llm.requested` (`runtime.py:2143-2146`).
+  `prompt_normalized: True` on every `llm.requested` (`runtime.py:2143-2153`).
 - **Determinism normalization**: `deterministic=True` forces `temperature=0.0` and `top_p=1.0`
   (`prompt.py:523-524`).
 - **Structured-output modes shape the system prompt.** In prompt mode (default),
@@ -644,9 +648,9 @@ Diagnostics always expose plural `claiming_provider_names` and
 `packs/diligence/fixtures/__init__.py` imports `LLMMessage, LLMResponse` at `:19` and `ToolCall`
 lazily at `:205` to implement `RecordedDiligenceProvider` (`:56`) — a scripted, **duck-typed**
 `LLMProvider` that does not subclass the Protocol. Critically, its dispatch is a consumer of the
-*locked prompt format*, not just the types: `_extract_behavior_name` (`:151`) regexes
+*locked prompt format*, not just the types: `_extract_behavior_name` (`:152`) regexes
 `behavior named "([^"]+)"` out of the system prompt, matching `prompt.py:207-208` exactly, and
-`_extract_company_name` (`:171`) splits on the literal `"## Triggering event"` header (`:176-179`),
+`_extract_company_name` (`:172`) splits on the literal `"## Triggering event"` header (`:177-180`),
 matching `build_user_message` (`prompt.py:352`). `cli/quickstart.py:112`, `:410` construct
 `Runtime(..., llm_provider=RecordedDiligenceProvider(...))`, so the CLI reaches `llm/` only through
 this pack.
@@ -729,21 +733,21 @@ narrowed-schema ::= json-schema with additionalProperties:false injected on ever
   (`wire.py:76-83`) because "silently dispatching the wrong tool would corrupt the event log's
   causality" (`wire.py:66-68`). Wire-safe names pass through byte-identically (`wire.py:49-50`), so
   non-pack tools produce pre-v1.3-identical requests. Echoed assistant `tool_calls` are
-  **re-sanitized on the way back out** (`anthropic.py:355-364`, `openai.py:477-496`) "or the provider
+  **re-sanitized on the way back out** (`anthropic.py:339-356`, `openai.py:477-496`) "or the provider
   rejects the conversation it produced itself" (`openai.py:479-481`).
 - **`top_p` is forwarded only when `< 1.0`** — "1.0 is the model default; only forward when
-  narrowing" (`anthropic.py:155-157`, `openai.py:212-213`).
+  narrowing" (`anthropic.py:139-141`, `openai.py:204-205`).
 - **Reasoning families** (`o1`, `o3`, `o4`, `gpt-5` — `openai.py:124`) take `max_completion_tokens`
-  and get **no** `temperature`/`top_p` at all (`openai.py:204-213`). "Before v1.3 the provider sent
+  and get **no** `temperature`/`top_p` at all (`openai.py:198-205`). "Before v1.3 the provider sent
   the GPT-4-era parameters unconditionally, so every call to these families was a guaranteed 400"
   (`openai.py:120-122`).
 - **Structured-output parsing is skipped mid-tool-loop**: `parsed` is computed only when
-  `output_schema is not None and not tool_calls` (`anthropic.py:211-212`, `openai.py:318-319`) —
-  "Parsing structured output happens on the final turn, not mid-loop" (`anthropic.py:208-210`).
+  `output_schema is not None and not tool_calls` (`anthropic.py:191-196`, `openai.py:318-319`) —
+  "Parsing structured output happens on the final turn, not mid-loop" (`anthropic.py:192-194`).
 - **Multi-turn assistant echo (v1.0.3 #4)**: an assistant message carrying `tool_calls` must be
   reconstructed as full content blocks (text + `tool_use`), not raw text — "Direct Anthropic API
   access tolerated raw_text-only echo; the Vertex AI proxy enforces the spec strictly and 400s
-  without it" (`anthropic.py:331-336`, impl `:348-365`).
+  without it" (`anthropic.py:315-327`, impl `:328-357`).
 - `LLMMessage.to_dict()` **omits `tool_use_id` / `tool_name` / `tool_calls` when `None`** so recorded
   fixture hashes for single-turn flows stay byte-identical (`types.py:61-71`, rationale `:67-68`).
   The same omit-when-absent pattern governs `structured_output_mode` in every hash
@@ -759,8 +763,9 @@ narrowed-schema ::= json-schema with additionalProperties:false injected on ever
 - **Static cost accounting** in `AnthropicProvider` and `OpenAIProvider` is pure `Decimal`
   arithmetic over a per-million-token family-prefix table using **longest matching prefix**
   (`anthropic.py:42-56,217-228`, `openai.py:56-83,355-366`); unknown models fall back to
-  `claude-sonnet-4` / `gpt-4o`. Anthropic's default table is shared with Claude Code in
-  `_claude_shared.py:19-26`, while OpenAI's stays local. Both accept constructor overrides
+  the `claude-sonnet-4` / `gpt-4o` keys. A non-empty custom table that omits its provider's fallback
+  key raises `KeyError` for an otherwise unknown model. Anthropic's default table is shared with
+  Claude Code in `_claude_shared.py:19-26`, while OpenAI's stays local. Both accept constructor overrides
   (`anthropic.py:64-84`, `openai.py:126-147`). Those providers surface
   `retry_after_seconds` through the shared lowercase-header parser (`wire.py:164-177`; provider call
   sites `anthropic.py:183-185`, `openai.py:308-310`). OpenRouter's returned-cost contract is
