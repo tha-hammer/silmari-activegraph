@@ -182,8 +182,8 @@ Python CLI.
 3. **Resolved and implemented in the successor — the staleness threshold is 60 seconds.** The
    observer requires a satisfied heartbeat for the current boot id within that boundary
    (`state_pack/constants.py:49-56`; `state_pack/observer.py:171-216`). Boundary tests cover 59.9,
-   60.0, and 60.1 seconds (`tests/test_observer.py:225-251`). The earlier 45-second `ntm` sample was
-   only historical input to the policy choice, not an `ntm` contract.
+   60.0, and 60.1 seconds (the sibling app's `tests/test_observer.py:225-251`). The earlier
+   45-second `ntm` sample was only historical input to the policy choice, not an `ntm` contract.
 
 4. **Still out of scope (verified 2026-08-13) — `promote` is not used by the successor.**
    ActiveGraph implements `Runtime.promote()` for direct SQLite forks
