@@ -164,14 +164,17 @@ warnings             ::= "(" { degradation-string } ")"     (* () == fully clean
   seam raises `ValueError` for malformed identity or pin fields before forking
   (`activegraph/sandbox/__init__.py:120-126`; `activegraph/sandbox/executor.py:78-118,311-387`).
   Classified in-trial failures are returned as outcomes; parent-side validation/load/fork errors
-  can raise.
+  and child-launch errors can raise.
 - `preflight` returns degradation warnings (empty tuple = fully clean) and raises
   `SandboxStartupError` carrying the child's stderr tail when a child cannot start
   (`activegraph/sandbox/__init__.py:333-388`).
 - `SandboxStartupError` is catchable through `ConfigurationError`, `ActiveGraphError`, and the
   built-in `RuntimeError`. Its exact one-line `str`/`.args` remain on the legacy constructor branch
   under the narrow AF-wse next-major structured-rendering waiver; `.doc_url` already uses the
-  class-specific `sandbox-startup-error` slug.
+  class-specific `sandbox-startup-error` slug. **Resolved taxonomy finding:** the
+  `ConfigurationError` base added by repair Set 3 brings the error into the framework hierarchy
+  while retaining `RuntimeError` compatibility (`activegraph/sandbox/__init__.py:183-193`;
+  `activegraph/errors.py:148-158`).
 - **The store is the record.** `events_appended` and `behavior_failures` are re-read from the
   fork's run by the parent *after* the child exits; the stdout count fields are a signal only and
   never override the store — `activegraph/sandbox/__init__.py:502-533`,
@@ -397,8 +400,8 @@ wall-kill-marker   ::= graph.emit( Event(
                        (* only on timeout *)
 ```
 
-`activegraph/sandbox/__init__.py:433-461,502-533`; `activegraph/runtime/runtime.py:3745-3817`
-(`load`), `:3905-4009` (`fork`); `activegraph/core/graph.py:584-626`;
+`activegraph/sandbox/__init__.py:433-461,502-533`; `activegraph/runtime/runtime.py:3745-3903`
+(`load`), `:3905-4105` (`fork`); `activegraph/core/graph.py:584-626`;
 `activegraph/core/event.py:14-32`.
 
 **Contract notes.**
@@ -413,6 +416,9 @@ wall-kill-marker   ::= graph.emit( Event(
 - **Parent-owned wall-kill marker (v1.8 #11).** The contract calls it an *external stop fact*:
   load/replay projects the killed prefix and never re-races the clock; a failure to append is
   surfaced in `detail` and never silently claimed as recorded — `CONTRACT.md:8110-8118`.
+- `events_appended` is computed after this marker is emitted, so timed-out reports include the
+  parent-owned append. It is a fork-log count, not a child-work-only count —
+  `activegraph/sandbox/__init__.py:510-530`.
 - Behavior failures are read via `fork_view.trace.failures()`
   (`activegraph/sandbox/__init__.py:528-530`; `activegraph/trace/printer.py:550-564`), i.e. the run's
   `behavior.failed` events.
@@ -422,9 +428,9 @@ wall-kill-marker   ::= graph.emit( Event(
 ### sandbox-child <-> packs (materialization)
 
 The child materializes the candidate **pin-first**: the bundle hash is verified against the bytes on
-disk *before any import*, then the manifest is loaded, then the module is imported, then the live
-`Pack` is checked back against the manifest. Extra packs get no trust shortcut — each runs the
-identical chain, in order, **before** the candidate.
+disk *before any import*. If manifests are required, the manifest is loaded next and the selected
+live `Pack` is checked against it after import. Extra packs get no trust shortcut — each runs the
+same conditional chain, in order, **before** the candidate.
 
 ```ebnf
 materialize        ::= pin-check [ manifest-check ] import pack-selection [ surface-check ]
@@ -444,8 +450,8 @@ pack-selection     ::= exactly-one module-level Pack
 failure            ::= Exception -> materialization_failed , exit 50
 ```
 
-`activegraph/sandbox/_child.py:120-169`; `activegraph/packs/manifest.py:226-435` (`load_manifest`),
-`:437-544` (`verify_surface`), `:645-672` (`verify_bundle_hash`).
+`activegraph/sandbox/_child.py:120-169`; `activegraph/packs/manifest.py:226-434` (`load_manifest`),
+`:437-536` (`verify_surface`), `:645-672` (`verify_bundle_hash`).
 
 **Contract notes.**
 - Order is fixed: `verify_bundle_hash` is unconditional and precedes import. When
@@ -456,7 +462,7 @@ failure            ::= Exception -> materialization_failed , exit 50
   lowercase hex) or a hash mismatch (`activegraph/packs/manifest.py:645-672`).
 - `verify_surface` is a two-way check over `object_types` / `relation_types` / `behaviors` / `tools`
   / `settings_schema` plus `capabilities` (risk/action classes); `consumes` remains outside this
-  surface subset — `activegraph/packs/manifest.py:437-544`.
+  surface subset — `activegraph/packs/manifest.py:437-536`.
 - Without a manifest the module must expose exactly one module-level `Pack`. With a manifest, all
   module-level packs are filtered by `manifest.name` and exactly one matching pack is required;
   differently named pack objects are ignored. Failure becomes `materialization_failed`
@@ -504,10 +510,10 @@ counts             ::= ( max(0, len(rt.graph.events) - initial_events) ,
   (`MissingProviderError`, `activegraph/runtime/runtime.py:1243-1263`, class at
   `activegraph/llm/errors.py:202`) rather than reaching a network —
   `activegraph/sandbox/_child.py:255-260`, `CONTRACT.md:7492-7499`.
-- `load_pack` returns `bool` and performs conflict/version checks before its mutation phase. It is
-  not accurate to promise that every failed load leaves the runtime unchanged: loader state and
-  registries mutate at `activegraph/packs/loader.py:257-305` before the final `pack.loaded` emit at
-  `:306-318`, without rollback around an emit failure.
+- `load_pack` returns `bool`, but its advertised pre-mutation failure guarantee is too strong.
+  `_ensure_pack_state` can install empty state before validation (`activegraph/packs/loader.py:69,523-530`),
+  and registries/validators mutate at `:259-299` before payload construction and the final
+  `pack.loaded` emit at `:307-318`, without rollback around a late failure.
 - **Three independent nets** (`CONTRACT.md:7492-7499`): (1) rlimits in the child — `RLIMIT_AS` from
   `max_rss_bytes`, `RLIMIT_CPU` from `cpu_seconds = int(wall_clock_seconds) + 5`
   (`activegraph/sandbox/__init__.py:318-330`, `activegraph/sandbox/_child.py:57-109`); (2) parent-side
@@ -541,16 +547,17 @@ inherited-cases    ::= test_protocol_and_isolation_are_declared
 
 `activegraph/sandbox/conformance.py:17-76`.
 
-### Error types raised
+### Principal parent-visible errors and child classifications
 
 | Error | Where | When |
 |---|---|---|
 | `SandboxStartupError(ConfigurationError, RuntimeError)` | defined `activegraph/sandbox/__init__.py:183-193`, raised `:357-359` | child cannot start / never reports `preflight: ok`; one-line legacy rendering retained until AF-wse |
-| `ValueError` | `activegraph/sandbox/executor.py:53-57,81-107,311-387` | malformed or unversioned specification |
+| `ValueError` | `PackSource` at `activegraph/sandbox/__init__.py:102-126`; wire parsing at `executor.py:78-118,311-387` | malformed pin, identity, version, limits, or serialized shape; wrapper parsing propagates before fork work |
 | `RuntimeError` | `activegraph/sandbox/executor.py:300-308` | `RecordingTrialExecutor` fixtures exhausted |
-| `RuntimeError` | `activegraph/sandbox/_child.py:151-164,183-191` | pack/scenario import problems → `materialization_failed` / `scenario_failed` |
-| `PackManifestError` | defined `activegraph/packs/manifest.py:126-164`; caught by `Exception` at `activegraph/sandbox/_child.py:227-240` | pin/manifest/surface violations → `materialization_failed` |
-| `IncompatibleRuntimeState` | `activegraph/runtime/runtime.py:3947-3981` via `fork()` | non-SQLite store — **propagates out of** `run_forked_trial` |
+| `OSError` family | `activegraph/sandbox/__init__.py:274-305` | `Popen` cannot launch the child; propagates from the local executor |
+| runtime load/fork errors, including `IncompatibleRuntimeState` | `activegraph/sandbox/__init__.py:433-461`; `runtime/runtime.py:3745-4105` | invalid parent/store/cut or non-SQLite fork; propagates rather than becoming a trial outcome |
+| `PackManifestError` / other materialization exception | caught `activegraph/sandbox/_child.py:227-240` | pin, manifest, import, selection, or surface failure → `materialization_failed` |
+| `MemoryError` / other drive exception | caught `activegraph/sandbox/_child.py:265-293` | scenario/run drive → `limits_exceeded` / `scenario_failed`; load/load-pack exceptions occur earlier and become parent-classified `crashed` |
 
 ## Sequence: a wall-clock-killed trial, end to end
 
@@ -565,7 +572,7 @@ sequenceDiagram
     participant PK as packs.manifest
 
     O->>E: execute(serialized_specification)
-    E->>E: TrialSpecification.from_json() — ValueError before any work
+    E->>E: TrialSpecification.from_json() — validate; ValueError if malformed
     E->>P: _run_forked_trial_local(...)
 
     P->>RT: Runtime.load(store_path, run_id=parent_run_id, behaviors=[])
@@ -577,11 +584,15 @@ sequenceDiagram
     P->>C: _run_child(job) — Popen([sys.executable, "-m", "activegraph.sandbox._child"])
     Note over P,C: job JSON on stdin: store_path, fork_run_id, initial_events,<br/>pack_root, pins, extra_packs, scenario, limits(cpu_seconds)
 
-    C->>C: _apply_rlimits(limits) — RLIMIT_AS, RLIMIT_CPU (clamped, degradations warned)
+    C->>C: _apply_rlimits(limits) — RLIMIT_AS / RLIMIT_CPU, clamped where available
     C->>PK: verify_bundle_hash(expected, root)
-    C->>PK: load_manifest(root)
+    opt manifest_required
+        C->>PK: load_manifest(root)
+    end
     C->>C: spec_from_file_location(...).exec_module()
-    C->>PK: verify_surface(manifest, pack)
+    opt manifest_required
+        C->>PK: verify_surface(manifest, pack)
+    end
     C->>RT: Runtime.load(store_path, run_id=fork_run_id, behaviors=[], budget=budget)
     Note over C,RT: no llm_provider argument — key-freedom is structural
     C->>RT: rt.load_pack(each extra pack, in order), then rt.load_pack(candidate)
@@ -593,7 +604,7 @@ sequenceDiagram
 
     P->>RT: Runtime.load(store_path, run_id=fork_run_id, behaviors=[])
     P->>RT: graph.emit(Event(type="trial.wall_clock_exhausted", actor="trial_executor"))
-    Note over P,RT: external stop fact — validated, projected, durably appended
+    Note over P,RT: external stop fact — included in events_appended
     P->>RT: len(graph.events) - initial_events, len(trace.failures())
     Note over P: the STORE is the record — the stdout tail is a signal only
 
@@ -608,28 +619,29 @@ Sources: `activegraph/sandbox/__init__.py:391-543` (parent flow), `:274-305` (sp
 
 ## Open questions
 
-1. **`sandbox/` has zero in-package callers — confirmed, not a grep artifact.** Nothing under
-   `activegraph/` imports it; `activegraph/__init__.py` has no `sandbox` reference. Outside matches
-   are prose/comments at `activegraph/packs/manifest.py:16,35,452` and
-   `activegraph/errors.py:95-101`, not callers. It is a deliberate **dangling public boundary**.
-   The repository does not verify the separate evolution-pack call site; `sandbox -> core, packs,
-   runtime` is accurate, and `store/` is reached only through `Runtime`.
+1. **`sandbox/` has zero production callers in this repository — confirmed.** Nothing elsewhere
+   under `activegraph/` imports it, and `activegraph/__init__.py` does not re-export it. Outside
+   matches in `activegraph/errors.py:95-101` and `activegraph/packs/manifest.py:16,35,452` are prose,
+   not calls. The contract describes an evolution-pack design boundary (`CONTRACT.md:7470-7476`),
+   but its actual external call site is not available here. Draw `sandbox/` as a dangling opt-in
+   public boundary; its `core`, `packs`, and `runtime` edges are outbound, and `store/` is reached
+   through `Runtime`.
 
 2. **Deliberate circular import between `__init__.py` and `executor.py`.**
    `activegraph/sandbox/executor.py:9` imports `PackSource, TrialLimits, TrialReport` from
    `activegraph.sandbox`, while `activegraph/sandbox/__init__.py:579-590` imports back from
    `activegraph.sandbox.executor` at the **bottom** of the module (with `# noqa: E402`), and
-   `activegraph/sandbox/executor.py:252-264` re-imports `_run_forked_trial_local` lazily inside
+   `activegraph/sandbox/executor.py:249-269` re-imports `_run_forked_trial_local` lazily inside
    `execute`. It works, but any new top-of-module import in `executor.py` touching
-   `activegraph.sandbox` symbols defined *after* line 566 will break at import time.
+   `activegraph.sandbox` symbols not yet initialized will break at import time.
 
 3. **`conformance.py` imports `pytest` at module scope** (`activegraph/sandbox/conformance.py:7`) —
-   a shipped runtime module with a hard test-framework dependency. `store/conformance.py` and
-   `sinks/conformance.py` follow the same convention; `store/graph_conformance.py` does not import
-   pytest.
+   a shipped runtime module with a hard test-framework dependency. This is a confirmed convention
+   in `store/conformance.py:20` and `sinks/conformance.py:17`; `store/graph_conformance.py` does not
+   import pytest. The packaging/runtime dependency question remains open across that exact set.
 
-4. **Resolved: schema v2 closes the historical empty-pin posture.** Schema v1 intentionally allowed an
-   empty `expected_bundle_hash`; that history remains recorded in CONTRACT v1.8 #9. The
+4. **Resolved — schema v2 closes the historical empty-pin posture.** Schema v1 intentionally
+   allowed an empty `expected_bundle_hash`; that history remains recorded in CONTRACT v1.8 #9. The
    2026-08-12 Set 4 amendment #4 makes v2 the only emitted form and requires the candidate plus
    every extra to carry an exact lowercase SHA-256 pin. Pinned v1 input migrates to v2; unpinned v1
    is rejected before executor work. The child verifies every accepted pin unconditionally.
@@ -637,45 +649,43 @@ Sources: `activegraph/sandbox/__init__.py:391-543` (parent flow), `:274-305` (sp
 5. **`max_llm_calls > 0` is accepted and reaches the child's `Budget`, but is inert.**
    `activegraph/sandbox/_child.py:247-260` sets the budget dimension, yet the child configures no
    provider at all (`activegraph/sandbox/_child.py:255-260`), so the dimension can never be
-   consumed. The docstring says it is "recorded for a future provider-wiring seam"
-   (`activegraph/sandbox/__init__.py:133-139`) — a knowingly-dead code path, not a bug.
+   consumed. The field docstring records it for a future provider-wiring seam
+   (`activegraph/sandbox/__init__.py:129-153`) — a knowingly inactive path, not a current budget net.
 
 6. **`TrialArtifactReference` is a typed placeholder.** `LocalSubprocessTrialExecutor` never
    populates `artifacts`; `TrialResult.from_report`'s default `artifacts=()` is always used
-   (`activegraph/sandbox/executor.py:178`, `:249-269`). `CONTRACT.md:8133-8142` confirms there is
+   (`activegraph/sandbox/executor.py:171-208,240-269`). `CONTRACT.md:8133-8142` confirms there is
    "no artifact upload/storage subsystem; the typed empty-or-reference field is the compatibility
    seam."
 
 7. **`trial.wall_clock_exhausted` is write-only within this repo.** The parent emits it
-   (`activegraph/sandbox/__init__.py:511-527`) but no `activegraph/` code reads it — grep finds only the
-   emitter, `CHANGELOG.md:217`, and `tests/test_sandbox_trial.py:217`. `apply_event`
-   (`activegraph/core/graph.py:1027-1103`) ignores unknown types, so it projects as a no-op fact.
-   Contrast `runtime.budget_exhausted`, which *is* read
-   (`activegraph/runtime/runtime.py:3130-3137,4925-4950`,
-   `activegraph/sandbox/_child.py:295-308`). It belongs in the event catalogue as an
-   **external stop fact for downstream consumers, with no internal reader.**
+   (`activegraph/sandbox/__init__.py:510-527`) but no `activegraph/` code reads it. `apply_event`
+   (`activegraph/core/graph.py:1027-1103`) has no branch for it, so it projects as a no-op fact.
+   Contrast `runtime.budget_exhausted`, which is read by runtime status/replay and the child
+   (`activegraph/runtime/runtime.py:3130-3137,4925-4949`; `_child.py:295-308`). It belongs in the
+   event catalogue as an **external stop fact for downstream consumers, with no internal reader.**
 
-8. **Timed-out trials count the parent's own marker in `events_appended`.**
-   `activegraph/sandbox/__init__.py:510` snapshots `stop_sequence` *before* the emit, but
-   `events_appended` is computed at `:528-530` *after* it — so a wall-clock-killed trial reports one
-   more appended event than the child actually produced. Possibly intended (the marker *is* an event
-   in the fork's log), but it is not stated anywhere and reads as child work. Worth confirming with
-   whoever owns v1.8 #11.
+8. **Confirmed boundary — timed-out trials count the parent's marker in `events_appended`.**
+   `activegraph/sandbox/__init__.py:510` snapshots `stop_sequence` before the emit, while
+   `events_appended` is computed at `:528-530` afterward. The field therefore counts every fork-log
+   append, including the parent-owned external stop fact; it is not a child-work-only metric.
+   Whether callers need a separate child-only count remains open.
 
 9. **`scenario` path is not containment-checked.** `_resolve_scenario` does
-   `(root / path_part).resolve()` (`activegraph/sandbox/_child.py:177-180`) with no assertion that the
+   `(root / path_part).resolve()` (`activegraph/sandbox/_child.py:172-186`) with no assertion that the
    result stays under `root`, so `scenario="../../thing.py"` would execute code outside the
    candidate's pack root. `scenario` is a *parent*-supplied field, not candidate-supplied, so this
-   is not a candidate-escape vector — but it is an unvalidated input at a seam whose sibling inputs
-   (`pack_root`, pins) are all strictly validated.
+   is not a candidate-escape vector — but it remains an unchecked path seam next to the strict pin
+   grammar.
 
 10. **Asymmetric `sys.modules` handling.** The pack module is registered in `sys.modules`
-    (`activegraph/sandbox/_child.py:153-155`) but the scenario module (`"_trial_scenario"`) is not
+    (`activegraph/sandbox/_child.py:146-155`) but the scenario module (`"_trial_scenario"`) is not
     (`activegraph/sandbox/_child.py:180-186`). A scenario file that relies on being importable by
-    name, or a pack with two scenarios, therefore behaves differently from the pack module.
+    name (including dataclass-style module lookup) therefore behaves differently from the pack
+    module.
 
 11. **`python_flags` on `_run_child` is a documented test-only seam**
-    (`activegraph/sandbox/__init__.py:284-287`, used with `-S` in
+    (`activegraph/sandbox/__init__.py:274-287`, used with `-S` in
     `tests/test_sandbox_trial.py:651-678,691-697,761-778`). Do not model it as production surface.
 
 12. **Not verifiable from this repo:** the exact call site in the evolution pack that invokes
