@@ -332,17 +332,3 @@ new claims:
   resource. Prompts and policies are Pack fields but have no manifest fields;
   prompt loading/hashing and policy registration follow their separate Pack
   and loader paths.
-- **Approval-safe idempotency is asymmetric.** Risk generation checks pending
-  approvals; memo generation does not. With `auto_approve_memos=False`, a
-  second risk can therefore lead to another pending memo proposal before the
-  first proposal is approved.
-- **The pack's own prose disagrees on the LLM count.** The live `BEHAVIORS`
-  list has four `LLMBehavior`s. `manifest.toml:4` says four, but
-  `__init__.py:64-65` says three and `behaviors.py:3-5` says only two behaviors
-  are deterministic and all five others are LLM-backed (incorrectly counting
-  plain `company_planner`).
-- **Two advertised settings are currently inert.** `llm_model` and
-  `max_documents_per_company` are defined in `settings.py:24-31` and supplied
-  by the quickstart, but no Diligence handler reads either. LLM behaviors leave
-  `model=None` for runtime/provider default resolution, while the recorded
-  research provider requests three documents directly.
