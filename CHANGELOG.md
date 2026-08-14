@@ -112,6 +112,14 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
 
 ### Changed
 
+- **`LLMProvider.supports_native_structured_output`'s Protocol default is now `False`, not an
+  unresolved `...`.** An explicit `class Foo(LLMProvider):` subclass that omits the override
+  previously inherited the bare `...`-bodied method, which returned `None` when called — the
+  runtime's fallback to `"prompt"` mode worked today only by `not None` happening to be `True`, not
+  through the mechanism the docstring described. Calling `supports_native_structured_output`
+  directly on such a subclass now returns an honest `False`. The runtime's resolved mode
+  (`"prompt"`) is unchanged for every existing and new provider shape; all 5 shipped providers
+  already define concrete overrides and are unaffected.
 - **`GraphStore.remove_patch` is now `@abstractmethod`.** A custom `GraphStore` subclass that
   implements every other required method but omits `remove_patch` now fails fast with a standard
   `TypeError` at construction time, instead of constructing successfully and only failing later,

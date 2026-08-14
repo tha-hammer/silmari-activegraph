@@ -187,16 +187,19 @@ class LLMProvider(Protocol):
         """True when the provider can enforce ``output_schema`` natively
         for ``model`` (constrained decoding). CONTRACT v1.3 #1.
 
-        Additive like ``default_model`` / ``recognizes_model``: the
-        runtime guards the lookup with ``getattr(...)``, so custom
-        providers that pre-date v1.3 keep working and simply resolve to
-        the prompt-embedded path. When this returns True for the
-        resolved model (and the schema passes the offline pre-flight),
-        the runtime calls ``complete()`` with
+        The base Protocol method returns ``False``: an explicit subclass
+        that omits the override safely resolves to prompt-mode without
+        relying on ``getattr``'s absent-attribute fallback. Additive like
+        ``default_model`` / ``recognizes_model``: for providers that don't
+        subclass ``LLMProvider`` at all, the runtime also guards the lookup
+        with ``getattr(...)``, so custom providers that pre-date v1.3 keep
+        working and simply resolve to the prompt-embedded path. When this
+        returns True for the resolved model (and the schema passes the
+        offline pre-flight), the runtime calls ``complete()`` with
         ``structured_output_mode="native"``; prompt-mode calls omit the
         parameter entirely, staying byte-identical to pre-v1.3 calls.
         """
-        ...
+        return False
 
     def recognizes_model(self, name: str) -> bool:
         """True when `name` belongs to a model family this provider serves.
