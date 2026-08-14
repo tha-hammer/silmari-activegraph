@@ -209,6 +209,16 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
   an intentional 1.x narrowing. Migrate free-form labels to a valid version
   such as `0+nightly`; the framework does not normalize them automatically.
 
+### Fixed
+
+- **Sandbox trial `scenario` path traversal.** `_resolve_scenario` now rejects
+  a `scenario` value (e.g. `"../outside/evil.py::main"`) that resolves outside
+  the candidate pack's root, before any import happens — matching
+  `_materialize_pack`'s existing `verify_bundle_hash` containment gate. The
+  scenario module is also now registered in `sys.modules["_trial_scenario"]`
+  before execution, mirroring the pack-module load block's existing
+  `importlib` idiom.
+
 ## [1.10.0] — 2026-07-12
 
 Runtime legibility and cooperative-host round (CONTRACT v1.10 #1–#3): the behavior-frame

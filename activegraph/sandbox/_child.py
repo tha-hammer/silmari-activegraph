@@ -177,12 +177,20 @@ def _resolve_scenario(
     path_part, _, func_name = scenario.partition("::")
     func_name = func_name or "main"
     scenario_path = (root / path_part).resolve()
+    root_resolved = root.resolve()
+    if not scenario_path.is_relative_to(root_resolved):
+        # Same "nothing outside pack_root gets imported unverified"
+        # invariant as _materialize_pack's verify_bundle_hash gate above.
+        raise RuntimeError(
+            f"scenario path {scenario_path} escapes pack root {root_resolved}"
+        )
     spec = importlib.util.spec_from_file_location(
         "_trial_scenario", scenario_path
     )
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot import scenario at {scenario_path}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     fn = getattr(module, func_name, None)
     if not callable(fn):
