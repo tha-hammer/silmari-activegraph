@@ -23,9 +23,13 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+import ast
+
+import activegraph.cli.quickstart as quickstart_module
 from activegraph.cli.quickstart import (
     _INTERACTIVE_SUBDIR,
     _QUICKSTART_DB_PATH,
+    _run_user_behavior,
     cmd_quickstart,
     run_fixture_mode,
     run_interactive_mode,
@@ -307,3 +311,58 @@ def test_interactive_cli_invocation_with_quit(tmp_path, monkeypatch) -> None:
     result = runner.invoke(cmd_quickstart, ["--interactive"], input="quit\n")
     assert result.exit_code == 0, result.output
     assert "Created" in result.output
+
+
+# ---------- CLI hygiene (10.8 + 10.9) -------------------------------------
+
+
+def test_quickstart_imports_no_dead_fs_modules() -> None:
+    """10.8: os/shutil have zero uses anywhere in the file (confirmed by
+    word-boundary grep) — dead imports."""
+    source = Path(quickstart_module.__file__).read_text()
+    tree = ast.parse(source)
+    imported_names = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    assert "os" not in imported_names
+    assert "shutil" not in imported_names
+
+
+def test_quickstart_db_dir_is_not_hardcoded_tmp() -> None:
+    """10.8: the DB directory is portable (tempfile.gettempdir()-derived)
+    instead of hardcoded POSIX /tmp, while keeping the single-shared-file
+    demo-hygiene design. On Linux, tempfile.gettempdir() resolves to
+    /tmp by default, so the derived value is legitimately byte-identical
+    to the old literal there — the assertion is that it's *derived* from
+    tempfile.gettempdir(), not merely that the two strings differ."""
+    import tempfile
+
+    assert quickstart_module._QUICKSTART_DB_DIR.startswith(tempfile.gettempdir())
+    assert quickstart_module._QUICKSTART_DB_DIR == str(
+        Path(tempfile.gettempdir()) / "activegraph_quickstart"
+    )
+
+
+def test_quickstart_scaffold_name_and_counter_share_one_constant(
+    tmp_path, monkeypatch
+) -> None:
+    """10.9: the scaffold's behavior name and the fire-counter's match
+    string are driven by one shared constant, not three independently
+    typed literals that happen to agree. Proven behaviorally: rename the
+    constant, re-render the scaffold, run it through the real counting
+    path, and confirm the count still resolves correctly against the new
+    name."""
+    monkeypatch.setattr(quickstart_module, "_SCAFFOLD_BEHAVIOR_NAME", "renamed_flagger")
+
+    rendered = quickstart_module._render_interactive_scaffold()
+    assert 'name="renamed_flagger"' in rendered
+    assert "def renamed_flagger(" in rendered
+    assert "growth_flagger" not in rendered
+
+    behavior_file = tmp_path / "my_first_behavior.py"
+    behavior_file.write_text(rendered)
+    fire_count = _run_user_behavior(behavior_file, write=lambda *a, **k: None)
+    assert fire_count > 0

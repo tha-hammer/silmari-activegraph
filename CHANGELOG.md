@@ -112,6 +112,14 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
 
 ### Changed
 
+- **`activegraph quickstart`'s demo database directory is now portable.** `_QUICKSTART_DB_DIR` is
+  derived from `tempfile.gettempdir()` instead of hardcoded to POSIX `/tmp` (byte-identical to the
+  old value on Linux/macOS, where `gettempdir()` resolves to `/tmp`). The single-shared,
+  cleaned-up-before-each-run filename design is unchanged — this is a portability fix, not a
+  concurrency feature. Also removed two dead imports (`os`, `shutil` — zero uses anywhere in the
+  file) and unified the interactive scaffold's behavior name and its own fire-counter onto one
+  `_SCAFFOLD_BEHAVIOR_NAME` constant instead of three independently-typed literals that happened to
+  agree.
 - **`LLMProvider.supports_native_structured_output`'s Protocol default is now `False`, not an
   unresolved `...`.** An explicit `class Foo(LLMProvider):` subclass that omits the override
   previously inherited the bare `...`-bodied method, which returned `None` when called — the
