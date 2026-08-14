@@ -298,10 +298,11 @@ def load_pack_into_runtime(
     # are picked up. Runtime's `_ensure_registry` is the single seam.
     rt.registry = None
 
-    # If a graph is already attached, install the schema validators NOW so
-    # subsequent live add_object calls are schema-validated.
-    if rt.graph is not None:
-        _install_graph_validators(rt.graph, state)
+    # Install the schema validators NOW so subsequent live add_object calls
+    # are schema-validated. Runtime.graph is non-Optional and set once at
+    # construction, so this always runs together with the pack.loaded emit
+    # below — no reachable path has an unattached graph here.
+    _install_graph_validators(rt.graph, state)
 
     # ---- 6. emit pack.loaded event ---------------------------------------
     payload = _build_pack_loaded_payload(pack, settings_obj)
