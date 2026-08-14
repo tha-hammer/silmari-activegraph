@@ -299,6 +299,13 @@ Import direction: `core/` knows nothing about `runtime/` or `behaviors/`.
 `behaviors/` imports `core/` only. `runtime/` imports `core/` and
 `behaviors/`. Anything else is a layering violation.
 
+Documented exception: core-layer functions may raise execution-semantics
+error *types* that are physically defined in `runtime/exec_errors.py` via a
+function-local import, because the error taxonomy (not behavior) belongs to
+the execution layer even when the failure is detected in `core/`; `core/`
+still never imports `runtime/` at module scope and never depends on
+`runtime/` behavior.
+
 ## 15. Testing
 
 - Every primitive: unit test.

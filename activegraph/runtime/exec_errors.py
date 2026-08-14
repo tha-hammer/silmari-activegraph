@@ -361,6 +361,14 @@ class InternalEvaluatorError(ExecutionError, ValueError):
     :class:`UnsupportedPatternError` (the natural category) but use
     the same :func:`activegraph.errors.internal_bug_fields` helper so
     the prose is uniform across all three sites.
+
+    Raised from ``core/graph.py`` via a function-local import — the
+    established pattern for execution-semantics errors detected in
+    core/, not a special case. Siblings following the same convention:
+    :class:`ReservedFieldError`, :class:`InvalidPatchLifecycleState`,
+    :class:`ObjectNotFoundError`, and :class:`ApplyPatchNotFoundError`.
+    See CONTRACT.md's "core/ knows nothing about runtime/" import-direction
+    rule for why this is a naming/location coupling, not a behavioral one.
     """
 
     _doc_slug = "internal-evaluator-error"
