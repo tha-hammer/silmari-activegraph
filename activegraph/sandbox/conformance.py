@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-import pytest
-
 from activegraph.sandbox import TRIAL_OUTCOMES
 from activegraph.sandbox.executor import (
     TrialExecutor,
@@ -72,8 +70,12 @@ class TrialExecutorConformance(ABC):
 
     def test_malformed_specification_fails_before_execution(self) -> None:
         executor = self.make_executor()
-        with pytest.raises(ValueError):
+        try:
             executor.execute("{}")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("expected ValueError for a malformed specification")
 
 
 __all__ = ["TrialExecutorConformance"]

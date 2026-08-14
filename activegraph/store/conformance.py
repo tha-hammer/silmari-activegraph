@@ -17,8 +17,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-import pytest
-
 from activegraph.core.event import Event
 from activegraph.store.errors import DuplicateEventError
 
@@ -163,18 +161,24 @@ class EventStoreConformance(ABC):
             before = store.get_event(event.id)
             before_count = store.count()
 
-            with pytest.raises(DuplicateEventError) as excinfo:
+            caught = None
+            try:
                 store.append(self._ev(event.id, payload={"replacement": True}))
+            except DuplicateEventError as exc:
+                caught = exc
+            else:
+                raise AssertionError("expected DuplicateEventError for a duplicate id")
 
             assert store.get_event(event.id) == before
             assert store.count() == before_count
-            assert excinfo.value.context == {
+            exc = caught
+            assert exc.context == {
                 "event_id": event.id,
                 "run_id": store.run_id,
                 "backend": self.backend_name,
             }
-            assert event.id in str(excinfo.value)
-            assert store.run_id in str(excinfo.value)
+            assert event.id in str(exc)
+            assert store.run_id in str(exc)
         finally:
             if store is not None:
                 self.close_store(store)
@@ -276,12 +280,16 @@ class ForkRunAtomicityConformance:
             runs_before = self._run_ids(parent)
             recent_before = type(parent).most_recent_run_id(self.fork_target)
 
-            with pytest.raises(Exception):
+            try:
                 self.call_fork(
                     parent_run_id=parent.run_id,
                     new_run_id=child_run_id,
                     at_event_id="evt_fork_2",
                 )
+            except Exception:
+                pass
+            else:
+                raise AssertionError("expected an exception for the failing fork")
 
             assert self._run_ids(parent) == runs_before
             assert type(parent).most_recent_run_id(self.fork_target) == recent_before
