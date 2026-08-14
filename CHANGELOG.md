@@ -112,6 +112,12 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
 
 ### Changed
 
+- **`GraphStore.remove_patch` is now `@abstractmethod`.** A custom `GraphStore` subclass that
+  implements every other required method but omits `remove_patch` now fails fast with a standard
+  `TypeError` at construction time, instead of constructing successfully and only failing later,
+  at the first `clear()` call, with a `NotImplementedError`. Both shipped backends
+  (`InMemoryGraphStore`, `FalkorDBGraphStore`) already implement it, so this only affects custom
+  or third-party `GraphStore` subclasses that were previously incomplete.
 - **`propose_patch(op=...)` now validates `op`.** `PATCH_OPS` is narrowed from
   `{"create", "update", "replace", "remove"}` to `{"update", "replace"}` —
   object creation/removal were never implemented as patch ops and are already

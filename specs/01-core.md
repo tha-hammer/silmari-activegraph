@@ -709,12 +709,13 @@ sequenceDiagram
    `data.data.<nested>`). `evaluate_where` grammar itself is unchanged
    (`activegraph/core/graph.py:1200-1219`; `activegraph/core/view.py:13-18,44-63`).
 
-9. **`GraphStore.clear()`'s default depends on `remove_patch`, which the ABC raises
-   `NotImplementedError` for** (`activegraph/core/graph_store.py:272-288`). A backend that
-   implements the three abstract patch methods but forgets `remove_patch` passes
-   `@abstractmethod` checks and then fails at `clear()`, not at `remove_patch`.
-   The reusable conformance test exercises `clear` (`activegraph/store/graph_conformance.py:190-201`),
-   so participating backends are caught at test time, but the ABC's own shape allows the hole.
+9. **Resolved — `remove_patch` promoted to `@abstractmethod`.** `GraphStore.clear()`'s default
+   implementation depends on `remove_patch` (`activegraph/core/graph_store.py:272-288`), and
+   `remove_patch` is now part of the `@abstractmethod` set: a backend that omits it now fails fast
+   with a standard `TypeError` at construction time, matching where the ABC contract points,
+   instead of only failing later at the first `clear()` call. Both shipped backends
+   (`InMemoryGraphStore`, `FalkorDBGraphStore`) already implemented it, so this is a pure
+   tightening with no adaptation needed.
 
 10. **`Graph._replay_event` is prefixed private but is a documented public seam** — used from
     `store/base.py:90`, `runtime/runtime.py:3815,4009,4861`, `runtime/promote.py:172`, and
