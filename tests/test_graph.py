@@ -291,3 +291,123 @@ def test_emit_is_only_mutator_for_external_state():
         )
     )
     assert g.get_object("manual#1") is not None
+
+
+# ---------- ID generation happens inside the _emit_lock scope (01.3) -------
+#
+# `_emit_lock` is a re-entrant `threading.RLock()` documented as serializing
+# each graph's live acceptance boundary. `IDGen` itself is not thread-safe;
+# it relies on being called only from inside that serialized boundary. These
+# tests assert lock ownership at the exact `ids.*()` call site (deterministic,
+# not timing-based) for every `Graph` sugar method that generates an id
+# before its own mutation reaches `self.emit(...)`.
+
+
+def _assert_owned_wrapper(monkeypatch, ids_obj, method_name):
+    """Monkeypatch ``ids_obj.<method_name>`` with a wrapper that asserts
+    ``graph._emit_lock._is_owned()`` at the moment it's called, then
+    delegates to the real method."""
+    real = getattr(ids_obj, method_name)
+
+    def wrapper(graph, *args, **kwargs):
+        assert graph._emit_lock._is_owned(), (
+            f"ids.{method_name}() called without holding _emit_lock"
+        )
+        return real(*args, **kwargs)
+
+    return real, wrapper
+
+
+def test_add_object_generates_ids_while_holding_emit_lock(monkeypatch):
+    g = _g()
+    real_object, wrap_object = _assert_owned_wrapper(monkeypatch, g.ids, "object")
+    real_event, wrap_event = _assert_owned_wrapper(monkeypatch, g.ids, "event")
+    monkeypatch.setattr(g.ids, "object", lambda *a, **k: wrap_object(g, *a, **k))
+    monkeypatch.setattr(g.ids, "event", lambda *a, **k: wrap_event(g, *a, **k))
+
+    g.add_object("task", {})
+
+
+def test_propose_patch_generates_ids_while_holding_emit_lock(monkeypatch):
+    g = _g()
+    obj = g.add_object("task", {"status": "open"})
+    real_patch, wrap_patch = _assert_owned_wrapper(monkeypatch, g.ids, "patch")
+    real_event, wrap_event = _assert_owned_wrapper(monkeypatch, g.ids, "event")
+    monkeypatch.setattr(g.ids, "patch", lambda *a, **k: wrap_patch(g, *a, **k))
+    monkeypatch.setattr(g.ids, "event", lambda *a, **k: wrap_event(g, *a, **k))
+
+    g.propose_patch(target=obj.id, op="update", value={"status": "closed"}, proposed_by="test")
+
+
+def test_add_relation_generates_ids_while_holding_emit_lock(monkeypatch):
+    g = _g()
+    obj_a = g.add_object("task", {})
+    obj_b = g.add_object("task", {})
+    real_relation, wrap_relation = _assert_owned_wrapper(monkeypatch, g.ids, "relation")
+    real_event, wrap_event = _assert_owned_wrapper(monkeypatch, g.ids, "event")
+    monkeypatch.setattr(g.ids, "relation", lambda *a, **k: wrap_relation(g, *a, **k))
+    monkeypatch.setattr(g.ids, "event", lambda *a, **k: wrap_event(g, *a, **k))
+
+    g.add_relation(obj_a.id, obj_b.id, "blocks")
+
+
+def test_remove_relation_generates_ids_while_holding_emit_lock(monkeypatch):
+    g = _g()
+    obj_a = g.add_object("task", {})
+    obj_b = g.add_object("task", {})
+    relation = g.add_relation(obj_a.id, obj_b.id, "blocks")
+    real_event, wrap_event = _assert_owned_wrapper(monkeypatch, g.ids, "event")
+    monkeypatch.setattr(g.ids, "event", lambda *a, **k: wrap_event(g, *a, **k))
+
+    g.remove_relation(relation.id)
+
+
+def test_remove_object_generates_ids_while_holding_emit_lock(monkeypatch):
+    g = _g()
+    obj = g.add_object("task", {})
+    real_event, wrap_event = _assert_owned_wrapper(monkeypatch, g.ids, "event")
+    monkeypatch.setattr(g.ids, "event", lambda *a, **k: wrap_event(g, *a, **k))
+
+    g.remove_object(obj.id)
+
+
+def test_patch_object_generates_ids_while_holding_emit_lock(monkeypatch):
+    g = _g()
+    obj = g.add_object("task", {})
+    real_patch, wrap_patch = _assert_owned_wrapper(monkeypatch, g.ids, "patch")
+    real_event, wrap_event = _assert_owned_wrapper(monkeypatch, g.ids, "event")
+    monkeypatch.setattr(g.ids, "patch", lambda *a, **k: wrap_patch(g, *a, **k))
+    monkeypatch.setattr(g.ids, "event", lambda *a, **k: wrap_event(g, *a, **k))
+
+    g.patch_object(obj.id, {"k": "v"})
+
+
+def test_apply_patch_generates_ids_while_holding_emit_lock(monkeypatch):
+    g = _g()
+    obj = g.add_object("task", {"k": "v0"})
+    patch = g.propose_patch(target=obj.id, op="update", value={"k": "v"}, proposed_by="test")
+    real_event, wrap_event = _assert_owned_wrapper(monkeypatch, g.ids, "event")
+    monkeypatch.setattr(g.ids, "event", lambda *a, **k: wrap_event(g, *a, **k))
+
+    g.apply_patch(patch.id)
+
+
+def test_reject_patch_generates_ids_while_holding_emit_lock(monkeypatch):
+    g = _g()
+    obj = g.add_object("task", {"k": "v0"})
+    patch = g.propose_patch(target=obj.id, op="update", value={"k": "v"}, proposed_by="test")
+    real_event, wrap_event = _assert_owned_wrapper(monkeypatch, g.ids, "event")
+    monkeypatch.setattr(g.ids, "event", lambda *a, **k: wrap_event(g, *a, **k))
+
+    g.reject_patch(patch.id, "test reason")
+
+
+def test_apply_patch_version_mismatch_also_generates_ids_while_holding_emit_lock(monkeypatch):
+    g = _g()
+    obj = g.add_object("task", {"k": "v0"})
+    patch = g.propose_patch(target=obj.id, op="update", value={"k": "v"}, proposed_by="test")
+    g.patch_object(obj.id, {"k": "v2"})  # advances obj.version past patch.expected_version
+    real_event, wrap_event = _assert_owned_wrapper(monkeypatch, g.ids, "event")
+    monkeypatch.setattr(g.ids, "event", lambda *a, **k: wrap_event(g, *a, **k))
+
+    g.apply_patch(patch.id)
