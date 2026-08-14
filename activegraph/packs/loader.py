@@ -922,8 +922,8 @@ def _install_graph_validators(graph, state: PackRuntimeState) -> None:
     The hook is idempotent — calling again with the same state object
     replaces the previous validator.
     """
-    graph._pack_object_validator = _make_object_validator(state)  # type: ignore[attr-defined]
-    graph._pack_relation_validator = _make_relation_validator(state)  # type: ignore[attr-defined]
+    graph._pack_object_validator = _make_object_validator(state)  # noqa: SLF001
+    graph._pack_relation_validator = _make_relation_validator(state)  # noqa: SLF001
 
 
 def _make_object_validator(state: PackRuntimeState):
