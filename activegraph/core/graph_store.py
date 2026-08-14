@@ -278,6 +278,7 @@ class GraphStore(ABC):
         for p in self.all_patches():
             self.remove_patch(p.id)
 
+    @abstractmethod
     def remove_patch(self, patch_id: str) -> None:
         """Drop the patch with ``patch_id`` if present.
 
@@ -285,7 +286,6 @@ class GraphStore(ABC):
         events — only superseded), but :meth:`clear` needs it. Subclasses
         that store patches must override.
         """
-        raise NotImplementedError
 
     def close(self) -> None:
         """Release any backend resources. Default: no-op."""

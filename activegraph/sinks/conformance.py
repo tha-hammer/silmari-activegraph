@@ -14,8 +14,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import Any
 
-import pytest
-
 from activegraph.core.event import Event
 from activegraph.core.graph import Graph
 from activegraph.runtime.runtime import Runtime
@@ -180,8 +178,12 @@ class EventSinkConformance(ABC):
         graph = Graph(run_id="run_sink_rejected")
         runtime = Runtime(graph, behaviors=[], store=store, sinks=[sink])
         try:
-            with pytest.raises(TypeError):
+            try:
                 graph.emit(self._event(graph, 1, {"bad": object()}))
+            except TypeError:
+                pass
+            else:
+                raise AssertionError("expected TypeError for a non-serializable payload")
             assert runtime.flush_sinks(timeout=2.0)
             assert list(self.read_deliveries(sink)) == []
             assert graph.events == []

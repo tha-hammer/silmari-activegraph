@@ -164,6 +164,10 @@ class TrialReport:
     from the fork's log directly: ``Runtime.load(store, run_id=
     report.fork_run_id)`` then ``trace.failures()`` / ``diff()``.
 
+    On a wall-clock-killed trial, ``events_appended`` excludes the
+    parent's own ``trial.wall_clock_exhausted`` marker event — it
+    reflects only what the child process itself produced.
+
     ``warnings`` (v1.7.1) carries any resource net that DEGRADED on
     this platform — most notably the memory cap (RLIMIT_AS) on macOS,
     which the Darwin kernel refuses. A degraded net is announced, never
@@ -526,7 +530,9 @@ def _run_forked_trial_local(
                 )
             )
         events_appended = max(
-            0, len(fork_view.graph.events) - initial_events
+            0,
+            (stop_sequence if timed_out else len(fork_view.graph.events))
+            - initial_events,
         )
         behavior_failures = len(fork_view.trace.failures())
     except Exception as e:  # noqa: BLE001 — report, never mask the trial

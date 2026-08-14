@@ -10,6 +10,7 @@ from activegraph import (
     Graph,
     IDGen,
     InvalidPatchLifecycleState,
+    InvalidPatchOperationError,
     ObjectNotFoundError,
     PatchNotFoundError,
     RejectPatchNotFoundError,
@@ -51,6 +52,52 @@ def test_propose_patch_emits_proposed_and_can_apply():
     assert g.get_object(o.id).data["summary"] == "new"
     assert g.get_object(o.id).version == 2
     assert g.get_patch(p.id).status == "applied"
+
+
+@pytest.mark.parametrize("bad_op", ["create", "remove", "delete", ""])
+def test_propose_patch_rejects_op_outside_update_or_replace(bad_op):
+    g = _g()
+    obj = g.add_object("task", {"status": "open"})
+    events_before = len(g.events)
+    patches_before = list(g._state.all_patches())
+    patch_counter_before = g.ids._patch_counter
+    event_counter_before = g.ids._event_counter
+
+    with pytest.raises(InvalidPatchOperationError) as excinfo:
+        g.propose_patch(
+            target=obj.id,
+            op=bad_op,
+            value={"status": "closed"},
+            proposed_by="test",
+        )
+
+    err = excinfo.value
+    assert isinstance(err, (ExecutionError, ActiveGraphError, ValueError))
+    assert err.op == bad_op
+    assert set(err.valid_ops) == {"update", "replace"}
+    assert bad_op in str(err)
+
+    assert len(g.events) == events_before
+    assert list(g._state.all_patches()) == patches_before
+    assert g.ids._patch_counter == patch_counter_before
+    assert g.ids._event_counter == event_counter_before
+
+
+def test_propose_patch_still_accepts_update_and_replace():
+    g = _g()
+    obj = g.add_object("task", {"status": "open"})
+
+    p_update = g.propose_patch(
+        target=obj.id, op="update", value={"status": "closed"}, proposed_by="test"
+    )
+    assert p_update.status == "proposed"
+    assert p_update.op == "update"
+
+    p_replace = g.propose_patch(
+        target=obj.id, op="replace", value={"status": "blocked"}, proposed_by="test"
+    )
+    assert p_replace.status == "proposed"
+    assert p_replace.op == "replace"
 
 
 def test_apply_patch_with_stale_version_is_rejected():

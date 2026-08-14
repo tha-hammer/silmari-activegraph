@@ -112,6 +112,37 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
 
 ### Changed
 
+- **`activegraph quickstart`'s demo database directory is now portable.** `_QUICKSTART_DB_DIR` is
+  derived from `tempfile.gettempdir()` instead of hardcoded to POSIX `/tmp` (byte-identical to the
+  old value on Linux/macOS, where `gettempdir()` resolves to `/tmp`). The single-shared,
+  cleaned-up-before-each-run filename design is unchanged — this is a portability fix, not a
+  concurrency feature. Also removed two dead imports (`os`, `shutil` — zero uses anywhere in the
+  file) and unified the interactive scaffold's behavior name and its own fire-counter onto one
+  `_SCAFFOLD_BEHAVIOR_NAME` constant instead of three independently-typed literals that happened to
+  agree.
+- **`LLMProvider.supports_native_structured_output`'s Protocol default is now `False`, not an
+  unresolved `...`.** An explicit `class Foo(LLMProvider):` subclass that omits the override
+  previously inherited the bare `...`-bodied method, which returned `None` when called — the
+  runtime's fallback to `"prompt"` mode worked today only by `not None` happening to be `True`, not
+  through the mechanism the docstring described. Calling `supports_native_structured_output`
+  directly on such a subclass now returns an honest `False`. The runtime's resolved mode
+  (`"prompt"`) is unchanged for every existing and new provider shape; all 5 shipped providers
+  already define concrete overrides and are unaffected.
+- **`GraphStore.remove_patch` is now `@abstractmethod`.** A custom `GraphStore` subclass that
+  implements every other required method but omits `remove_patch` now fails fast with a standard
+  `TypeError` at construction time, instead of constructing successfully and only failing later,
+  at the first `clear()` call, with a `NotImplementedError`. Both shipped backends
+  (`InMemoryGraphStore`, `FalkorDBGraphStore`) already implement it, so this only affects custom
+  or third-party `GraphStore` subclasses that were previously incomplete.
+- **`propose_patch(op=...)` now validates `op`.** `PATCH_OPS` is narrowed from
+  `{"create", "update", "replace", "remove"}` to `{"update", "replace"}` —
+  object creation/removal were never implemented as patch ops and are already
+  handled by `Graph.add_object`/`Graph.remove_object` directly. Calling
+  `propose_patch` with `op="create"`, `op="remove"`, or any value outside the
+  narrowed set now raises `InvalidPatchOperationError` instead of silently
+  proposing a patch whose `applied` projection is a no-op. This is a
+  backward-incompatible tightening for any caller that was — silently and
+  ineffectively — passing `"create"`/`"remove"` before.
 - Runtime event scheduling now uses one purpose-specific event policy across
   live dispatch, pattern-only matching, resume, diff, and strict replay.
   `embedding.*` request/response records are newly treated like LLM/tool
@@ -193,6 +224,16 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
   whitespace, non-strings, and labels such as `nightly` now fail early. This is
   an intentional 1.x narrowing. Migrate free-form labels to a valid version
   such as `0+nightly`; the framework does not normalize them automatically.
+
+### Fixed
+
+- **Sandbox trial `scenario` path traversal.** `_resolve_scenario` now rejects
+  a `scenario` value (e.g. `"../outside/evil.py::main"`) that resolves outside
+  the candidate pack's root, before any import happens — matching
+  `_materialize_pack`'s existing `verify_bundle_hash` containment gate. The
+  scenario module is also now registered in `sys.modules["_trial_scenario"]`
+  before execution, mirroring the pack-module load block's existing
+  `importlib` idiom.
 
 ## [1.10.0] — 2026-07-12
 

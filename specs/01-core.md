@@ -65,7 +65,8 @@ dependency.
 - `Object` — typed node in the projection: `id, type, data, version, provenance` — `activegraph/core/graph.py:48-73`
 - `Relation` — typed edge: `id, source, target, type, data, provenance`. Dangling endpoints are legal — `activegraph/core/graph.py:76-103`
 - `Patch` — proposed single-target mutation: `id, target, op, value, expected_version, proposed_by, rationale, evidence, status, rejection_reason, provenance` — `activegraph/core/patch.py:20-58`
-- `PATCH_OPS = {"create","update","replace","remove"}` — `activegraph/core/patch.py:17`
+- `PATCH_OPS = {"update","replace"}` — `activegraph/core/patch.py:17`. Object creation/removal are
+  handled by `Graph.add_object`/`Graph.remove_object` directly, not by patches.
 - `Graph` — the aggregate: log + projection + listeners + sinks + optional `EventStore` — `activegraph/core/graph.py:152-1021`
 - `Graph.emit(event) -> Event` — **the only live mutator** — `activegraph/core/graph.py:584-626`
 - `Graph._replay_event(event) -> None` — the replay mutator; silent (no persist, no sinks, no listeners) — `activegraph/core/graph.py:630-638`
@@ -547,8 +548,10 @@ patch.applied    ::= { patch: patch-dict , target , diff , [approved_by] }
 patch.rejected   ::= { patch_id , target , reason , current_version }
 patch-dict       ::= { id, target, op, value, expected_version, proposed_by,
                        rationale, evidence, status, rejection_reason, provenance }
-op               ::= "create" | "update" | "replace" | "remove"
-                     (* projector implements ONLY "update" and "replace" *)
+op               ::= "update" | "replace"
+                     (* propose_patch raises InvalidPatchOperationError for
+                        anything else; object create/remove are Graph.add_object/
+                        Graph.remove_object, not patch ops *)
 status           ::= "proposed" | "applied" | "rejected"
 diff             ::= { field: { old , new } }   (* only fields that actually change *)
 provenance       ::= { created_by, caused_by_event, frame_id, timestamp,
@@ -578,8 +581,10 @@ Contract notes:
   with their logs (`activegraph/core/ids.py:47-49`). `reseed_from_events(events)` sets each
   counter past the highest id seen using `max(current, seen)` so it never regresses
   (`activegraph/core/ids.py:90-136`); object ids parse as `^(?P<type>[^#]+)#(?P<n>\d+)$`, the
-  rest as `^[a-zA-Z]+_(?P<n>\d+)$` (`activegraph/core/ids.py:37-38`). **Not thread-safe**
-  (`activegraph/core/ids.py:42`) — see Open Question 3.
+  rest as `^[a-zA-Z]+_(?P<n>\d+)$` (`activegraph/core/ids.py:37-38`). **Not thread-safe in
+  isolation** (`activegraph/core/ids.py:42`) — `Graph` calls every `ids.*()` method while holding
+  `self._emit_lock`, which is what makes concurrent use safe in practice; see Open Question 3
+  (resolved).
 - **Clock contract (CONTRACT #8)** — graph/event timestamps are injectable through `Clock`, so
   deterministic runs can use `FrozenClock`/`TickingClock` and replay does not regenerate event
   times (`activegraph/core/clock.py:1-22`). Runtime also deliberately uses wall/monotonic time for
@@ -650,24 +655,26 @@ sequenceDiagram
 
 ## Open questions
 
-1. **`PATCH_OPS` declares four ops; the projector implements two.** `activegraph/core/patch.py:17`
-   defines `{create, update, replace, remove}` and `Patch.op`'s docstring repeats all four
-   (`activegraph/core/patch.py:24-25`), but `apply_event`'s `patch.applied` branch only handles
-   `"update"` and `"replace"` (`activegraph/core/graph.py:1085-1096`). A `create` or `remove`
-   patch applies successfully — the patch is stored, `obj.version += 1` fires — but the object's
-   data is unchanged. Either dead constants or a silent no-op bug.
+1. **Resolved — `PATCH_OPS` narrowed to match the ops the projector actually implements.**
+   `activegraph/core/patch.py:17` now defines `PATCH_OPS = {"update", "replace"}` and `Patch.op`'s
+   docstring matches. Object creation/removal are `Graph.add_object`/`Graph.remove_object`'s job,
+   not a patch taxonomy entry — those were never implemented as patch ops and would duplicate the
+   existing dedicated paths.
 
-2. **`PATCH_OPS` is unreferenced.** Repo-wide Python search finds it only at its definition;
-   `propose_patch` accepts any `op` string without validation
-   (`activegraph/core/graph.py:853-903`).
+2. **Resolved — `propose_patch` validates `op` against `PATCH_OPS`.** `propose_patch`
+   (`activegraph/core/graph.py:853-903`) now raises `InvalidPatchOperationError` for any `op`
+   outside `{"update", "replace"}`, before any patch/event construction — a rejected op has zero
+   side effects.
 
-3. **`IDGen` is documented not-thread-safe, but `Graph` is explicitly hardened for concurrent
-   emitters.** `activegraph/core/ids.py:42` says "Not thread-safe (single-threaded loop)", while
-   `activegraph/core/graph.py:191-196` adds an RLock precisely because "concurrent callers cannot
-   reverse log/sink order". Every convenience builder calls `self.ids.event()` *before* entering
-   `emit`'s lock (for example `activegraph/core/graph.py:654,683,707,742,818,838`), so two threads
-   calling `add_object` concurrently can race the counters. Unclear whether concurrent *sugar*
-   calls are supported, or only concurrent raw `emit` of pre-built events.
+3. **Resolved — every `Graph` sugar method's `ids.*()` calls now run inside `_emit_lock`'s
+   scope.** `IDGen` (`activegraph/core/ids.py:42`) holds no internal lock of its own; `Graph` is
+   responsible for calling every `ids.*()` method while holding `self._emit_lock` — the same
+   re-entrant lock that serializes each graph's live acceptance boundary
+   (`activegraph/core/graph.py:191-196`). All 8 id-generating sugar methods (`add_object`,
+   `add_relation`, `remove_relation`, `remove_object`, `patch_object`, `propose_patch`,
+   `apply_patch`, `reject_patch` via the shared `_reject` helper) now wrap their id generation
+   through their `emit` call in `with self._emit_lock:`, closing the gap between the lock's
+   documented purpose and its actual scope.
 
 4. **Resolved — graph mutation lookup failures use structured framework leaves.**
    `patch_object` now raises `ObjectNotFoundError`; `apply_patch` and `reject_patch` raise
@@ -702,12 +709,13 @@ sequenceDiagram
    `data.data.<nested>`). `evaluate_where` grammar itself is unchanged
    (`activegraph/core/graph.py:1200-1219`; `activegraph/core/view.py:13-18,44-63`).
 
-9. **`GraphStore.clear()`'s default depends on `remove_patch`, which the ABC raises
-   `NotImplementedError` for** (`activegraph/core/graph_store.py:272-288`). A backend that
-   implements the three abstract patch methods but forgets `remove_patch` passes
-   `@abstractmethod` checks and then fails at `clear()`, not at `remove_patch`.
-   The reusable conformance test exercises `clear` (`activegraph/store/graph_conformance.py:190-201`),
-   so participating backends are caught at test time, but the ABC's own shape allows the hole.
+9. **Resolved — `remove_patch` promoted to `@abstractmethod`.** `GraphStore.clear()`'s default
+   implementation depends on `remove_patch` (`activegraph/core/graph_store.py:272-288`), and
+   `remove_patch` is now part of the `@abstractmethod` set: a backend that omits it now fails fast
+   with a standard `TypeError` at construction time, matching where the ABC contract points,
+   instead of only failing later at the first `clear()` call. Both shipped backends
+   (`InMemoryGraphStore`, `FalkorDBGraphStore`) already implemented it, so this is a pure
+   tightening with no adaptation needed.
 
 10. **`Graph._replay_event` is prefixed private but is a documented public seam** — used from
     `store/base.py:90`, `runtime/runtime.py:3815,4009,4861`, `runtime/promote.py:172`, and

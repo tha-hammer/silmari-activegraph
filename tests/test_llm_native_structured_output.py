@@ -44,6 +44,7 @@ from activegraph import (
 from activegraph.llm import (
     AnthropicProvider,
     LLMMessage,
+    LLMProvider,
     LLMResponse,
     OpenAIProvider,
     RecordedLLMProvider,
@@ -325,6 +326,35 @@ def test_flag_on_but_no_capability_resolves_prompt():
     provider = ScriptedProvider(
         respond_fn=lambda m, s: ClaimList(claims=[Claim(text="t", confidence=0.5)])
     )  # no supports_native_structured_output method
+    g = Graph()
+    rt = Runtime(g, llm_provider=provider, native_structured_output=True)
+    rt.run_goal("test")
+    requested = [e for e in g.events if e.type == "llm.requested"]
+    assert requested[0].payload["structured_output_mode"] == "prompt"
+
+
+class BareProtocolProvider(ScriptedProvider, LLMProvider):
+    """08.5: an explicit `LLMProvider` Protocol subclass — unlike
+    `ScriptedProvider` on its own, which duck-types with no `LLMProvider`
+    base at all — that implements `complete`/`default_model`/
+    `recognizes_model` (via `ScriptedProvider`) but deliberately omits
+    `supports_native_structured_output`. An explicit subclass inherits the
+    Protocol's bare method rather than hitting `getattr`'s absent-attribute
+    fallback, so this exercises a different code path than
+    `test_flag_on_but_no_capability_resolves_prompt` above."""
+
+
+def test_explicit_protocol_subclass_without_override_defaults_to_false():
+    provider = BareProtocolProvider(respond_fn=lambda m, s: None)
+    assert provider.supports_native_structured_output("any-model") is False
+
+
+def test_flag_on_but_protocol_subclass_has_no_override_resolves_prompt():
+    clear_registry()
+    _register()
+    provider = BareProtocolProvider(
+        respond_fn=lambda m, s: ClaimList(claims=[Claim(text="t", confidence=0.5)])
+    )
     g = Graph()
     rt = Runtime(g, llm_provider=provider, native_structured_output=True)
     rt.run_goal("test")

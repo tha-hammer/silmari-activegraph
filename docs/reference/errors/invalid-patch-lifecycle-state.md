@@ -115,6 +115,10 @@ principle.
   for missing apply/reject patch ids. The apply leaf remains a `KeyError`;
   the reject leaf remains an `AttributeError`, preserving operation-specific
   legacy handlers.
+- [`invalid-patch-operation-error`](invalid-patch-operation-error.md)
+  — the sibling patch-lifecycle leaf: a taxonomy violation on the
+  `op` value at proposal time, rather than a status-transition
+  violation on an already-proposed patch.
 - [`failure-model`](../../concepts/failure-model.md) — why patch
   lifecycle violations are exceptions, not events.
 

@@ -411,6 +411,12 @@ _FORMATTERS = {
     "behavior.failed": _fmt_behavior_failed,
     "behavior.scheduled": _fmt_behavior_scheduled,
     "relation_behavior.started": _fmt_relation_behavior_started,
+    # Not reached through format_event's dispatch below — the special
+    # case there always wins first, since _fmt_llm_requested is the only
+    # formatter that needs an extra render-time option
+    # (hide_prompt_normalized). Kept anyway so anything that introspects
+    # _FORMATTERS.keys() for the set of known/formatted event types still
+    # sees "llm.requested" listed.
     "llm.requested": _fmt_llm_requested,
     "llm.responded": _fmt_llm_responded,
     "tool.requested": _fmt_tool_requested,
@@ -423,6 +429,12 @@ _FORMATTERS = {
 
 
 def format_event(event: Event, *, hide_prompt_normalized: bool = False) -> str:
+    # _fmt_llm_requested is the only formatter in _FORMATTERS that needs
+    # an extra render-time option (hide_prompt_normalized, threaded from
+    # the trace facade's rollup feature), so it's special-cased ahead of
+    # the table lookup rather than going through it like every other
+    # event type. No other formatter needs this today, so a generic
+    # per-formatter options-passing mechanism isn't justified.
     if event.type == "llm.requested":
         return _fmt_llm_requested(event, hide_prompt_normalized=hide_prompt_normalized)
     fn = _FORMATTERS.get(event.type, _fmt_event_emitted)

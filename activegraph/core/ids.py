@@ -39,7 +39,17 @@ _NUM_RE = re.compile(r"^[a-zA-Z]+_(?P<n>\d+)$")
 
 
 class IDGen:
-    """Per-graph monotonic ID generator. Not thread-safe (single-threaded loop).
+    """Per-graph monotonic ID generator. Not thread-safe in isolation
+    (single-threaded loop) — it holds no internal lock of its own.
+
+    ``Graph`` is responsible for calling every ``ids.*()`` method while
+    holding its own ``self._emit_lock`` (a re-entrant lock serializing
+    each graph's live acceptance boundary); that's what makes concurrent
+    use safe in practice. Every ``Graph`` sugar method that generates an
+    id before emitting (``add_object``, ``add_relation``,
+    ``remove_relation``, ``remove_object``, ``patch_object``,
+    ``propose_patch``, ``apply_patch``, ``reject_patch``) does its id
+    generation inside that lock's scope.
 
     Objects share one global counter prefixed by type — ``task#1``,
     ``task#2``, ``claim#3``, not ``claim#1`` (CONTRACT #1); events,

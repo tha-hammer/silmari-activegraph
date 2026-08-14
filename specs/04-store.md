@@ -97,7 +97,7 @@ graph TD
 
 ### GraphStore side (the projection)
 
-- `GraphStore` — ABC, 11 abstract methods plus 5 overridable query hooks —
+- `GraphStore` — ABC, 12 abstract methods plus 5 overridable query hooks —
   `activegraph/core/graph_store.py:58-291`, re-exported at `activegraph/store/__init__.py:14`
 - `ChainMatch` — frozen dataclass `(objects, relations)` for pattern pushdown —
   `activegraph/core/graph_store.py:43-55`
@@ -246,7 +246,7 @@ Transactionality differs per backend and is part of the contract:
 
 `Graph.__init__(..., graph_store=None)` defaults to `InMemoryGraphStore()`
 (`activegraph/core/graph.py:171,183`), so every graph has a projection backend. The projector reads
-and writes entities through the 11 abstract methods; the 5 query hooks exist so a backend such as
+and writes entities through the 12 abstract methods; the 5 query hooks exist so a backend such as
 FalkorDB can push queries down to the engine instead of scanning in Python.
 
 ```ebnf
@@ -263,7 +263,10 @@ entity-ops    ::= put_object( object ) -> None          (* upsert *)
                 | put_patch( patch ) -> None
                 | get_patch( id ) -> patch | None
                 | all_patches() -> [patch]
-                | remove_patch( id ) -> None            (* required by clear() *)
+                | remove_patch( id ) -> None            (* abstract: required by clear();
+                                                            subclasses that omit it now fail
+                                                            fast at construction, not at the
+                                                            first clear() call *)
 
 query-hooks   ::= find_objects( [type] ) -> [object]
                 | find_objects_in_types( [type…] ) -> [object]              (* [] -> [] *)

@@ -247,6 +247,15 @@ def test_wall_clock_blow_kills_the_child(tmp_path):
     assert marker.payload["stop_position"]["accepted_sequence"] == (
         len(fork.graph.events) - 1
     )
+    # 06.3: events_appended must exclude the parent's own
+    # trial.wall_clock_exhausted marker — it reflects only what the
+    # child process itself produced before being killed. The fork
+    # starts with exactly n_parent events (forked at the tip), and this
+    # scenario never appends anything of its own before the wall-clock
+    # kill, so accepted_sequence - n_parent is the child's own count.
+    assert report.events_appended == (
+        marker.payload["stop_position"]["accepted_sequence"] - n_parent
+    )
     _parent_untouched(path, parent_run, n_parent)
 
 

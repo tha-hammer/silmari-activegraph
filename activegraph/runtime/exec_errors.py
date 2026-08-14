@@ -301,6 +301,52 @@ class InvalidPatchLifecycleState(ExecutionError, ValueError):
         )
 
 
+class InvalidPatchOperationError(ExecutionError, ValueError):
+    """``graph.propose_patch(op=...)`` was called with an ``op`` outside
+    ``{"update", "replace"}``.
+
+    Object creation and removal are not patch ops — those are handled
+    directly by ``Graph.add_object``/``Graph.remove_object``, which are
+    already the first-class, dedicated paths for creating and removing
+    objects. A patch's job is a targeted, version-checked mutation of
+    an *existing* object's data. Multi-inherits :class:`ValueError`.
+    """
+
+    _doc_slug = "invalid-patch-operation-error"
+
+    def __init__(self, *, op: str, valid_ops) -> None:
+        self.op = op
+        self.valid_ops = set(valid_ops)
+        sorted_ops = ", ".join(sorted(self.valid_ops))
+        ExecutionError.__init__(
+            self,
+            f"patch op {op!r} is not one of: {sorted_ops}",
+            what_failed=(
+                f"graph.propose_patch(op={op!r}, ...) was called, but "
+                f"{op!r} is not a valid patch operation. Valid operations "
+                f"are: {sorted_ops}."
+            ),
+            why=(
+                "A patch is a targeted, version-checked mutation of an "
+                "existing object's data — its taxonomy is 'update' or "
+                "'replace'. Creating or removing an object is handled by "
+                "Graph.add_object/Graph.remove_object directly; those are "
+                "already the first-class paths for creating and removing "
+                "objects, so patches don't duplicate them.\n"
+                "\n"
+                f"See {DOCS_BASE_URL}/concepts/failure-model "
+                f"for the patch-lifecycle invariants."
+            ),
+            how_to_fix=(
+                f"Use op='update' or op='replace' for propose_patch/"
+                f"patch_object. To create or remove an object, call "
+                f"graph.add_object(...) or graph.remove_object(...) "
+                f"directly instead of proposing a patch."
+            ),
+            context={"op": op, "valid_ops": sorted_ops},
+        )
+
+
 class InternalEvaluatorError(ExecutionError, ValueError):
     """A framework-internal evaluator received input it does not
     recognize. Should not fire in normal use — the framework's parsers
@@ -315,6 +361,14 @@ class InternalEvaluatorError(ExecutionError, ValueError):
     :class:`UnsupportedPatternError` (the natural category) but use
     the same :func:`activegraph.errors.internal_bug_fields` helper so
     the prose is uniform across all three sites.
+
+    Raised from ``core/graph.py`` via a function-local import — the
+    established pattern for execution-semantics errors detected in
+    core/, not a special case. Siblings following the same convention:
+    :class:`ReservedFieldError`, :class:`InvalidPatchLifecycleState`,
+    :class:`ObjectNotFoundError`, and :class:`ApplyPatchNotFoundError`.
+    See CONTRACT.md's "core/ knows nothing about runtime/" import-direction
+    rule for why this is a naming/location coupling, not a behavioral one.
     """
 
     _doc_slug = "internal-evaluator-error"

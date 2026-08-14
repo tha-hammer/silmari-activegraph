@@ -22,8 +22,6 @@ to the "try next" footer's doc links).
 
 from __future__ import annotations
 
-import os
-import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -44,7 +42,10 @@ from activegraph.cli.renderers import company_name_for_memo, print_memo_section
 # ago" — relevant when a developer runs quickstart in 2027 or later.
 _QUICKSTART_FROZEN_TIMESTAMP = "2026-01-01T00:00:00Z"
 _QUICKSTART_RUN_ID = "quickstart_demo_run"
-_QUICKSTART_DB_DIR = "/tmp/activegraph_quickstart"
+# Single shared, cleaned-up-before-each-run filename remains intentional
+# (demo hygiene — we don't want quickstart leaving N database files
+# around); only the directory is now portable rather than POSIX-hardcoded.
+_QUICKSTART_DB_DIR = str(Path(tempfile.gettempdir()) / "activegraph_quickstart")
 _QUICKSTART_DB_PATH = f"{_QUICKSTART_DB_DIR}/{_QUICKSTART_RUN_ID}.db"
 
 # Interactive mode's behavior-file location: cwd-subdir for
@@ -213,7 +214,15 @@ def _print_try_next(write) -> None:
 # ---------- interactive mode ---------------------------------------------
 
 
-_INTERACTIVE_SCAFFOLD = '''\
+# Single source of truth for the scaffolded behavior's name — interpolated
+# into the scaffold text (both the `name=` kwarg and the `def` line) and
+# into the fire-counter's match string below, so the two can't silently
+# drift apart if one is edited without the other.
+_SCAFFOLD_BEHAVIOR_NAME = "growth_flagger"
+
+
+def _render_interactive_scaffold() -> str:
+    return f'''\
 """Your first activegraph behavior — scaffolded by `activegraph quickstart --interactive`.
 
 This behavior fires whenever a claim object is created and emits a
@@ -228,18 +237,18 @@ from activegraph import behavior
 
 
 @behavior(
-    name="growth_flagger",
+    name="{_SCAFFOLD_BEHAVIOR_NAME}",
     on=["object.created"],
-    where={"object.type": "claim"},
+    where={{"object.type": "claim"}},
 )
-def growth_flagger(event, graph, ctx):
+def {_SCAFFOLD_BEHAVIOR_NAME}(event, graph, ctx):
     """Flag claims that mention revenue growth above 25%."""
     text = event.payload["object"]["data"].get("text", "")
     # TODO: parse the text for a growth percentage and emit
     # `growth.flagged` with the claim id when the growth is > 25%.
     #
     # Hint: a regex like r"(\\d+)%\\s+YoY" captures the percentage.
-    # Then: graph.emit("growth.flagged", {"claim_id": ..., "growth": ...})
+    # Then: graph.emit("growth.flagged", {{"claim_id": ..., "growth": ...}})
     pass
 '''
 
@@ -316,7 +325,7 @@ def run_interactive_mode(
         write("Goodbye.")
         return 1
 
-    behavior_file.write_text(_INTERACTIVE_SCAFFOLD)
+    behavior_file.write_text(_render_interactive_scaffold())
     write(f"Created {behavior_file}.")
     write("")
     write("Step 2 of 4 — fill in the TODO.")
@@ -428,12 +437,13 @@ def _run_user_behavior(behavior_file: Path, write) -> int:
     # Count behavior.completed events for the developer's behavior name.
     # If the user renamed it, this returns 0 — that's a finding worth
     # surfacing in v1.1 (read all behavior.completed events, list any
-    # that aren't pack-prefixed). For rc1, the scaffold's name is
-    # 'growth_flagger'; matching by name keeps the count honest.
+    # that aren't pack-prefixed). For rc1, matching against the shared
+    # _SCAFFOLD_BEHAVIOR_NAME constant (not a separately-typed literal)
+    # keeps the count honest and in sync with the scaffold text.
     return sum(
         1 for e in rt.graph.events
         if e.type == "behavior.completed"
-        and (e.payload or {}).get("behavior") == "growth_flagger"
+        and (e.payload or {}).get("behavior") == _SCAFFOLD_BEHAVIOR_NAME
     )
 
 

@@ -10,7 +10,7 @@ import pytest
 
 import activegraph.store.falkordb as falkordb_module
 from activegraph.core.graph import Graph
-from activegraph.core.graph_store import InMemoryGraphStore
+from activegraph.core.graph_store import GraphStore, InMemoryGraphStore
 from activegraph.store.falkordb import _resolve_connection
 from activegraph.store.graph_conformance import GraphStoreConformance
 
@@ -20,6 +20,63 @@ class TestInMemoryGraphStoreConformance(GraphStoreConformance):
 
     def make_store(self):
         return InMemoryGraphStore()
+
+
+def test_graphstore_subclass_missing_remove_patch_fails_at_construction():
+    """01.9: clear()'s default implementation calls remove_patch() for
+    every patch, but remove_patch wasn't in the @abstractmethod set — a
+    subclass implementing only the required methods passed construction
+    and only failed later, at the first clear() call, with a
+    NotImplementedError one level removed from where the ABC contract
+    points. Promoting remove_patch to @abstractmethod fails fast."""
+
+    class MinimalStore(GraphStore):
+        def put_object(self, obj):
+            pass
+
+        def get_object(self, object_id):
+            return None
+
+        def remove_object(self, object_id):
+            pass
+
+        def all_objects(self):
+            return []
+
+        def put_relation(self, rel):
+            pass
+
+        def get_relation(self, relation_id):
+            return None
+
+        def remove_relation(self, relation_id):
+            pass
+
+        def all_relations(self):
+            return []
+
+        def put_patch(self, patch):
+            pass
+
+        def get_patch(self, patch_id):
+            return None
+
+        def all_patches(self):
+            return []
+
+    with pytest.raises(TypeError) as excinfo:
+        MinimalStore()
+    assert "remove_patch" in str(excinfo.value)
+
+
+def test_inmemory_graphstore_still_constructs_and_clears_with_remove_patch_required():
+    """Regression proof: promoting remove_patch to @abstractmethod doesn't
+    break the in-memory backend, since it already overrides it. (The
+    FalkorDB backend's equivalent construct+clear coverage already lives
+    in tests/test_falkordb_store.py, which exercises .clear() extensively
+    against a mocked connection.)"""
+    store = InMemoryGraphStore()
+    store.clear()
 
 
 def test_graph_uses_injected_graph_store():

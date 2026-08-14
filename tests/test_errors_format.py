@@ -35,6 +35,7 @@ from activegraph import (
     InvalidActivateAfter,
     InvalidArgumentType,
     InvalidPatchLifecycleState,
+    InvalidPatchOperationError,
     InvalidRuntimeConfiguration,
     InvalidStoreURL,
     InvalidToolRegistration,
@@ -1144,6 +1145,16 @@ def test_pr_f_cross_category_leaves_are_execution() -> None:
     assert not issubclass(InvalidPatchLifecycleState, ConfigurationError)
 
 
+def test_invalid_patch_operation_error_hierarchy():
+    """InvalidPatchOperationError mirrors InvalidPatchLifecycleState's
+    shape: an ExecutionError/ActiveGraphError leaf that also multi-inherits
+    ValueError, sibling leaves under the patch-lifecycle umbrella."""
+    assert issubclass(InvalidPatchOperationError, ExecutionError)
+    assert issubclass(InvalidPatchOperationError, ActiveGraphError)
+    assert issubclass(InvalidPatchOperationError, ValueError)
+    assert not issubclass(InvalidPatchOperationError, ConfigurationError)
+
+
 def test_graph_lookup_leaves_preserve_exact_hierarchy_and_builtin_routing() -> None:
     assert issubclass(ObjectNotFoundError, ExecutionError)
     assert issubclass(ObjectNotFoundError, ActiveGraphError)
@@ -1222,6 +1233,15 @@ def test_invalid_patch_lifecycle_state_snapshot() -> None:
     err = InvalidPatchLifecycleState(patch_id="patch_017", current_status="applied")
     _assert_format_compliant(err)
     _check_snapshot("invalid_patch_lifecycle_state", err)
+
+
+def test_invalid_patch_operation_error_snapshot() -> None:
+    """The taxonomy leaf: propose_patch(op=...) rejects anything outside
+    {"update", "replace"} — create/remove were never implemented, that's
+    Graph.add_object/remove_object's job."""
+    err = InvalidPatchOperationError(op="create", valid_ops={"update", "replace"})
+    _assert_format_compliant(err)
+    _check_snapshot("invalid_patch_operation_error", err)
 
 
 def test_reserved_field_error_snapshot() -> None:

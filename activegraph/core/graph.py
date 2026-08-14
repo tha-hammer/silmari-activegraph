@@ -33,7 +33,7 @@ from activegraph.core.clock import Clock
 from activegraph.core.event import Event
 from activegraph.core.graph_store import ChainMatch, GraphStore, InMemoryGraphStore
 from activegraph.core.ids import IDGen
-from activegraph.core.patch import Patch
+from activegraph.core.patch import PATCH_OPS, Patch
 
 if TYPE_CHECKING:
     from activegraph.observability.metrics import Metrics
@@ -651,44 +651,45 @@ class Graph:
         llm_request_event_id: Optional[str] = None,
         tool_request_event_ids: Optional[list[str]] = None,
     ) -> Object:
-        obj_id = self.ids.object(type)
-        clean = copy.deepcopy(
-            _reject_reserved_fields(data, api="add_object", param="data")
-        )
-        # v0.9: schema validation against loaded pack object types.
-        # Validator is set by runtime.load_pack and is None when no
-        # typed pack contributes this object type — preserving v0.8
-        # untyped semantics (CONTRACT v0.9 #5 / #21).
-        if self._pack_object_validator is not None:
-            clean = self._pack_object_validator(type, clean)
-        provenance = self._provenance(
-            actor,
-            caused_by,
-            frame_id,
-            evidence,
-            llm_request_event_id,
-            tool_request_event_ids,
-        )
-        payload = {
-            "object": {
+        with self._emit_lock:
+            obj_id = self.ids.object(type)
+            clean = copy.deepcopy(
+                _reject_reserved_fields(data, api="add_object", param="data")
+            )
+            # v0.9: schema validation against loaded pack object types.
+            # Validator is set by runtime.load_pack and is None when no
+            # typed pack contributes this object type — preserving v0.8
+            # untyped semantics (CONTRACT v0.9 #5 / #21).
+            if self._pack_object_validator is not None:
+                clean = self._pack_object_validator(type, clean)
+            provenance = self._provenance(
+                actor,
+                caused_by,
+                frame_id,
+                evidence,
+                llm_request_event_id,
+                tool_request_event_ids,
+            )
+            payload = {
+                "object": {
+                    "id": obj_id,
+                    "type": type,
+                    "data": clean,
+                    "version": 1,
+                    "provenance": provenance,
+                },
                 "id": obj_id,
-                "type": type,
-                "data": clean,
-                "version": 1,
-                "provenance": provenance,
-            },
-            "id": obj_id,
-        }
-        event = Event(
-            id=self.ids.event(),
-            type="object.created",
-            payload=payload,
-            actor=actor,
-            frame_id=frame_id,
-            caused_by=caused_by,
-            timestamp=self.clock.now(),
-        )
-        self.emit(event)
+            }
+            event = Event(
+                id=self.ids.event(),
+                type="object.created",
+                payload=payload,
+                actor=actor,
+                frame_id=frame_id,
+                caused_by=caused_by,
+                timestamp=self.clock.now(),
+            )
+            self.emit(event)
         return cast(Object, self._state.get_object(obj_id))
 
     def add_relation(
@@ -704,50 +705,51 @@ class Graph:
         llm_request_event_id: Optional[str] = None,
         tool_request_event_ids: Optional[list[str]] = None,
     ) -> Relation:
-        rel_id = self.ids.relation()
-        clean = copy.deepcopy(
-            _reject_reserved_fields(data or {}, api="add_relation", param="data")
-        )
-        # v0.9: relation type validation (source/target type rules).
-        if self._pack_relation_validator is not None:
-            src_obj = self._state.get_object(source)
-            tgt_obj = self._state.get_object(target)
-            self._pack_relation_validator(
-                type,
-                src_obj.type if src_obj else None,
-                tgt_obj.type if tgt_obj else None,
+        with self._emit_lock:
+            rel_id = self.ids.relation()
+            clean = copy.deepcopy(
+                _reject_reserved_fields(data or {}, api="add_relation", param="data")
             )
-        provenance = self._provenance(
-            actor,
-            caused_by,
-            frame_id,
-            [],
-            llm_request_event_id,
-            tool_request_event_ids,
-        )
-        payload = {
-            "relation": {
+            # v0.9: relation type validation (source/target type rules).
+            if self._pack_relation_validator is not None:
+                src_obj = self._state.get_object(source)
+                tgt_obj = self._state.get_object(target)
+                self._pack_relation_validator(
+                    type,
+                    src_obj.type if src_obj else None,
+                    tgt_obj.type if tgt_obj else None,
+                )
+            provenance = self._provenance(
+                actor,
+                caused_by,
+                frame_id,
+                [],
+                llm_request_event_id,
+                tool_request_event_ids,
+            )
+            payload = {
+                "relation": {
+                    "id": rel_id,
+                    "source": source,
+                    "target": target,
+                    "type": type,
+                    "data": clean,
+                    "provenance": provenance,
+                },
                 "id": rel_id,
                 "source": source,
                 "target": target,
-                "type": type,
-                "data": clean,
-                "provenance": provenance,
-            },
-            "id": rel_id,
-            "source": source,
-            "target": target,
-        }
-        event = Event(
-            id=self.ids.event(),
-            type="relation.created",
-            payload=payload,
-            actor=actor,
-            frame_id=frame_id,
-            caused_by=caused_by,
-            timestamp=self.clock.now(),
-        )
-        self.emit(event)
+            }
+            event = Event(
+                id=self.ids.event(),
+                type="relation.created",
+                payload=payload,
+                actor=actor,
+                frame_id=frame_id,
+                caused_by=caused_by,
+                timestamp=self.clock.now(),
+            )
+            self.emit(event)
         return cast(Relation, self._state.get_relation(rel_id))
 
     def remove_relation(
@@ -760,16 +762,17 @@ class Graph:
     ) -> None:
         if self._state.get_relation(relation_id) is None:
             return
-        event = Event(
-            id=self.ids.event(),
-            type="relation.removed",
-            payload={"id": relation_id},
-            actor=actor,
-            frame_id=frame_id,
-            caused_by=caused_by,
-            timestamp=self.clock.now(),
-        )
-        self.emit(event)
+        with self._emit_lock:
+            event = Event(
+                id=self.ids.event(),
+                type="relation.removed",
+                payload={"id": relation_id},
+                actor=actor,
+                frame_id=frame_id,
+                caused_by=caused_by,
+                timestamp=self.clock.now(),
+            )
+            self.emit(event)
 
     def remove_object(
         self,
@@ -781,16 +784,17 @@ class Graph:
     ) -> None:
         if self._state.get_object(object_id) is None:
             return
-        event = Event(
-            id=self.ids.event(),
-            type="object.removed",
-            payload={"id": object_id},
-            actor=actor,
-            frame_id=frame_id,
-            caused_by=caused_by,
-            timestamp=self.clock.now(),
-        )
-        self.emit(event)
+        with self._emit_lock:
+            event = Event(
+                id=self.ids.event(),
+                type="object.removed",
+                payload={"id": object_id},
+                actor=actor,
+                frame_id=frame_id,
+                caused_by=caused_by,
+                timestamp=self.clock.now(),
+            )
+            self.emit(event)
 
     def patch_object(
         self,
@@ -814,40 +818,41 @@ class Graph:
         clean = copy.deepcopy(
             _reject_reserved_fields(updates, api="patch_object", param="updates")
         )
-        patch = Patch(
-            id=self.ids.patch(),
-            target=target,
-            op="update",
-            value=clean,
-            expected_version=obj.version,
-            proposed_by=actor,
-            rationale=rationale,
-            evidence=list(evidence or []),
-            status="applied",
-            provenance=self._provenance(
-                actor,
-                caused_by,
-                frame_id,
-                evidence,
-                llm_request_event_id,
-                tool_request_event_ids,
-            ),
-        )
-        diff = _diff(obj.data, clean)
-        event = Event(
-            id=self.ids.event(),
-            type="patch.applied",
-            payload={
-                "patch": patch.to_dict(),
-                "target": target,
-                "diff": diff,
-            },
-            actor=actor,
-            frame_id=frame_id,
-            caused_by=caused_by,
-            timestamp=self.clock.now(),
-        )
-        self.emit(event)
+        with self._emit_lock:
+            patch = Patch(
+                id=self.ids.patch(),
+                target=target,
+                op="update",
+                value=clean,
+                expected_version=obj.version,
+                proposed_by=actor,
+                rationale=rationale,
+                evidence=list(evidence or []),
+                status="applied",
+                provenance=self._provenance(
+                    actor,
+                    caused_by,
+                    frame_id,
+                    evidence,
+                    llm_request_event_id,
+                    tool_request_event_ids,
+                ),
+            )
+            diff = _diff(obj.data, clean)
+            event = Event(
+                id=self.ids.event(),
+                type="patch.applied",
+                payload={
+                    "patch": patch.to_dict(),
+                    "target": target,
+                    "diff": diff,
+                },
+                actor=actor,
+                frame_id=frame_id,
+                caused_by=caused_by,
+                timestamp=self.clock.now(),
+            )
+            self.emit(event)
         return cast(Patch, self._state.get_patch(patch.id))
 
     def propose_patch(
@@ -866,40 +871,45 @@ class Graph:
     ) -> Patch:
         # Strip "object:" / "relation:" prefix if present (README sugar).
         normalized = target.split(":", 1)[1] if ":" in target else target
+        if op not in PATCH_OPS:
+            from activegraph.runtime.exec_errors import InvalidPatchOperationError
+
+            raise InvalidPatchOperationError(op=op, valid_ops=PATCH_OPS)
         obj = self._state.get_object(normalized)
         expected_version = obj.version if obj else 0
         clean = copy.deepcopy(
             _reject_reserved_fields(value, api="propose_patch", param="value")
         )
-        patch = Patch(
-            id=self.ids.patch(),
-            target=normalized,
-            op=op,
-            value=clean,
-            expected_version=expected_version,
-            proposed_by=proposed_by,
-            rationale=rationale,
-            evidence=list(evidence or []),
-            status="proposed",
-            provenance=self._provenance(
-                proposed_by,
-                caused_by,
-                frame_id,
-                evidence,
-                llm_request_event_id,
-                tool_request_event_ids,
-            ),
-        )
-        event = Event(
-            id=self.ids.event(),
-            type="patch.proposed",
-            payload={"patch": patch.to_dict()},
-            actor=proposed_by,
-            frame_id=frame_id,
-            caused_by=caused_by,
-            timestamp=self.clock.now(),
-        )
-        self.emit(event)
+        with self._emit_lock:
+            patch = Patch(
+                id=self.ids.patch(),
+                target=normalized,
+                op=op,
+                value=clean,
+                expected_version=expected_version,
+                proposed_by=proposed_by,
+                rationale=rationale,
+                evidence=list(evidence or []),
+                status="proposed",
+                provenance=self._provenance(
+                    proposed_by,
+                    caused_by,
+                    frame_id,
+                    evidence,
+                    llm_request_event_id,
+                    tool_request_event_ids,
+                ),
+            )
+            event = Event(
+                id=self.ids.event(),
+                type="patch.proposed",
+                payload={"patch": patch.to_dict()},
+                actor=proposed_by,
+                frame_id=frame_id,
+                caused_by=caused_by,
+                timestamp=self.clock.now(),
+            )
+            self.emit(event)
         return cast(Patch, self._state.get_patch(patch.id))
 
     def apply_patch(
@@ -931,21 +941,22 @@ class Graph:
                 frame_id=frame_id,
             )
         diff = _diff(target_obj.data if target_obj else {}, patch.value)
-        event = Event(
-            id=self.ids.event(),
-            type="patch.applied",
-            payload={
-                "patch": {**patch.to_dict(), "status": "applied"},
-                "target": patch.target,
-                "diff": diff,
-                "approved_by": approved_by,
-            },
-            actor=approved_by,
-            frame_id=frame_id,
-            caused_by=caused_by,
-            timestamp=self.clock.now(),
-        )
-        return self.emit(event)
+        with self._emit_lock:
+            event = Event(
+                id=self.ids.event(),
+                type="patch.applied",
+                payload={
+                    "patch": {**patch.to_dict(), "status": "applied"},
+                    "target": patch.target,
+                    "diff": diff,
+                    "approved_by": approved_by,
+                },
+                actor=approved_by,
+                frame_id=frame_id,
+                caused_by=caused_by,
+                timestamp=self.clock.now(),
+            )
+            return self.emit(event)
 
     def reject_patch(
         self,
@@ -973,21 +984,22 @@ class Graph:
 
             raise RejectPatchNotFoundError(patch_id=patch_id)
         current = self._state.get_object(patch.target)
-        event = Event(
-            id=self.ids.event(),
-            type="patch.rejected",
-            payload={
-                "patch_id": patch_id,
-                "target": patch.target,
-                "reason": reason,
-                "current_version": current.version if current else 0,
-            },
-            actor=actor,
-            frame_id=frame_id,
-            caused_by=caused_by,
-            timestamp=self.clock.now(),
-        )
-        return self.emit(event)
+        with self._emit_lock:
+            event = Event(
+                id=self.ids.event(),
+                type="patch.rejected",
+                payload={
+                    "patch_id": patch_id,
+                    "target": patch.target,
+                    "reason": reason,
+                    "current_version": current.version if current else 0,
+                },
+                actor=actor,
+                frame_id=frame_id,
+                caused_by=caused_by,
+                timestamp=self.clock.now(),
+            )
+            return self.emit(event)
 
     # ---------- provenance helper (CONTRACT v0.5 #13: includes run_id) ----------
 
