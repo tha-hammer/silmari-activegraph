@@ -273,40 +273,51 @@ def compact(path: str, run_id: str) -> str:
     from activegraph.runtime.runtime import Runtime
 
     rt = Runtime.load(path, run_id=run_id, behaviors=[])
-    blob = _canonical_state_blob(rt.graph)
-    digest = state_hash_of(blob)
-    counters = rt.graph.ids  # snapshot carries the id counters (see load)
-    covered = len(rt.graph.events)
-    last_id = rt.graph.events[-1].id if rt.graph.events else None
+    try:
+        blob = _canonical_state_blob(rt.graph)
+        digest = state_hash_of(blob)
+        counters = rt.graph.ids  # snapshot carries the id counters (see load)
+        covered = len(rt.graph.events)
+        last_id = rt.graph.events[-1].id if rt.graph.events else None
 
-    snapshot_event = rt.graph.emit(
-        Event(
-            id=rt.graph.ids.event(),
-            type="runtime.snapshot",
-            payload={
-                "state_hash": digest,
-                "covers_through": last_id,
-                "events_covered": covered,
-                "id_counters": {
-                    "object": counters._object_counter,  # noqa: SLF001
-                    "event": counters._event_counter,  # noqa: SLF001
-                    "relation": counters._relation_counter,  # noqa: SLF001
-                    "patch": counters._patch_counter,  # noqa: SLF001
-                    "frame": counters._frame_counter,  # noqa: SLF001
+        snapshot_event = rt.graph.emit(
+            Event(
+                id=rt.graph.ids.event(),
+                type="runtime.snapshot",
+                payload={
+                    "state_hash": digest,
+                    "covers_through": last_id,
+                    "events_covered": covered,
+                    "id_counters": {
+                        "object": counters._object_counter,  # noqa: SLF001
+                        "event": counters._event_counter,  # noqa: SLF001
+                        "relation": counters._relation_counter,  # noqa: SLF001
+                        "patch": counters._patch_counter,  # noqa: SLF001
+                        "frame": counters._frame_counter,  # noqa: SLF001
+                    },
                 },
-            },
-            actor="runtime",
-            frame_id=None,
-            caused_by=None,
-            timestamp=rt.graph.clock.now(),
+                actor="runtime",
+                frame_id=None,
+                caused_by=None,
+                timestamp=rt.graph.clock.now(),
+            )
         )
-    )
-    store = rt.graph.store
-    assert isinstance(store, SQLiteEventStore)
-    store.put_snapshot(digest, blob, created_at=_now_iso())
-    snapshot_seq = store._seq_of(snapshot_event.id)  # noqa: SLF001
-    store.archive_prefix(snapshot_seq, archived_at=_now_iso())
-    return snapshot_event.id
+        store = rt.graph.store
+        assert isinstance(store, SQLiteEventStore)
+        store.put_snapshot(digest, blob, created_at=_now_iso())
+        snapshot_seq = store._seq_of(snapshot_event.id)  # noqa: SLF001
+        store.archive_prefix(snapshot_seq, archived_at=_now_iso())
+        return snapshot_event.id
+    finally:
+        # Unlike retire() three lines below, this opens its own Runtime
+        # internally and never released it — a leaked connection per call,
+        # confirmed by direct read (silmari-agent-memory's observer-lease-
+        # and-store-compaction plan, Decision 9). Runtime.close() alone does
+        # not suffice: it documents "Stores and graph listeners are not
+        # closed" (runtime.py:717-724), so both close_sinks() and the
+        # store's own close() are required, mirroring retire()'s pattern.
+        rt.graph.close_sinks()
+        rt.graph.store.close()
 
 
 def retire(path: str, run_id: str) -> int:

@@ -68,6 +68,39 @@ def test_compact_preserves_state_and_stays_appendable(tmp_path):
     assert len({o.id for o in again.graph.all_objects()}) == 2
 
 
+def test_compact_closes_its_internal_runtime_and_store(tmp_path, monkeypatch):
+    """Confirmed defect (silmari-agent-memory's observer-lease-and-store-
+    compaction plan, Decision 9): `compact()` opened its own `Runtime.load()`
+    internally and never released it — no `close()`, no `with` block, no
+    equivalent to `retire()`'s own `try/finally: store.close()` three lines
+    below it in this file. `Runtime.close()` alone would not have sufficed
+    either: it documents "Stores and graph listeners are not closed"
+    (`runtime.py:717-724`).
+
+    Verified here by tracking `SQLiteEventStore.close()` invocations rather
+    than by fd/lock introspection, which is unreliable across platforms for
+    an idle (non-transacting) leaked WAL connection — a lock-based probe
+    would not reliably catch it, but the missing `close()` call itself is
+    directly observable.
+    """
+    path, rt = _seeded_runtime(tmp_path)
+    run_id = rt.run_id
+    del rt
+
+    closed = []
+    original_close = SQLiteEventStore.close
+
+    def _tracking_close(self):
+        closed.append(self)
+        return original_close(self)
+
+    monkeypatch.setattr(SQLiteEventStore, "close", _tracking_close)
+
+    compact(path, run_id)
+
+    assert len(closed) >= 1, "compact() never closed its internal store"
+
+
 def test_strict_replay_verifies_the_post_snapshot_suffix(tmp_path):
     path, rt = _seeded_runtime(tmp_path)
     run_id = rt.run_id
