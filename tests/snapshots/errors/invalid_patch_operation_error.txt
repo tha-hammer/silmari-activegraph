@@ -1,0 +1,15 @@
+InvalidPatchOperationError: patch op 'create' is not one of: replace, update
+
+What failed:
+  graph.propose_patch(op='create', ...) was called, but 'create' is not a valid patch operation. Valid operations are: replace, update.
+
+Why:
+  A patch is a targeted, version-checked mutation of an existing object's data — its taxonomy is 'update' or 'replace'. Creating or removing an object is handled by Graph.add_object/Graph.remove_object directly; those are already the first-class paths for creating and removing objects, so patches don't duplicate them.
+
+  See https://docs.activegraph.ai/concepts/failure-model for the patch-lifecycle invariants.
+
+How to fix:
+  Use op='update' or op='replace' for propose_patch/patch_object. To create or remove an object, call graph.add_object(...) or graph.remove_object(...) directly instead of proposing a patch.
+
+More:
+  https://docs.activegraph.ai/errors/invalid-patch-operation-error

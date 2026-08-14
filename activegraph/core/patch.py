@@ -14,20 +14,23 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 
-PATCH_OPS = {"create", "update", "replace", "remove"}
+PATCH_OPS = {"update", "replace"}
 
 
 @dataclass
 class Patch:
     """A proposed single-target mutation. CONTRACT #4 and #12.
 
-    ``op`` (``create | update | replace | remove``) targets exactly
-    one object; ``expected_version`` makes application an optimistic
-    concurrency check against the object's current version; ``status``
-    walks ``proposed -> applied`` or ``proposed -> rejected`` and an
-    object is never mutated except by an applied patch's event.
-    ``rationale`` and ``evidence`` carry the audit trail that approval
-    flows read.
+    ``op`` (``update | replace``) targets exactly one object;
+    ``expected_version`` makes application an optimistic concurrency
+    check against the object's current version; ``status`` walks
+    ``proposed -> applied`` or ``proposed -> rejected`` and an object
+    is never mutated except by an applied patch's event. ``rationale``
+    and ``evidence`` carry the audit trail that approval flows read.
+
+    Object creation and removal are not patch ops — those are handled
+    directly by ``Graph.add_object``/``Graph.remove_object``, which are
+    already the first-class paths for those operations.
     """
 
     id: str

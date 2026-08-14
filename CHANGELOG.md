@@ -112,6 +112,15 @@ mkdocs snippet plugin — edit `CHANGELOG.md` at the repo root.
 
 ### Changed
 
+- **`propose_patch(op=...)` now validates `op`.** `PATCH_OPS` is narrowed from
+  `{"create", "update", "replace", "remove"}` to `{"update", "replace"}` —
+  object creation/removal were never implemented as patch ops and are already
+  handled by `Graph.add_object`/`Graph.remove_object` directly. Calling
+  `propose_patch` with `op="create"`, `op="remove"`, or any value outside the
+  narrowed set now raises `InvalidPatchOperationError` instead of silently
+  proposing a patch whose `applied` projection is a no-op. This is a
+  backward-incompatible tightening for any caller that was — silently and
+  ineffectively — passing `"create"`/`"remove"` before.
 - Runtime event scheduling now uses one purpose-specific event policy across
   live dispatch, pattern-only matching, resume, diff, and strict replay.
   `embedding.*` request/response records are newly treated like LLM/tool

@@ -33,7 +33,7 @@ from activegraph.core.clock import Clock
 from activegraph.core.event import Event
 from activegraph.core.graph_store import ChainMatch, GraphStore, InMemoryGraphStore
 from activegraph.core.ids import IDGen
-from activegraph.core.patch import Patch
+from activegraph.core.patch import PATCH_OPS, Patch
 
 if TYPE_CHECKING:
     from activegraph.observability.metrics import Metrics
@@ -866,6 +866,10 @@ class Graph:
     ) -> Patch:
         # Strip "object:" / "relation:" prefix if present (README sugar).
         normalized = target.split(":", 1)[1] if ":" in target else target
+        if op not in PATCH_OPS:
+            from activegraph.runtime.exec_errors import InvalidPatchOperationError
+
+            raise InvalidPatchOperationError(op=op, valid_ops=PATCH_OPS)
         obj = self._state.get_object(normalized)
         expected_version = obj.version if obj else 0
         clean = copy.deepcopy(

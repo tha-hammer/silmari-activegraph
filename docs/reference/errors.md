@@ -59,6 +59,7 @@ The seven category bases match the
 - [RejectPatchNotFoundError](errors/reject-patch-not-found-error.md)
 - [RuntimeContextRequiredError](errors/runtime-context-required-error.md)
 - [InvalidPatchLifecycleState](errors/invalid-patch-lifecycle-state.md)
+- [InvalidPatchOperationError](errors/invalid-patch-operation-error.md)
 
 ### ConfigurationError
 

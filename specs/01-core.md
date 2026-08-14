@@ -65,7 +65,8 @@ dependency.
 - `Object` — typed node in the projection: `id, type, data, version, provenance` — `activegraph/core/graph.py:48-73`
 - `Relation` — typed edge: `id, source, target, type, data, provenance`. Dangling endpoints are legal — `activegraph/core/graph.py:76-103`
 - `Patch` — proposed single-target mutation: `id, target, op, value, expected_version, proposed_by, rationale, evidence, status, rejection_reason, provenance` — `activegraph/core/patch.py:20-58`
-- `PATCH_OPS = {"create","update","replace","remove"}` — `activegraph/core/patch.py:17`
+- `PATCH_OPS = {"update","replace"}` — `activegraph/core/patch.py:17`. Object creation/removal are
+  handled by `Graph.add_object`/`Graph.remove_object` directly, not by patches.
 - `Graph` — the aggregate: log + projection + listeners + sinks + optional `EventStore` — `activegraph/core/graph.py:152-1021`
 - `Graph.emit(event) -> Event` — **the only live mutator** — `activegraph/core/graph.py:584-626`
 - `Graph._replay_event(event) -> None` — the replay mutator; silent (no persist, no sinks, no listeners) — `activegraph/core/graph.py:630-638`
@@ -547,8 +548,10 @@ patch.applied    ::= { patch: patch-dict , target , diff , [approved_by] }
 patch.rejected   ::= { patch_id , target , reason , current_version }
 patch-dict       ::= { id, target, op, value, expected_version, proposed_by,
                        rationale, evidence, status, rejection_reason, provenance }
-op               ::= "create" | "update" | "replace" | "remove"
-                     (* projector implements ONLY "update" and "replace" *)
+op               ::= "update" | "replace"
+                     (* propose_patch raises InvalidPatchOperationError for
+                        anything else; object create/remove are Graph.add_object/
+                        Graph.remove_object, not patch ops *)
 status           ::= "proposed" | "applied" | "rejected"
 diff             ::= { field: { old , new } }   (* only fields that actually change *)
 provenance       ::= { created_by, caused_by_event, frame_id, timestamp,
@@ -650,16 +653,16 @@ sequenceDiagram
 
 ## Open questions
 
-1. **`PATCH_OPS` declares four ops; the projector implements two.** `activegraph/core/patch.py:17`
-   defines `{create, update, replace, remove}` and `Patch.op`'s docstring repeats all four
-   (`activegraph/core/patch.py:24-25`), but `apply_event`'s `patch.applied` branch only handles
-   `"update"` and `"replace"` (`activegraph/core/graph.py:1085-1096`). A `create` or `remove`
-   patch applies successfully — the patch is stored, `obj.version += 1` fires — but the object's
-   data is unchanged. Either dead constants or a silent no-op bug.
+1. **Resolved — `PATCH_OPS` narrowed to match the ops the projector actually implements.**
+   `activegraph/core/patch.py:17` now defines `PATCH_OPS = {"update", "replace"}` and `Patch.op`'s
+   docstring matches. Object creation/removal are `Graph.add_object`/`Graph.remove_object`'s job,
+   not a patch taxonomy entry — those were never implemented as patch ops and would duplicate the
+   existing dedicated paths.
 
-2. **`PATCH_OPS` is unreferenced.** Repo-wide Python search finds it only at its definition;
-   `propose_patch` accepts any `op` string without validation
-   (`activegraph/core/graph.py:853-903`).
+2. **Resolved — `propose_patch` validates `op` against `PATCH_OPS`.** `propose_patch`
+   (`activegraph/core/graph.py:853-903`) now raises `InvalidPatchOperationError` for any `op`
+   outside `{"update", "replace"}`, before any patch/event construction — a rejected op has zero
+   side effects.
 
 3. **`IDGen` is documented not-thread-safe, but `Graph` is explicitly hardened for concurrent
    emitters.** `activegraph/core/ids.py:42` says "Not thread-safe (single-threaded loop)", while
