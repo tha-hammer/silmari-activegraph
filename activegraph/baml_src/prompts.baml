@@ -3,12 +3,9 @@
 /// Never dialed over the network -- render_question_generator_prompt below
 /// only exercises BAML's offline render_prompt(), so this client's
 /// model/base_url are placeholders, not live credentials.
-client<llm> PromptPreviewClient {
-  provider anthropic
-  options {
-    model "claude-sonnet-4-5"
-  }
-}
+client PromptPreviewClient = anthropic.AnthropicClient.new(
+  model = "claude-sonnet-4-5",
+);
 
 function question_generator_prompt(view_block: string, event_block: string, instruction: string) -> string {
   client: PromptPreviewClient

@@ -258,8 +258,42 @@ def _translate_baml_error(baml_exc: Any) -> LLMBehaviorError:
     wrapper = baml_exc if isinstance(baml_exc, BamlError) else None
     value = wrapper.value if wrapper is not None else baml_exc
     variant_name = type(value).__name__
-    if wrapper is not None and wrapper.class_name:
-        variant_name = wrapper.class_name.rsplit(".", 1)[-1]
+    qualified_name = wrapper.class_name if wrapper is not None and wrapper.class_name else None
+    if qualified_name:
+        variant_name = qualified_name.rsplit(".", 1)[-1]
+
+    # BAML 0.16's ai.errors.* union (Failure) surfaces real HTTP/parse
+    # failures as typed values with dedicated fields (provider/status_code/
+    # detail/raw_output/...), not a message string -- unlike the older
+    # generic baml_errors.* SDK taxonomy this function otherwise targets, so
+    # it needs its own extraction, checked first (its typed fields are
+    # authoritative; no need for the string/regex heuristics below).
+    if qualified_name and qualified_name.startswith("ai.errors.") and isinstance(value, Mapping):
+        ai_message = str(
+            value.get("detail") or value.get("raw_output") or value.get("reason") or value
+        )
+        ai_status = value.get("status_code")
+        if variant_name == "RateLimited":
+            reason = "llm.rate_limited"
+        elif variant_name == "InvalidRequest":
+            reason = "llm.auth_error" if ai_status in (401, 403) else "llm.request_error"
+        elif variant_name == "ParseFailed":
+            reason = "llm.parse_error"
+        elif variant_name == "NetworkFailure":
+            reason = "llm.network_error"
+        elif variant_name in {"Refused", "StepBudgetExceeded", "ToolFailedError", "StreamingUnsupported"}:
+            reason = "llm.request_error"
+        else:
+            reason = "llm.network_error"
+        payload_extras: dict[str, Any] = {
+            "exception_type": variant_name,
+            "message": ai_message,
+        }
+        if isinstance(ai_status, int):
+            payload_extras["status_code"] = ai_status
+        if wrapper is not None and wrapper.baml_trace:
+            payload_extras["baml_trace"] = list(wrapper.baml_trace)
+        return LLMBehaviorError(reason, ai_message, payload_extras=payload_extras)
 
     if isinstance(value, Mapping):
         message = str(value.get("message", value))
