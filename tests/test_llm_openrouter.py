@@ -900,10 +900,11 @@ def test_openrouter_packaging_preserves_baml_claude_and_test_dependency_contract
     extras = _optional_dependencies()
     baml_block = """# Runtime bridge for activegraph/baml_src's generated Python client
 # (activegraph.baml_client, output_type = \"python/pydantic\" in
-# activegraph/baml.toml). Not yet consumed by any LLMProvider — kept
-# out of [all]/[dev] like falkordb, so opting in is explicit until the
-# llm/ integration lands.
-baml = [\"baml_bridge\"]"""
+# activegraph/baml.toml). Backs BamlLLMProvider (activegraph/llm/) as
+# of the llm/ integration landing (TDD BAML LLMProvider plan, Behavior
+# 0) — folded into [dev]/[all] below, same as the other shipped
+# providers' SDKs, rather than kept opt-in like falkordb.
+baml = [\"baml_bridge\", \"tiktoken>=0.7\"]"""
     claude_dependencies = [
         "claude-agent-sdk==0.2.135",
         "anyio>=4,<5",
@@ -922,7 +923,9 @@ baml = [\"baml_bridge\"]"""
         "anyio>=4,<5",
         "sniffio>=1,<2",
         "trio>=0.25,<1",
-        "hypothesis>=6",
+        "baml_bridge",
+        "tiktoken>=0.7",
+        "hypothesis>=6.100",
         "mypy>=1.10",
     ]
     claude_marker = (
@@ -933,7 +936,7 @@ baml = [\"baml_bridge\"]"""
     )
 
     assert baml_block in source
-    assert extras["baml"] == ["baml_bridge"]
+    assert extras["baml"] == ["baml_bridge", "tiktoken>=0.7"]
     assert extras["claude-code"] == claude_dependencies
     assert extras["dev"] == expected_dev_dependencies
     for aggregate in ("llm", "all"):

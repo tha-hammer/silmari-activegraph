@@ -33,16 +33,23 @@ def test_openrouter_live_build_request_targets_stable_free_router(
     monkeypatch.setenv("OPENROUTER_FREE_MODEL", selected_model)
     from activegraph.baml_client import baml_sdk
 
-    request = baml_sdk.complete_openrouter_live__build_request(
+    # complete_openrouter_live's client is a custom ai.Client
+    # (OpenAiCompatClient, activegraph/baml_src/clients.baml) rather than a
+    # BAML builtin -- BAML only auto-generates the `<fn>__build_request`
+    # introspection helper for its own builtin client types, not for
+    # functions using a custom client, so this calls the purpose-built
+    # `complete_openrouter_live__test_build_request` debug function instead,
+    # which mirrors the same model/credential/URL resolution without making
+    # a live call.
+    request = baml_sdk.complete_openrouter_live__test_build_request(
         system="Say hi.",
         messages_text="[]",
-        timeout_ms=1_000,
     )
     payload = json.loads(request["body"])
 
     assert request["method"] == "POST"
     assert request["url"] == "https://openrouter.ai/api/v1/chat/completions"
-    assert request["headers"]["authorization"] == "Bearer test-key"
+    assert request["headers"]["Authorization"] == "Bearer test-key"
     assert payload["model"] == selected_model
 
 
