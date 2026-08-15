@@ -69,6 +69,21 @@ jobs:
       - name: Install falkordb-embedded (3.12+ only)
         if: matrix.python-version != '3.11'
         run: pip install -e ".[falkordb-embedded]"
+      # BamlLLMProvider (activegraph/llm/baml_provider.py) is backed by a
+      # generated client (activegraph/baml_client/baml_sdk/) that does not
+      # exist in a fresh checkout -- tests/test_baml_*.py fail at collection
+      # (ImportError) without it. `[dev]` above installs the Python runtime
+      # bridge (baml_bridge); the separate `baml` CLI (generate/check/
+      # describe) is distributed outside pip, per .claude/skills/baml-core/
+      # SKILL.md's documented `brew install baml`.
+      - name: Install baml CLI (Homebrew)
+        uses: Homebrew/actions/setup-homebrew@master
+      - name: Generate BAML client
+        working-directory: activegraph
+        run: |
+          brew install baml
+          baml toolchain use canary
+          baml generate
       - name: Run pytest
         run: pytest -m "not slow" -q
 

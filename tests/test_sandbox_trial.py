@@ -9,7 +9,10 @@ run is byte-untouched no matter what the candidate does.
 from __future__ import annotations
 
 import functools
+import json
 import os
+import subprocess
+import sys
 
 import pytest
 
@@ -820,11 +823,36 @@ from activegraph.sandbox import _child  # noqa: E402
 
 
 def test_rlimit_as_applies_cleanly_on_linux():
-    # Linux shape: a settable RLIMIT_AS applies with no degradation.
-    warnings = _child._apply_rlimits(
-        {"max_rss_bytes": 1024 * 2**20, "cpu_seconds": 60}
+    # Linux shape: a settable RLIMIT_AS applies with no degradation. A hard
+    # resource limit is irreversible in-process, so exercise the real syscall
+    # in a disposable interpreter. This is essential once another test has
+    # initialized a native runtime with >1 GiB of virtual mappings (BAML is one
+    # such runtime): lowering pytest's own hard RLIMIT_AS would make unrelated
+    # later allocations fail as MemoryError / SQLite "disk I/O error".
+    parent_limits = {
+        resource.RLIMIT_AS: resource.getrlimit(resource.RLIMIT_AS),
+        resource.RLIMIT_CPU: resource.getrlimit(resource.RLIMIT_CPU),
+    }
+    code = """
+import json
+from activegraph.sandbox import _child
+print(json.dumps(_child._apply_rlimits(
+    {"max_rss_bytes": 1024 * 2**20, "cpu_seconds": 60}
+)))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
     )
-    assert warnings == []
+    assert json.loads(completed.stdout) == []
+    assert resource.getrlimit(resource.RLIMIT_AS) == parent_limits[
+        resource.RLIMIT_AS
+    ]
+    assert resource.getrlimit(resource.RLIMIT_CPU) == parent_limits[
+        resource.RLIMIT_CPU
+    ]
 
 
 def test_rlimit_as_rejection_degrades_not_crashes(monkeypatch):
@@ -832,12 +860,12 @@ def test_rlimit_as_rejection_degrades_not_crashes(monkeypatch):
     # exactly this ValueError. The child must NOT crash and must NOT
     # silently skip — it degrades with a loud, announced warning. This
     # is the regression guard for the macOS rotation-1 crash.
-    real = resource.setrlimit
+    applied = []
 
     def darwin(which, pair):
         if which == resource.RLIMIT_AS:
             raise ValueError("current limit exceeds maximum limit")
-        return real(which, pair)
+        applied.append((which, pair))
 
     monkeypatch.setattr(resource, "setrlimit", darwin)
     warnings = _child._apply_rlimits(
@@ -849,6 +877,7 @@ def test_rlimit_as_rejection_degrades_not_crashes(monkeypatch):
     # The CPU cap (which Darwin DOES accept) still applied — only the
     # unsupported net degraded.
     assert "RLIMIT_CPU" not in warnings[0]
+    assert any(which == resource.RLIMIT_CPU for which, _ in applied)
 
 
 def test_rlimit_never_raises_the_hard_limit(monkeypatch):

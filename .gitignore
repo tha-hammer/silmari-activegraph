@@ -25,8 +25,12 @@ site/
 .beads/proxieddb/
 
 # BAML-generated client — regenerate with `baml generate` (run from
-# activegraph/, driven by activegraph/baml.toml + baml_src/).
-activegraph/baml_client/
+# activegraph/, driven by activegraph/baml.toml + baml_src/). Only the
+# generated baml_sdk/ subtree is ignored: activegraph/baml_client/__init__.py
+# is a real, committed re-export that must survive regeneration (Behavior 1,
+# TDD BAML LLMProvider plan) -- a directory-level ignore here would silently
+# drop it from git too, not just from regeneration.
+activegraph/baml_client/baml_sdk/
 
 # Local secrets — never commit API keys.
 .env

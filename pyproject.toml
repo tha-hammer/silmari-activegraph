@@ -51,10 +51,11 @@ openai = ["openai>=1.55.3", "tiktoken>=0.7", "pydantic>=2"]
 openrouter = ["openai>=1.55.3", "tiktoken>=0.7", "pydantic>=2"]
 # Runtime bridge for activegraph/baml_src's generated Python client
 # (activegraph.baml_client, output_type = "python/pydantic" in
-# activegraph/baml.toml). Not yet consumed by any LLMProvider — kept
-# out of [all]/[dev] like falkordb, so opting in is explicit until the
-# llm/ integration lands.
-baml = ["baml_bridge"]
+# activegraph/baml.toml). Backs BamlLLMProvider (activegraph/llm/) as
+# of the llm/ integration landing (TDD BAML LLMProvider plan, Behavior
+# 0) — folded into [dev]/[all] below, same as the other shipped
+# providers' SDKs, rather than kept opt-in like falkordb.
+baml = ["baml_bridge", "tiktoken>=0.7"]
 # ClaudeCodeProvider (activegraph/llm/claude_code.py): bills LLM calls
 # against the caller's Claude Max/Pro/Team/Enterprise subscription via
 # the `claude` CLI subprocess instead of ANTHROPIC_API_KEY metered
@@ -94,6 +95,7 @@ all = [
     "prometheus_client>=0.20",
     "opentelemetry-api>=1.25",
     "opentelemetry-sdk>=1.25",
+    "baml_bridge",
 ]
 dev = [
     "build>=1.2",
@@ -124,11 +126,15 @@ dev = [
     # based (works for either backend), not asyncio.get_running_loop()
     # detection that only catches one of the two.
     "trio>=0.25,<1",
+    "baml_bridge",
+    "tiktoken>=0.7",
     # Property-based tests for the canonical-transcript identity
-    # property and the tool-name sanitize/qualify/restore round trip —
-    # the input-domain-rich, purely functional new pieces of logic
-    # ClaudeCodeProvider adds.
-    "hypothesis>=6",
+    # property and the tool-name sanitize/qualify/restore round trip
+    # (ClaudeCodeProvider), and for BamlLLMProvider
+    # (native_schema_compatible round-trips, error-mapping coverage,
+    # token/cost monotonicity — TDD BAML LLMProvider plan, Behaviors
+    # 3/5/5b/7). Union of both plans' minimum versions.
+    "hypothesis>=6.100",
     "mypy>=1.10",
 ]
 # Doc-site build deps. The docs workflow installs from this extra so
@@ -200,6 +206,7 @@ markers = [
     "postgres: tests that require a running Postgres (skipped unless ACTIVEGRAPH_TEST_POSTGRES_URL is set)",
     "slow: long-running tests opt-in by name in CI (e.g. wheel-completeness gate; builds + installs into a fresh venv)",
     "claude_code_live: tests that spawn a real `claude` CLI subprocess against the caller's live subscription auth (skipped unless ACTIVEGRAPH_TEST_CLAUDE_CODE_LIVE is set; registering this marker alone does not skip — each test also carries an explicit skipif)",
+    "live_llm: tests that make a real network call to a live LLM vendor (skipped unless the relevant API key is set)",
 ]
 
 # ---------------------------------------------------------------------------

@@ -42,6 +42,7 @@ Public surface:
 """
 
 from activegraph.llm.anthropic import AnthropicProvider
+from activegraph.llm.baml_provider import BamlLLMProvider
 from activegraph.llm.cache import LLMCache
 from activegraph.llm.claude_code import ClaudeCodeProvider
 from activegraph.llm.embedding import EmbeddingProvider, HashEmbeddingProvider
@@ -71,6 +72,7 @@ from activegraph.llm.wire import sanitize_tool_name
 __all__ = [
     "AnthropicProvider",
     "AssembledPrompt",
+    "BamlLLMProvider",
     "ClaudeCodeProvider",
     "EmbeddingCache",
     "EmbeddingProvider",
