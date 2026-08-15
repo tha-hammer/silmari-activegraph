@@ -82,6 +82,7 @@ jobs:
         working-directory: activegraph
         run: |
           brew install baml
+          baml toolchain use canary
           baml generate
       - name: Run pytest
         run: pytest -m "not slow" -q
